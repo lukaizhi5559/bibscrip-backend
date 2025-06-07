@@ -28,7 +28,15 @@ const redis = require('redis');
 
 // Initialize Redis client with retry strategy
 const redisClient = redis.createClient({
-  url: process.env.REDIS_URL || 'redis://localhost:6379',
+  // Use separate host and port if available, otherwise fall back to URL
+  ...(process.env.REDIS_HOST ? {
+    socket: {
+      host: process.env.REDIS_HOST,
+      port: parseInt(process.env.REDIS_PORT || '6379', 10)
+    }
+  } : {
+    url: process.env.REDIS_URL || 'redis://localhost:6379'
+  }),
   socket: {
     reconnectStrategy: (retries: number) => {
       // Exponential backoff with max delay of 10 seconds

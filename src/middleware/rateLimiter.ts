@@ -142,7 +142,9 @@ export const quotaChecker = () => {
       next();
     } catch (error) {
       // If quota checking fails, allow the request (fail open for availability)
-      logger.error('Quota checking error', { error, ip });
+      logger.error('Quota checking error', { error: error instanceof Error ? error.message : 'Unknown error', ip });
+      
+      // Always allow the request to proceed when Redis is unavailable
       next();
     }
   };
@@ -225,7 +227,7 @@ export const requestLogger = () => {
       });
       
       // Track in analytics
-      (analytics as any).trackAPIRequest({
+      (analytics as any).trackAIRequest({
         method: req.method,
         path: req.path,
         statusCode: res.statusCode,

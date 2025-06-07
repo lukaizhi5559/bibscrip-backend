@@ -10,6 +10,7 @@ import { makeRequest, AIErrorResponse } from '../utils/request-manager';
 import { cacheManager, createCacheKey } from '../utils/cache-manager';
 import { analytics } from '../utils/analytics';
 import { logger } from '../utils/logger';
+import { semanticCache } from '../services/semanticCacheService';
 
 // Import RAG and scaling services
 import { ragService } from '../services/ragService';
@@ -192,6 +193,9 @@ router.post('/', [
           const aiResponse = response as AIResponseObject;
           await ragService.storeSuccessfulResponse(question, aiResponse.text);
           
+          // Store in semantic cache for future similar questions
+          await semanticCache.store(question, aiResponse);
+          
           aiResult = {
             data: aiResponse,
             provider: aiResponse.provider || 'unknown',
@@ -205,6 +209,9 @@ router.post('/', [
           const responseText = typeof response === 'string' ? response : JSON.stringify(response);
           await ragService.storeSuccessfulResponse(question, responseText);
           
+          // Store in semantic cache as well
+          await semanticCache.store(question, { text: responseText, provider: 'unknown' });
+          
           aiResult = {
             data: responseText,
             provider: 'unknown',
@@ -215,46 +222,91 @@ router.post('/', [
           };
         }
       } else {
-        // Use cache if available
-        aiResult = await makeRequest(
-          async () => {
-            try {
-              // Create augmented prompt with context
-              const augmentedPrompt = ragService.createAugmentedPrompt(question, ragResult.contexts);
-              
-              // Get response from AI model with context
-              const response = await getAIResponse(augmentedPrompt);
-              
-              // Store successful response for future retrieval
-              if (typeof response === 'object' && 'text' in response) {
-                const aiResponse = response as AIResponseObject;
-                await ragService.storeSuccessfulResponse(question, aiResponse.text);
-                return aiResponse;
-              } else {
-                // Handle string response format
-                const responseText = typeof response === 'string' ? response : JSON.stringify(response);
-                await ragService.storeSuccessfulResponse(question, responseText);
-                return responseText;
+        // First check semantic cache for similar questions
+        const semanticCacheResult = await semanticCache.find(question);
+        
+        if (semanticCacheResult) {
+          // Found a semantic match!
+          const { cachedResponse, similarity, exactMatch } = semanticCacheResult;
+          
+          // Log the semantic cache hit
+          analytics.trackCacheOperation({
+            operation: 'hit', // Use standard hit operation
+            key: cacheKey
+          });
+          
+          // Log additional metrics for semantic matching
+          logger.info(`Semantic cache ${exactMatch ? 'exact' : 'similar'} match: ${similarity.toFixed(3)} for "${question.substring(0, 50)}..."`, {
+            service: 'bibscrip-backend',
+            component: 'semanticCache',
+            operation: exactMatch ? 'hit_exact' : 'hit_semantic',
+            similarity: similarity
+          });
+          
+          // Return the cached response with metadata
+          aiResult = {
+            data: cachedResponse.answer,
+            provider: cachedResponse.answer.provider || 'unknown',
+            fromCache: true,
+            semanticMatch: !exactMatch,
+            similarity: similarity,
+            originalQuestion: exactMatch ? null : cachedResponse.question,
+            tokenUsage: (typeof cachedResponse.answer === 'object' && cachedResponse.answer.tokenUsage) 
+              ? cachedResponse.answer.tokenUsage 
+              : { total: 0 },
+            latencyMs: performance.now() - requestStartTime,
+            cacheAge: Date.now() - cachedResponse.timestamp
+          };
+        } else {
+          // Fallback to standard request if no semantic match
+          aiResult = await makeRequest(
+            async () => {
+              try {
+                // Create augmented prompt with context
+                const augmentedPrompt = ragService.createAugmentedPrompt(question, ragResult.contexts);
+                
+                // Get response from AI model with context
+                const response = await getAIResponse(augmentedPrompt);
+                
+                // Store successful response for future retrieval
+                if (typeof response === 'object' && 'text' in response) {
+                  const aiResponse = response as AIResponseObject;
+                  await ragService.storeSuccessfulResponse(question, aiResponse.text);
+                  
+                  // Also store in semantic cache
+                  await semanticCache.store(question, aiResponse);
+                  
+                  return aiResponse;
+                } else {
+                  // Handle string response format
+                  const responseText = typeof response === 'string' ? response : JSON.stringify(response);
+                  await ragService.storeSuccessfulResponse(question, responseText);
+                  
+                  // Also store in semantic cache
+                  await semanticCache.store(question, { text: responseText, provider: 'unknown' });
+                  
+                  return responseText;
+                }
+              } catch (error) {
+                // Return error response
+                return {
+                  error: 'Failed to get AI response',
+                  details: error instanceof Error ? error.message : String(error)
+                };
               }
-            } catch (error) {
-              // Return error response
-              return {
-                error: 'Failed to get AI response',
-                details: error instanceof Error ? error.message : String(error)
-              };
+            },
+            {
+              cacheKey,
+              forceRefresh: false,
+              onCacheMiss: () => {
+                analytics.trackCacheOperation({
+                  operation: 'miss',
+                  key: cacheKey
+                });
+              }
             }
-          },
-          {
-            cacheKey,
-            forceRefresh: false,
-            onCacheMiss: () => {
-              analytics.trackCacheOperation({
-                operation: 'miss',
-                key: cacheKey
-              });
-            }
-          }
-        );
+          );
+        }
       }
       
       // Extract verse references from both question and response
