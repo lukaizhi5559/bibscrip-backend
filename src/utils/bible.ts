@@ -27,12 +27,12 @@ export interface TranslationInfo {
 /**
  * Get a Bible verse from Scripture API Bible
  * @param reference The verse reference (e.g., "John 3:16")
- * @param translation The Bible translation to use (e.g., "NIV")
+ * @param translation The Bible translation to use (e.g., "ESV")
  * @returns The Bible verse data or null if not found
  */
 export async function getBibleVerse(
   reference: string, 
-  translation: string = 'NIV'
+  translation: string = 'ESV'
 ): Promise<BibleVerse | null> {
   try {
     // Step 0: Check cache first
@@ -69,10 +69,21 @@ export async function getBibleVerse(
     
     if (isRange) {
       // For a range or multiple verses, use the passages endpoint
-      apiUrl = `https://api.scripture.api.bible/v1/bibles/${bibleId}/passages/${encodeURIComponent(parsedReference)}?content-type=text&include-notes=false&include-titles=false&include-chapter-numbers=false&include-verse-numbers=true&include-verse-spans=false`;
+      apiUrl = `https://api.scripture.api.bible/v1/bibles/${bibleId}/passages/${encodeURIComponent(parsedReference)}?content-type=text&include-notes=false&include-titles=true&include-chapter-numbers=true&include-verse-numbers=true&include-verse-spans=false`;
     } else {
-      // For a single verse, use the verses endpoint
-      apiUrl = `https://api.scripture.api.bible/v1/bibles/${bibleId}/search?query=${encodeURIComponent(parsedReference)}&sort=relevance`;
+      // For a single verse, use the verses endpoint directly instead of search
+      // Parse the reference to get book, chapter, verse
+      const parts = parsedReference.split(' ');
+      const book = parts[0];
+      const chapterVerse = parts.length > 1 ? parts[1].split(':') : ['1', '1'];
+      const chapter = chapterVerse[0];
+      const verse = chapterVerse[1];
+      
+      // Normalize the book name
+      const normalizedBook = normalizeBookName(book);
+      
+      // Use direct verse endpoint instead of search
+      apiUrl = `https://api.scripture.api.bible/v1/bibles/${bibleId}/verses/${normalizedBook}.${chapter}.${verse}?content-type=text&include-notes=false&include-titles=true&include-chapter-numbers=true&include-verse-numbers=true&include-verse-spans=false`;
     }
     
     // Increment the API counter before making the request
@@ -124,17 +135,18 @@ export async function getBibleVerse(
         };
       }
     } else {
-      // Handle search response
-      if (data?.data?.verses && data.data.verses.length > 0) {
-        const firstVerse = data.data.verses[0];
+      // Handle direct verse response (new format)
+      if (data?.data) {
+        const verseData = data.data;
         verse = {
-          reference: firstVerse.reference,
-          text: firstVerse.text,
+          reference: verseData.reference || reference,
+          text: verseData.content || '[Verse content not available]',
           translation,
-          translationName: data.data.bibleId || translation,
-          book: firstVerse.bookId,
-          chapter: parseInt(firstVerse.chapterId, 10),
-          verse: firstVerse.verseId
+          translationName: verseData.bibleId || translation,
+          book: verseData.bookId || reference.split(' ')[0],
+          chapter: parseInt(verseData.chapterId || '1', 10),
+          verse: verseData.id?.split('.')[2] || reference.split(':')[1] || '1',
+          copyright: verseData.copyright || ''
         };
       }
     }
@@ -165,7 +177,7 @@ export async function getBibleVerse(
  */
 export async function getBiblePassage(
   reference: string,
-  translation: string = 'NIV'
+  translation: string = 'ESV'
 ): Promise<BibleVerse | null> {
   try {
     // This is a specialized case of getBibleVerse that's optimized for passages
@@ -189,7 +201,7 @@ export async function getBiblePassage(
 export async function getBibleChapter(
   book: string,
   chapter: number,
-  translation: string = 'NIV'
+  translation: string = 'ESV'
 ): Promise<BibleVerse | null> {
   try {
     // Format the reference for cache lookup
@@ -303,7 +315,7 @@ export async function getBibleChapters(
   book: string,
   startChapter: number,
   endChapter: number,
-  translation: string = 'NIV'
+  translation: string = 'ESV'
 ): Promise<BibleVerse | null> {
   if (startChapter > endChapter) {
     logger.error('Invalid chapter range', { startChapter, endChapter });
@@ -549,7 +561,6 @@ function getBibleId(translation: string): string {
 
   const translationMap: Record<string, string> = {
     // English translations
-    'NIV': '78a9f6124f344018-01', // New International Version
     'ESV': '9879dbb7cfe39e4d-02', // English Standard Version (updated)
     'KJV': 'de4e12af7f28f599-01', // King James Version
     'NKJV': '04da588535d2c98c-01', // New King James Version
@@ -558,6 +569,7 @@ function getBibleId(translation: string): string {
     'AMP': '08a9b187e4a5322b-01', // Amplified Bible (added)
     'CSB': '5efad392d777ddfe-01', // Christian Standard Bible (added)
     'MSG': '65eec8e0b60e656b-02', // The Message (added)
+    'NIV': '78a9f6124f344018-01', // New International Version
     
     // Spanish translations
     'RVR': '592420522e16049f-01', // Reina-Valera 1960
@@ -598,7 +610,7 @@ function getBibleId(translation: string): string {
   };
   
   // Store result in the cache for next time
-  const result = translationMap[translation.toUpperCase()] || translationMap['NIV'];
+  const result = translationMap[translation.toUpperCase()] || translationMap['ESV'];
   bibleIdCache[translation.toUpperCase()] = result;
   
   return result;
@@ -608,6 +620,70 @@ function getBibleId(translation: string): string {
  * Fetch available Bible translations from the API
  * This can be used to verify and update Bible IDs
  */
+/**
+ * Utility function to test the Bible API connection and verify the API key
+ * This can be used for troubleshooting API issues
+ */
+export async function testBibleApiConnection(): Promise<{success: boolean, message: string, statusCode?: number}> {
+  try {
+    const apiKey = process.env.BIBLE_API_KEY;
+    
+    if (!apiKey) {
+      return { success: false, message: 'Bible API key not configured in environment variables' };
+    }
+    
+    // Log the API key for debugging (truncated for security)
+    const truncatedKey = apiKey.substring(0, 8) + '...' + apiKey.substring(apiKey.length - 4);
+    logger.debug(`Testing Bible API connection with API key: ${truncatedKey}`);
+    
+    // Make a simple request to check auth status
+    const response = await fetch('https://api.scripture.api.bible/v1/bibles', {
+      headers: {
+        'api-key': apiKey
+      }
+    });
+    
+    // Log the response status and headers for debugging
+    logger.debug(`Bible API test response status: ${response.status} ${response.statusText}`);
+    
+    const responseHeaders: Record<string, string> = {};
+    response.headers.forEach((value, name) => {
+      responseHeaders[name] = value;
+    });
+    logger.debug('Bible API response headers:', responseHeaders);
+    
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        return { 
+          success: false, 
+          message: `Authentication failed. Your API key may be invalid or expired (Status: ${response.status})`, 
+          statusCode: response.status 
+        };
+      } else {
+        return { 
+          success: false, 
+          message: `API error: ${response.status} ${response.statusText}`, 
+          statusCode: response.status 
+        };
+      }
+    }
+    
+    // If we got here, the API key is working
+    return { 
+      success: true, 
+      message: 'Bible API connection successful', 
+      statusCode: response.status 
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    logger.error('Error testing Bible API connection:', { errorMessage });
+    return { 
+      success: false, 
+      message: `Connection error: ${errorMessage}` 
+    };
+  }
+}
+
 export async function fetchBibleIds(): Promise<void> {
   try {
     const apiKey = process.env.BIBLE_API_KEY;

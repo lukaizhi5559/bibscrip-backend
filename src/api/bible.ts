@@ -12,7 +12,8 @@ import {
   getBiblePassage, 
   getBibleChapter,
   getBibleChapters,
-  getAvailableTranslations 
+  getAvailableTranslations,
+  testBibleApiConnection 
 } from '../utils/bible';
 import { logger } from '../utils/logger';
 import { BibleVerseCache } from '../services/bibleVerseCache';
@@ -37,7 +38,7 @@ const router = Router();
  *         required: false
  *         schema:
  *           type: string
- *         description: The Bible translation abbreviation to use (default NIV)
+ *         description: The Bible translation abbreviation to use (default ESV)
  *     responses:
  *       200:
  *         description: Verse data successfully retrieved
@@ -53,7 +54,7 @@ const router = Router();
  *         description: Server error
  */
 router.get('/verse', expressAsyncHandler(async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-  const { reference, translation = 'NIV' } = req.query;
+  const { reference, translation = 'ESV' } = req.query;
   
   if (!reference) {
     res.status(400).json({ error: 'Reference parameter is required' });
@@ -97,7 +98,7 @@ router.get('/verse', expressAsyncHandler(async (req: Request, res: Response, nex
  *         required: false
  *         schema:
  *           type: string
- *         description: The Bible translation abbreviation to use (default NIV)
+ *         description: The Bible translation abbreviation to use (default ESV)
  *     responses:
  *       200:
  *         description: Passage data successfully retrieved
@@ -124,7 +125,7 @@ router.get('/verse', expressAsyncHandler(async (req: Request, res: Response, nex
  *         description: Server error
  */
 router.get('/passage', expressAsyncHandler(async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-  const { reference, translation = 'NIV' } = req.query;
+  const { reference, translation = 'ESV' } = req.query;
   
   if (!reference) {
     res.status(400).json({ error: 'Reference parameter is required' });
@@ -174,7 +175,7 @@ router.get('/passage', expressAsyncHandler(async (req: Request, res: Response, n
  *         required: false
  *         schema:
  *           type: string
- *         description: The Bible translation abbreviation to use (default NIV)
+ *         description: The Bible translation abbreviation to use (default ESV)
  *     responses:
  *       200:
  *         description: Chapter data successfully retrieved
@@ -188,7 +189,7 @@ router.get('/passage', expressAsyncHandler(async (req: Request, res: Response, n
  *                   example: "John 3"
  *                 translation:
  *                   type: string
- *                   example: "NIV"
+ *                   example: "ESV"
  *                 translationName:
  *                   type: string
  *                   example: "New International Version"
@@ -213,7 +214,7 @@ router.get('/passage', expressAsyncHandler(async (req: Request, res: Response, n
  */
 router.get('/chapter/:book/:chapter', expressAsyncHandler(async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   const { book, chapter } = req.params;
-  const { translation = 'NIV' } = req.query;
+  const { translation = 'ESV' } = req.query;
   
   if (!book || !chapter) {
     res.status(400).json({ error: 'Book and chapter parameters are required' });
@@ -246,12 +247,12 @@ router.get('/chapter/:book/:chapter', expressAsyncHandler(async (req: Request, r
  * @param {string} book - The book name (e.g., "Psalms")
  * @param {number} startChapter - The starting chapter number
  * @param {number} endChapter - The ending chapter number
- * @param {string} translation - The Bible translation to use (default: NIV)
+ * @param {string} translation - The Bible translation to use (default: ESV)
  * @returns {Object} The Bible chapters data
  */
 router.get('/chapters/:book/:startChapter/:endChapter', expressAsyncHandler(async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   const { book, startChapter, endChapter } = req.params;
-  const { translation = 'NIV' } = req.query;
+  const { translation = 'ESV' } = req.query;
   
   if (!book || !startChapter || !endChapter) {
     res.status(400).json({ error: 'Book, startChapter, and endChapter parameters are required' });
@@ -362,7 +363,7 @@ router.get('/translations', expressAsyncHandler(async (req: Request, res: Respon
  *                     properties:
  *                       abbreviation:
  *                         type: string
- *                         example: 'NIV'
+ *                         example: 'ESV'
  *                         description: Short form abbreviation of the translation
  *                       id:
  *                         type: string
@@ -446,6 +447,44 @@ router.get('/cache/stats', expressAsyncHandler(async (req: Request, res: Respons
       errorMessage: error instanceof Error ? error.message : String(error)
     });
     res.status(500).json({ error: 'Failed to retrieve cache statistics' });
+  }
+}));
+
+/**
+ * @route GET /api/bible/test-connection
+ * @description Test Bible API connection and API key validity
+ * @returns {Object} Connection test results
+ */
+router.get('/test-connection', expressAsyncHandler(async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const result = await testBibleApiConnection();
+    
+    if (result.success) {
+      res.json({
+        success: true,
+        message: result.message,
+        statusCode: result.statusCode
+      });
+    } else {
+      // Return a 200 status but with failure details in the body
+      // This makes it easier to diagnose problems on the frontend
+      res.json({
+        success: false,
+        message: result.message,
+        statusCode: result.statusCode,
+        troubleshooting: [
+          'Verify your API key is correct in the .env file',
+          'Check if the API key is active at https://scripture.api.bible/',
+          'Ensure proper header formatting with "api-key" as the header name',
+          'Try regenerating the API key in the API Bible dashboard'
+        ]
+      });
+    }
+  } catch (error) {
+    logger.error('Error testing Bible API connection:', { 
+      errorMessage: error instanceof Error ? error.message : String(error)
+    });
+    res.status(500).json({ error: 'Failed to test Bible API connection' });
   }
 }));
 

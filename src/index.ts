@@ -69,8 +69,8 @@ const swaggerOptions = {
           properties: {
             reference: { type: 'string', example: 'John 3:16' },
             text: { type: 'string', example: 'For God so loved the world...' },
-            translation: { type: 'string', example: 'NIV' },
-            translationName: { type: 'string', example: 'New International Version' },
+            translation: { type: 'string', example: 'ESV' },
+            translationName: { type: 'string', example: 'English Standard Version' },
             book: { type: 'string', example: 'John' },
             chapter: { type: 'number', example: 3 },
             verse: { type: 'number', example: 16 },
@@ -81,8 +81,8 @@ const swaggerOptions = {
           type: 'object',
           properties: {
             id: { type: 'string', example: '55212e3cf5d04d49-01' },
-            name: { type: 'string', example: 'New International Version' },
-            abbreviation: { type: 'string', example: 'NIV' },
+            name: { type: 'string', example: 'English Standard Version' },
+            abbreviation: { type: 'string', example: 'ESV' },
             language: { type: 'string', example: 'eng' },
             description: { type: 'string' },
           },

@@ -44,7 +44,7 @@ interface AIResultObject {
 }
 
 // Common Bible translation abbreviations
-const TRANSLATIONS = ['NIV', 'ESV', 'KJV', 'NKJV', 'NLT', 'NASB', 'NRSV', 'MSG', 'AMP', 'CSB', 'WEB'];
+const TRANSLATIONS = ['ESV', 'KJV', 'NKJV', 'NLT', 'NASB', 'NRSV', 'MSG', 'AMP', 'CSB', 'WEB', 'NIV'];
 
 /**
  * Extracts the preferred Bible translation from a question if specified
@@ -61,7 +61,7 @@ function extractTranslationPreference(question: string): string | undefined {
     return match[1].toUpperCase();
   }
   
-  // Check for phrases like "in the NIV translation" or "using NIV"
+  // Check for phrases like "in the ESV translation" or "using ESV"
   const phraseRegex = /\b(?:in|using|from|with)\s+(?:the\s+)?([A-Z]+)(?:\s+(?:translation|version|bible))?\b/i;
   const phraseMatch = question.match(phraseRegex);
   
