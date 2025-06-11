@@ -91,7 +91,18 @@ export async function getBibleVerse(
         translation,
         statusCode: response.status
       });
-      return null;
+      // Return a placeholder verse with error information instead of null
+      // This will allow the frontend to still display the AI response
+      return {
+        reference: reference,
+        text: `[Unable to retrieve verse due to API error: ${response.status}]`,
+        translation: translation,
+        translationName: translation,
+        book: reference.split(' ')[0],
+        chapter: parseInt(reference.split(' ')[1]?.split(':')[0] || '1', 10),
+        verse: reference.split(':')[1] || '1',
+        copyright: 'API Error'
+      };
     }
     
     const data = await response.json();
@@ -230,7 +241,18 @@ export async function getBibleChapter(
         translation,
         statusCode: response.status
       });
-      return null;
+      // Return a placeholder chapter with error information instead of null
+      // This will allow the frontend to still display the AI response
+      return {
+        reference: `${book} ${chapter}`,
+        text: `[Unable to retrieve chapter due to API error: ${response.status}]`,
+        translation: translation,
+        translationName: translation,
+        book: book,
+        chapter: chapter,
+        verse: '1-end',
+        copyright: 'API Error'
+      };
     }
     
     const data = await response.json();

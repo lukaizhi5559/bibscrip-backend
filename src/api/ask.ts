@@ -312,20 +312,85 @@ router.post('/', [
       // Extract verse references from both question and response
       const questionVerses = extractVerseReferences(question);
       
+      // Add detailed debugging for the AI result data structure
+      console.log('AI RESULT DATA STRUCTURE:', JSON.stringify(aiResult, null, 2));
+      
       // Check if the AI response is a string or an error object
-      let aiResponseText: string;
+      let aiResponseText: string = '';
+      
+      // Handle the various ways the AI response can be structured
       if (typeof aiResult.data === 'string') {
+        // Handle when data is directly a string
+        console.log('AI result is a string');
         aiResponseText = aiResult.data;
-      } else if (typeof aiResult.data === 'object' && aiResult.data && 'error' in aiResult.data) {
-        const errorResponse = aiResult.data as AIErrorResponse;
-        aiResponseText = errorResponse.error;
-      } else if (typeof aiResult.data === 'object' && aiResult.data && 'text' in aiResult.data) {
-        // Handle the response format from getAIResponse
-        const aiResponse = aiResult.data as AIResponseObject;
-        aiResponseText = aiResponse.text;
+      } else if (typeof aiResult.data === 'object' && aiResult.data) {
+        console.log('AI result is an object');
+        
+        if ('error' in aiResult.data) {
+          // Handle error response format
+          console.log('AI result contains error property');
+          const errorResponse = aiResult.data as AIErrorResponse;
+          aiResponseText = errorResponse.error;
+        } else if ('text' in aiResult.data) {
+          // Handle standard AI response object format
+          console.log('AI result contains text property');
+          const aiResponse = aiResult.data as AIResponseObject;
+          aiResponseText = aiResponse.text;
+        } else if (aiResult.fromCache) {
+          // Special handling for semantic cache results
+          console.log('AI result is from cache');
+          
+          // Log the exact structure to identify the correct path to extract text
+          console.log('CACHED RESPONSE STRUCTURE:', JSON.stringify(aiResult.data, null, 2));
+          
+          // Try to extract text from common patterns in cached responses
+          if (aiResult.data.answer && typeof aiResult.data.answer === 'string') {
+            // Handle when answer is directly a string
+            console.log('Found string answer in cache');
+            aiResponseText = aiResult.data.answer;
+          } else if (aiResult.data.answer && typeof aiResult.data.answer === 'object') {
+            console.log('Found object answer in cache');
+            if (aiResult.data.answer.text) {
+              console.log('Found text property in answer object');
+              aiResponseText = aiResult.data.answer.text;
+            } else if (typeof aiResult.data.answer === 'string') {
+              console.log('Answer is directly a string');
+              aiResponseText = aiResult.data.answer;
+            }
+            // If we still don't have text, try more patterns
+            if (!aiResponseText && aiResult.data.text) {
+              console.log('Found text property directly in data');
+              aiResponseText = aiResult.data.text;
+            }
+          } else {
+            // Fallback: Try other common patterns
+            console.log('Trying fallback extraction patterns');
+            if (aiResult.data.text) {
+              aiResponseText = aiResult.data.text;
+            } else if (aiResult.data.content) {
+              aiResponseText = aiResult.data.content;
+            } else if (aiResult.data.response) {
+              aiResponseText = aiResult.data.response;
+            }
+          }
+          
+          // If we still have no text, set a fallback message
+          if (!aiResponseText) {
+            console.error('Failed to extract AI text from cache:', JSON.stringify(aiResult.data));
+            aiResponseText = 'Error extracting response from cache';
+          }
+        } else {
+          // Unknown object format - log it for debugging
+          console.error('Unrecognized AI result format:', JSON.stringify(aiResult.data));
+          aiResponseText = 'Error processing your request';
+        }
       } else {
+        // Complete fallback if all else fails
+        console.error('AI result data is null or undefined');
         aiResponseText = 'Error processing your request';
       }
+      
+      console.log('FINAL AI RESPONSE TEXT:', aiResponseText);
       
       const aiResponseVerses = extractVerseReferences(aiResponseText);
       const verseRefsToFetch = Array.from(new Set([...questionVerses, ...aiResponseVerses]));
@@ -392,21 +457,76 @@ router.post('/', [
       // Complete the request to allow duplicates again
       completeRequest(ip, cacheKey);
       
-      // Return the enhanced response with context information
-      return res.json({
-        ai: aiResponseText,
-        verses: fetchedVerses,
-        // Include relevant context sources for transparency
-        context: ragResult.contexts.map(ctx => ({
-          source: ctx.source,
-          reference: ctx.reference,
-          relevanceScore: Math.round(ctx.score * 100) / 100
-        })),
+      // Check if we have a valid AI response text
+      if (!aiResponseText || aiResponseText.trim() === '') {
+        console.error('Empty AI response text detected before sending response - attempting fallback');
+        
+        // Fallback: If we have a data structure but couldn't extract text, use a default message
+        if (aiResult && aiResult.data) {
+          console.log('Using fallback response mechanism');
+          // Try one more approach to get something from the data
+          if (typeof aiResult.data === 'object' && aiResult.data !== null) {
+            // Convert the entire data object to a string
+            const dataString = JSON.stringify(aiResult.data);
+            aiResponseText = `Cached response available but could not be formatted properly. Raw data: ${dataString.substring(0, 500)}`;
+          } else {
+            aiResponseText = 'Response available but could not be properly formatted';
+          }
+        } else {
+          aiResponseText = 'No AI response available';
+        }
+      }
+      
+      // Log the final response structure
+      console.log('SENDING RESPONSE TO FRONTEND:', {
+        hasAiText: !!aiResponseText,
+        textLength: aiResponseText?.length || 0,
+        versesCount: fetchedVerses.length,
         provider: aiResult.provider,
-        fromCache: aiResult.fromCache,
-        complexity: complexity,
-        latencyMs: Math.round(performance.now() - requestStartTime)
+        fromCache: aiResult.fromCache
       });
+      
+      // DIRECT FIX: Extract just the essential text for the AI response
+      // This bypasses any potential serialization issues
+      let finalAiText = '';
+      
+      if (aiResponseText && aiResponseText.trim().length > 0) {
+        // Clean the text to avoid any issues
+        finalAiText = aiResponseText
+          .trim()
+          .replace(/\u0000/g, ''); // Remove null bytes that might cause JSON issues
+      } else {
+        finalAiText = 'No AI response available';
+      }
+      
+      // Log the final text for debugging
+      console.log(`FINAL AI TEXT (${finalAiText.length} chars): ${finalAiText.substring(0, 50)}...`);
+      
+      // Create a simplified response object
+      const responseObj = {
+        ai: finalAiText,
+        verses: fetchedVerses || [],
+        sources: (ragResult && ragResult.contexts) ? ragResult.contexts.map(ctx => ({
+          source: ctx.source,
+          reference: ctx.reference, 
+          score: Math.round(ctx.score * 100) / 100
+        })) : [],
+        latencyMs: Math.round(performance.now() - requestStartTime)
+      };
+      
+      // Set response headers to avoid any issues
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Cache-Control', 'no-cache');
+      
+      // Extra precaution - ensure no compression middleware interferes
+      res.setHeader('Content-Encoding', 'identity');
+      
+      // Convert to string first to ensure we see exactly what's being sent
+      const jsonString = JSON.stringify(responseObj);
+      console.log(`SENDING JSON STRING (${jsonString.length} chars)`);
+      
+      // Send without using express json middleware
+      return res.send(jsonString);
     } finally {
       // Ensure we clean up the request tracking even if there's an error
       completeRequest(ip, cacheKey);

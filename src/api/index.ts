@@ -1,21 +1,35 @@
 import { Router } from 'express';
 import fs from 'fs';
 import path from 'path';
-import vectorRoutes from './vector'; // Import vector routes explicitly
+import bibleRoutes from './bible';
+import askRoutes from './ask';
+import vectorRoutes from './vector';
+import cacheRoutes from './cache';
+// Import other route modules directly instead of using dynamic imports
 
 const router = Router();
 
 // Get the absolute path to the current directory
 const apiDir = __dirname;
 
-// Function to mount all route modules
-async function mountRoutes() {
+// Mount routes explicitly to ensure they're available immediately
+router.use('/bible', bibleRoutes);
+router.use('/ask', askRoutes);
+router.use('/vector', vectorRoutes);
+router.use('/cache', cacheRoutes);
+
+// Function to mount additional route modules that may not be critical
+async function mountAdditionalRoutes() {
   try {
-    // Get all .ts files in the current directory (except index.ts)
+    // Get all .ts files in the current directory (excluding already imported ones and index.ts)
     const files = fs.readdirSync(apiDir)
-      .filter(file => file.endsWith('.ts') && file !== 'index.ts');
+      .filter(file => {
+        return file.endsWith('.ts') && 
+               file !== 'index.ts' && 
+               !['bible.ts', 'ask.ts', 'vector.ts', 'cache.ts'].includes(file);
+      });
     
-    // Dynamically import and mount each route module
+    // Dynamically import and mount each additional route module
     for (const file of files) {
       const moduleName = path.basename(file, '.ts');
       const modulePath = `./${moduleName}`;
@@ -24,21 +38,17 @@ async function mountRoutes() {
         // Dynamic import
         const module = await import(modulePath);
         router.use(`/${moduleName}`, module.default);
-        console.log(`Mounted route module: ${moduleName}`);
+        console.log(`Mounted additional route module: ${moduleName}`);
       } catch (error) {
         console.error(`Error loading route module ${moduleName}:`, error);
       }
     }
   } catch (error) {
-    console.error('Error mounting route modules:', error);
+    console.error('Error mounting additional route modules:', error);
   }
 }
 
-// Mount all routes
-mountRoutes();
-
-// Explicitly mount vector routes
-router.use('/vector', vectorRoutes);
-console.log('Explicitly mounted vector route module');
+// Mount additional routes in the background
+mountAdditionalRoutes().catch(err => console.error('Failed to mount additional routes:', err));
 
 export default router;

@@ -48,9 +48,44 @@ export class SemanticCacheService {
       const startTime = performance.now();
       const embedding = await this.getEmbedding(question);
       
+      // Normalize the response - ensures consistent structure for easier retrieval
+      let normalizedResponse: any;
+      
+      // Log the structure of the response for debugging
+      console.log('STORING IN CACHE - Original response structure:', JSON.stringify(response, null, 2));
+      
+      // Handle different response structures
+      if (typeof response === 'string') {
+        // If it's a simple string, wrap it in a standard object format
+        normalizedResponse = { text: response };
+      } else if (typeof response === 'object' && response !== null) {
+        if ('text' in response) {
+          // Already in a suitable format
+          normalizedResponse = response;
+        } else {
+          // Try to preserve the original structure but ensure there's a text field
+          normalizedResponse = { ...response };
+          // If no text field is present, try to extract it from common patterns
+          if (!normalizedResponse.text) {
+            if (typeof response.answer === 'string') {
+              normalizedResponse.text = response.answer;
+            } else if (response.content) {
+              normalizedResponse.text = response.content;
+            } else if (response.message) {
+              normalizedResponse.text = response.message;
+            }
+          }
+        }
+      } else {
+        // Fallback for unexpected formats
+        normalizedResponse = { text: 'Error: Unable to process response' };
+      }
+      
+      console.log('STORING IN CACHE - Normalized response structure:', JSON.stringify(normalizedResponse, null, 2));
+      
       const cacheItem: CachedResponse = {
         question,
-        answer: response,
+        answer: normalizedResponse,
         embedding,
         timestamp: Date.now()
       };

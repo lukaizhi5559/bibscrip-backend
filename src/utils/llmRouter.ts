@@ -4,6 +4,9 @@ import { Mistral } from '@mistralai/mistralai';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import Anthropic from '@anthropic-ai/sdk';
 import axios from 'axios';
+import { createHash } from 'crypto';
+import { getRedisClient, REDIS_PREFIX, TTL } from '../config/redis';
+import { logger } from '../utils/logger';
 
 /**
  * Response from an LLM model
@@ -23,7 +26,10 @@ export interface LLMResponse {
  * LLM Router to handle multiple providers with fallbacks
  */
 export class LLMRouter {
-  private providers: string[] = ['deepseek', 'openai', 'claude', 'gemini', 'mistral'];
+  // Updated provider order according to the fallback chain requirements
+  // Note: Cache handling is done separately in the processPrompt method
+  // Order: 1. Premium APIs (OpenAI, Claude, Gemini) 2. Cache 3. Cost-effective APIs (Mistral, Lambda)
+  private providers: string[] = ['openai', 'claude', 'gemini', 'mistral', 'lambda'];
   private useSimulatedResponses: boolean;
   
   constructor() {
@@ -33,13 +39,105 @@ export class LLMRouter {
   }
   
   /**
+   * Generate a cache key for a prompt
+   */
+  private generateCacheKey(prompt: string): string {
+    // Use SHA-256 for more reliable hashing
+    const normalizedPrompt = prompt.trim().toLowerCase();
+    const hash = createHash('sha256')
+      .update(normalizedPrompt)
+      .digest('hex')
+      .substring(0, 16); // Take first 16 chars for reasonable key size
+    
+    return `${REDIS_PREFIX.AI_RESPONSE}${hash}`;
+  }
+  
+  /**
+   * Cache an LLM response
+   */
+  private async cacheResponse(key: string, response: LLMResponse): Promise<void> {
+    try {
+      const redis = await getRedisClient();
+      
+      // Determine appropriate TTL based on response characteristics
+      let ttl = TTL.AI_RESPONSE.DEFAULT;
+      
+      // Store in Redis with appropriate TTL
+      const serializedResponse = JSON.stringify(response);
+      await redis.set(key, serializedResponse, { EX: ttl });
+      
+      logger.debug('Cached AI response', { key, provider: response.provider });
+    } catch (error) {
+      logger.warn('Failed to cache AI response', { key, error });
+      // Non-critical failure, continue without caching
+    }
+  }
+  
+  /**
+   * Get a cached LLM response
+   */
+  private async getCachedResponse(key: string): Promise<LLMResponse | null> {
+    try {
+      const redis = await getRedisClient();
+      
+      // Try to get cached response from Redis
+      const cached = await redis.get(key);
+      if (!cached) return null;
+      
+      // Parse the cached response
+      const cachedResponse = JSON.parse(cached) as LLMResponse;
+      logger.debug('Cache hit for AI response', { key, provider: cachedResponse.provider });
+      
+      return cachedResponse;
+    } catch (error) {
+      logger.warn('Failed to get cached AI response', { key, error });
+      return null;
+    }
+  }
+  
+  /**
    * Process a prompt through available LLM providers with fallbacks
    */
   async processPrompt(prompt: string): Promise<LLMResponse> {
-    // Try each provider in sequence
-    for (const provider of this.providers) {
+    // Generate a cache key for this prompt
+    const cacheKey = this.generateCacheKey(prompt);
+    
+    // Step 1-3: Try premium providers first (OpenAI, Claude, Gemini)
+    const premiumProviders = ['openai', 'claude', 'gemini'];
+    for (const provider of premiumProviders) {
       try {
         const result = await this.callProvider(provider, prompt);
+        // Cache successful responses from premium providers
+        await this.cacheResponse(cacheKey, result);
+        return result;
+      } catch (error) {
+        console.warn(`Provider ${provider} failed:`, error);
+        // Continue to next provider
+      }
+    }
+    
+    // Step 4: Check cache before moving to less premium options
+    try {
+      const cachedResponse = await this.getCachedResponse(cacheKey);
+      if (cachedResponse) {
+        console.log('Using cached response');
+        return {
+          ...cachedResponse,
+          provider: `cached-${cachedResponse.provider}`
+        };
+      }
+    } catch (error) {
+      console.warn('Cache lookup failed:', error);
+      // Continue to other providers if cache fails
+    }
+    
+    // Step 5-6: Try cost-effective external API providers (both are external APIs, not local)
+    const fallbackProviders = ['mistral', 'lambda'];
+    for (const provider of fallbackProviders) {
+      try {
+        const result = await this.callProvider(provider, prompt);
+        // Still cache results from fallbacks
+        await this.cacheResponse(cacheKey, result);
         return result;
       } catch (error) {
         console.warn(`Provider ${provider} failed:`, error);
@@ -66,6 +164,8 @@ export class LLMRouter {
         return await this.callClaude(prompt, startTime);
       case 'gemini':
         return await this.callGemini(prompt, startTime);
+      case 'lambda':
+        return await this.callLambdaAI(prompt, startTime);
       case 'mistral':
         return await this.callMistral(prompt, startTime);
       default:
@@ -215,7 +315,7 @@ export class LLMRouter {
   }
   
   /**
-   * Call Mistral API
+   * Call Mistral API (External API service)
    */
   private async callMistral(prompt: string, startTime: number): Promise<LLMResponse> {
     const apiKey = process.env.MISTRAL_API_KEY;
@@ -228,12 +328,12 @@ export class LLMRouter {
       console.log('Using simulated Mistral response');
       const latencyMs = performance.now() - startTime;
       return {
-        text: 'This is a simulated response from Mistral AI (final fallback).',
-        provider: 'mistral',
+        text: 'This is a simulated response from Mistral AI API.',
+        provider: 'mistral-api',
         tokenUsage: {
           prompt: prompt.length / 4,
-          completion: 8,
-          total: prompt.length / 4 + 8
+          completion: 15,
+          total: prompt.length / 4 + 15
         },
         latencyMs
       };
@@ -398,6 +498,72 @@ export class LLMRouter {
     } catch (error) {
       console.error('Gemini API error:', error);
       throw new Error('Gemini limit hit');
+    }
+  }
+
+  /**
+   * Call Lambda.ai API with various model options
+   */
+  private async callLambdaAI(prompt: string, startTime: number): Promise<LLMResponse> {
+    const apiKey = process.env.LAMBDA_AI;
+    if (!apiKey) {
+      throw new Error('Lambda.ai API key not configured');
+    }
+    
+    // If using simulated responses, return the simulation
+    if (this.useSimulatedResponses) {
+      console.log('Using simulated Lambda.ai response');
+      const latencyMs = performance.now() - startTime;
+      return {
+        text: 'This is a simulated response from Lambda.ai (hosted models).',
+        provider: 'lambda-simulated',
+        tokenUsage: {
+          prompt: prompt.length / 4,
+          completion: 14,
+          total: prompt.length / 4 + 14
+        },
+        latencyMs
+      };
+    }
+    
+    try {
+      // Real Lambda.ai API call using their API
+      console.log('Making real API call to Lambda.ai...');
+      
+      // Lambda.ai is OpenAI API compatible
+      const response = await axios.post('https://api.lambda.chat/v1/chat/completions', {
+        model: 'deepseek-chat', // Options: 'deepseek-chat', 'llama3-8b', 'mistral-small', etc.
+        messages: [
+          { role: 'system', content: 'You are a helpful assistant specializing in Bible study and interpretation.' },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.7,
+        max_tokens: 1024
+      }, {
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      const latencyMs = performance.now() - startTime;
+      
+      // Extract the response content
+      const responseContent = response.data.choices[0]?.message?.content || 'No response from Lambda.ai';
+      
+      return {
+        text: responseContent,
+        provider: 'lambda-ai',
+        tokenUsage: {
+          prompt: response.data.usage?.prompt_tokens || 0,
+          completion: response.data.usage?.completion_tokens || 0,
+          total: response.data.usage?.total_tokens || 0
+        },
+        latencyMs
+      };
+    } catch (error) {
+      console.error('Lambda.ai API error:', error);
+      throw new Error('Lambda.ai limit hit or error');
     }
   }
 }

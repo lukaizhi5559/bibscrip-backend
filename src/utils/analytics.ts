@@ -93,6 +93,22 @@ class AnalyticsService {
     });
     // In a real implementation, send this data to your analytics service
   }
+  
+  // Track quota check operations
+  trackQuotaCheck(params: {
+    ip: string;
+    userId?: string;
+    complexity: string;
+    allowed: boolean;
+    remaining: number;
+    tier: string;
+  }): void {
+    logger.info('Quota check tracked', {
+      category: 'quota_check',
+      ...params
+    });
+    // In a real implementation, send this data to your analytics service
+  }
 }
 
 export const analytics = new AnalyticsService();
