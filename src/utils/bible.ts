@@ -25,6 +25,30 @@ export interface TranslationInfo {
 // BibleVerse is already exported above
 
 /**
+ * Cleans Bible text content from the API response
+ * Removes HTML tags, excessive whitespace, and normalizes formatting
+ */
+function cleanBibleText(text: string): string {
+  if (!text) return '';
+  
+  // Remove HTML tags if present
+  let cleaned = text.replace(/<\/?[^>]+(>|$)/g, '');
+  
+  // Remove redundant whitespace
+  cleaned = cleaned.replace(/\s+/g, ' ').trim();
+  
+  // Replace special characters
+  cleaned = cleaned.replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+  
+  return cleaned;
+}
+
+/**
  * Get a Bible verse from Scripture API Bible
  * @param reference The verse reference (e.g., "John 3:16")
  * @param translation The Bible translation to use (e.g., "ESV")
@@ -180,15 +204,181 @@ export async function getBiblePassage(
   translation: string = 'ESV'
 ): Promise<BibleVerse | null> {
   try {
-    // This is a specialized case of getBibleVerse that's optimized for passages
-    return await getBibleVerse(reference, translation);
+    // Step 0: Check cache first
+    const cachedVerse = await BibleVerseCache.get(reference, translation);
+    if (cachedVerse) {
+      return cachedVerse;
+    }
+    
+    // Check if we've exceeded our rate limits
+    const withinLimits = await BibleVerseCache.checkRateLimits();
+    if (!withinLimits) {
+      logger.warn('Bible API rate limit reached, falling back to free alternative or error message');
+      return null;
+    }
+    
+    const apiKey = process.env.BIBLE_API_KEY;
+    
+    if (!apiKey) {
+      logger.error('Bible API key not configured');
+      return null;
+    }
+    
+    // Step 1: Parse the reference for the passages endpoint
+    // We need to extract components and format it properly
+    const { parsedReference } = parseVerseReference(reference);
+    const bibleId = getBibleId(translation);
+    
+    // Extract book, chapter, and verse range from reference
+    // Example: "John 3:16-18" -> book=John, chapter=3, verseRange=16-18
+    const parts = reference.split(' ');
+    const book = parts[0];
+    let chapter = '1';
+    let verses = '1';
+    
+    if (parts.length > 1) {
+      const chapterVerseParts = parts[1].split(':');
+      chapter = chapterVerseParts[0] || '1';
+      verses = chapterVerseParts.length > 1 ? chapterVerseParts[1] : '1';
+    }
+    
+    // For passages endpoint, the API requires a properly formatted reference ID
+    // According to API docs, we should use path parameter formatting
+    let apiUrl;
+    
+    // Check if the reference is a passage with a range or comma
+    const isRange = verses.includes('-') || verses.includes(',');
+    
+    if (isRange) {
+      // For passages like "John 3:16-18", use the passages endpoint
+      const normalizedBook = normalizeBookName(book);
+      
+      // Handle range properly - format should be like "JHN.3.16-JHN.3.18" 
+      // First, identify if we have a simple range like "16-18" or complex range like "16,18-20"
+      const verseParts = verses.split('-');
+      
+      // Simple format for the API
+      const passageId = `${normalizedBook}.${chapter}`;
+      
+      // Use search endpoint which can handle passage references more flexibly
+      apiUrl = `https://api.scripture.api.bible/v1/bibles/${bibleId}/search?query=${encodeURIComponent(reference)}&sort=relevance&limit=1&fuzziness=0`;
+      
+      logger.debug('Using search endpoint for passage:', { reference, passageId, apiUrl });
+    } else {
+      // Single verse, use the verses endpoint like we do in getBibleVerse
+      const normalizedBook = normalizeBookName(book);
+      apiUrl = `https://api.scripture.api.bible/v1/bibles/${bibleId}/verses/${normalizedBook}.${chapter}.${verses}?content-type=text&include-notes=false&include-titles=false&include-chapter-numbers=false&include-verse-numbers=true&include-verse-spans=false`;
+      
+      logger.debug('Using verses endpoint for single verse:', { reference, apiUrl });
+    }
+    
+    // Increment the API counter before making the request
+    await BibleVerseCache.incrementApiCounter();
+    
+    // Make the API request
+    const response = await fetch(apiUrl, {
+      headers: {
+        'api-key': apiKey
+      }
+    });
+    
+    if (!response.ok) {
+      logger.error(`Bible API error: ${response.status} ${response.statusText}`, {
+        reference,
+        translation,
+        statusCode: response.status
+      });
+      // Return a placeholder verse with error information
+      return {
+        reference: reference,
+        text: `[Unable to retrieve verse due to API error: ${response.status}]`,
+        translation: translation,
+        translationName: translation,
+        book: book,
+        chapter: parseInt(chapter.toString(), 10),
+        verse: verses,
+        copyright: 'API Error'
+      };
+    }
+    
+    const data = await response.json();
+    logger.debug('Bible API response structure:', { 
+      hasData: !!data, 
+      hasDataField: !!data?.data,
+      endpoints: isRange ? 'search' : 'verses',
+      hasPassages: !!data?.data?.passages,
+      hasVerses: !!data?.data?.content
+    });
+    
+    // Process the response based on which endpoint we used
+    let verse;
+    
+    if (isRange && data?.data?.passages && data.data.passages.length > 0) {
+      // Process search endpoint response
+      const passage = data.data.passages[0];
+      
+      verse = {
+        reference: passage.reference || reference,
+        text: cleanBibleText(passage.content),
+        translation,
+        translationName: passage.bibleId || translation,
+        book,
+        chapter: parseInt(chapter.toString(), 10),
+        verse: verses,
+        copyright: data.data.copyright || ''
+      };
+      
+      logger.debug('Successfully extracted passage from search response', { reference });
+    } else if (data?.data?.content) {
+      // Process verses endpoint response
+      verse = {
+        reference: data.data.reference || reference,
+        text: cleanBibleText(data.data.content),
+        translation,
+        translationName: data.data.bibleId || translation,
+        book: data.data.bookId || book,
+        chapter: parseInt(chapter.toString(), 10),
+        verse: verses,
+        copyright: data.data.copyright || ''
+      };
+      
+      logger.debug('Successfully extracted verse from verses endpoint response', { reference });
+    } else {
+      logger.error('No passage data found in Bible API response', { reference, translation });
+      return {
+        reference: reference,
+        text: `[No data found for passage: ${reference}]`,
+        translation: translation,
+        translationName: translation,
+        book: book,
+        chapter: parseInt(chapter.toString(), 10),
+        verse: verses,
+        copyright: 'Data Not Found'
+      };
+    }
+    
+    // Store the verse in cache for future use if we have data
+    if (verse) {
+      await BibleVerseCache.store(reference, translation, verse);
+    }
+    
+    return verse;
   } catch (error) {
     logger.error('Error fetching Bible passage:', { 
       errorMessage: error instanceof Error ? error.message : String(error),
       reference,
       translation 
     });
-    return null;
+    return {
+      reference: reference,
+      text: `[Error retrieving passage: ${error instanceof Error ? error.message : 'Unknown error'}]`,
+      translation: translation,
+      translationName: translation,
+      book: reference.split(' ')[0],
+      chapter: parseInt(reference.split(' ')[1]?.split(':')[0] || '1', 10),
+      verse: reference.split(':')[1] || '1',
+      copyright: 'Error'
+    };
   }
 }
 
