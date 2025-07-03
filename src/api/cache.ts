@@ -140,6 +140,7 @@ router.get('/:key', expressAsyncHandler(async (req: Request, res: Response) => {
  *                 description: Cache key (supports namespacing with colon separator)
  *                 example: 'bible:verse:john3:16'
  *               value:
+ *                 type: object
  *                 description: Value to cache (can be any JSON type)
  *                 example: { "verse": "For God so loved the world...", "translation": "ESV" }
  *               ttl:

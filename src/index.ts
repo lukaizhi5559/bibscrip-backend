@@ -102,73 +102,7 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
   customSiteTitle: 'Bibscrip API Documentation',
 }));
 
-// API root endpoint with documentation links
-app.get('/api', (req, res) => {
-  res.json({
-    name: 'Bibscrip Backend API',
-    version: '1.0.0',
-    description: 'Backend API for Bible verse retrieval and processing',
-    endpoints: {
-      bible: {
-        description: 'Bible API endpoints',
-        endpoints: [
-          { path: '/api/bible/verse', method: 'GET', description: 'Get a Bible verse by reference' },
-          { path: '/api/bible/passage', method: 'GET', description: 'Get a Bible passage (multiple verses)' },
-          { path: '/api/bible/chapter/:book/:chapter', method: 'GET', description: 'Get an entire Bible chapter' },
-          { path: '/api/bible/chapters/:book/:startChapter/:endChapter', method: 'GET', description: 'Get multiple Bible chapters' },
-          { path: '/api/bible/translations', method: 'GET', description: 'Get detailed information about available Bible translations' },
-          { path: '/api/bible/translations/abbreviations', method: 'GET', description: 'Get a simplified list of Bible translation abbreviations' },
-          { path: '/api/bible/cache/stats', method: 'GET', description: 'Get Bible API usage statistics' },
-          { path: '/api/bible/cache/clear', method: 'POST', description: 'Clear Bible verse cache' }
-        ]
-      },
-      vector: {
-        description: 'Vector database API endpoints',
-        endpoints: [
-          { path: '/api/vector/status', method: 'GET', description: 'Check vector database status' },
-          { path: '/api/vector/embed', method: 'POST', description: 'Generate vector embeddings for text' },
-          { path: '/api/vector/search', method: 'POST', description: 'Search vector database for similar content' },
-          { path: '/api/vector/upsert', method: 'POST', description: 'Add or update documents in the vector database' },
-          { path: '/api/vector/delete', method: 'POST', description: 'Delete documents from the vector database' }
-        ]
-      },
-      cache: {
-        description: 'Cache API endpoints',
-        endpoints: [
-          { path: '/api/cache/:key', method: 'GET', description: 'Retrieve a value from the cache' },
-          { path: '/api/cache/:key', method: 'POST', description: 'Store a value in the cache' },
-          { path: '/api/cache/:key', method: 'DELETE', description: 'Remove a value from the cache' },
-          { path: '/api/cache/stats', method: 'GET', description: 'Get cache statistics' }
-        ]
-      },
-      generate: {
-        description: 'Text generation API endpoints',
-        endpoints: [
-          { path: '/api/generate/text', method: 'POST', description: 'Generate text using AI' },
-          { path: '/api/generate/embedding', method: 'POST', description: 'Generate embeddings for text' }
-        ]
-      },
-      ask: {
-        description: 'Question answering API',
-        endpoints: [
-          { path: '/api/ask', method: 'POST', description: 'Ask a question or query to get an AI-powered response' }
-        ]
-      },
-      youtube: {
-        description: 'YouTube data API',
-        endpoints: [
-          { path: '/api/youtube/video/:videoId', method: 'GET', description: 'Get metadata and transcription for a YouTube video' },
-          { path: '/api/youtube/channel/:channelId', method: 'GET', description: 'Get information about a YouTube channel' },
-          { path: '/api/youtube/search', method: 'GET', description: 'Search for YouTube videos' }
-        ]
-      }
-    },
-    documentation: {
-      swagger: '/api-docs',
-      baseUrl: process.env.NODE_ENV === 'production' ? process.env.API_BASE_URL : 'http://localhost:4000'
-    }
-  });
-});
+// API root endpoint is now handled by the comprehensive API router in /src/api/index.ts
 
 // Mount API routes
 app.use('/api', router);
