@@ -1,11 +1,12 @@
 // Fast LLM Router optimized for sub-5-second desktop automation
 import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 import { createHash } from 'crypto';
+import { logger } from '../utils/logger';
 import { getRedisClient, REDIS_PREFIX, TTL } from '../config/redis';
 import { ragService } from '../services/ragService';
 import { vectorDbService } from '../services/vectorDbService';
 import { NAMESPACE } from '../config/vectorDb';
-import { logger } from '../utils/logger';
 
 /**
  * Fast LLM Response optimized for speed
@@ -22,13 +23,22 @@ export interface FastLLMResponse {
  * Optimized for sub-5-second response times
  */
 export class FastLLMRouter {
-  private openai: OpenAI | null = null;
+  private openai?: OpenAI;
+  private claude?: Anthropic;
   private cacheEnabled: boolean = true;
   private aggressiveTimeout: number = 10000; // 10 seconds max per provider (optimized for complex vision tasks)
   private cacheTTL: number = 300; // 5 minutes cache TTL
 
   constructor() {
-    // Initialize only the fastest provider (OpenAI GPT-4o)
+    // Initialize Claude as primary provider
+    if (process.env.ANTHROPIC_API_KEY) {
+      this.claude = new Anthropic({
+        apiKey: process.env.ANTHROPIC_API_KEY,
+        timeout: this.aggressiveTimeout
+      });
+    }
+    
+    // Initialize OpenAI as fallback provider
     if (process.env.OPENAI_API_KEY) {
       this.openai = new OpenAI({
         apiKey: process.env.OPENAI_API_KEY,
@@ -37,7 +47,8 @@ export class FastLLMRouter {
     }
     
     logger.info('FastLLMRouter initialized for desktop automation', {
-      provider: 'openai-gpt4o-only',
+      primaryProvider: 'claude-3.5-sonnet',
+      fallbackProvider: 'openai-gpt4o',
       timeout: this.aggressiveTimeout,
       cacheEnabled: this.cacheEnabled
     });
@@ -205,38 +216,169 @@ export class FastLLMRouter {
     }
 
     try {
-      const messages: any[] = [
-        {
-          role: 'system',
-          content: 'You are a desktop automation assistant. Respond with precise, actionable JSON only. Be extremely concise and fast.'
-        },
-        {
-          role: 'user',
-          content: screenshotBase64 ? [
-            { type: 'text', text: prompt },
-            {
-              type: 'image_url',
-              image_url: {
-                url: `data:image/jpeg;base64,${screenshotBase64}`,
-                detail: 'low' // Use low detail for speed
-              }
-            }
-          ] : prompt
+      // 🔧 STEP 1: Base64 integrity check before sending
+      let validScreenshot = false;
+      if (screenshotBase64) {
+        validScreenshot = screenshotBase64.length > 1000 && 
+                         screenshotBase64.match(/^[A-Za-z0-9+/]*={0,2}$/) !== null;
+        
+        logger.info('🔍 Base64 integrity check:', {
+          hasScreenshot: true,
+          screenshotLength: screenshotBase64.length,
+          isValidBase64: validScreenshot,
+          screenshotPreview: screenshotBase64.substring(0, 50)
+        });
+      }
+      
+      // 🔧 STEP 2: Try Claude as primary provider for vision automation
+      let response: any;
+      let usedProvider = '';
+      
+      try {
+        if (this.claude && screenshotBase64 && validScreenshot) {
+          logger.info('🎯 Attempting Claude 3.5 Sonnet for vision automation...');
+          
+          response = await this.claude.messages.create({
+            model: 'claude-3-5-sonnet-20241022',
+            max_tokens: maxTokens,
+            temperature: 0.1,
+            messages: [{
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text: `You are a desktop automation assistant. Analyze the screenshot and return precise JSON actions. Be extremely concise and fast.\n\n${prompt}`
+                },
+                {
+                  type: 'image',
+                  source: {
+                    type: 'base64',
+                    media_type: 'image/png',
+                    data: screenshotBase64
+                  }
+                }
+              ]
+            }]
+          });
+          
+          usedProvider = 'claude-3.5-sonnet';
+          logger.info('✅ Claude vision analysis successful');
+        } else {
+          throw new Error('Claude not available or no screenshot provided');
         }
-      ];
+      } catch (claudeError) {
+        logger.warn('🔄 Claude failed, falling back to OpenAI GPT-4o:', { error: claudeError instanceof Error ? claudeError.message : String(claudeError) });
+        
+        if (!this.openai) {
+          throw new Error('No LLM providers available');
+        }
+        
+        // Fallback to OpenAI GPT-4o
+        const messages: any[] = [
+          {
+            role: 'system',
+            content: 'You are a desktop automation assistant. Analyze the screenshot and return precise JSON actions. Be extremely concise and fast.'
+          },
+          {
+            role: 'user',
+            content: screenshotBase64 && validScreenshot ? [
+              { type: 'text', text: prompt },
+              {
+                type: 'image_url',
+                image_url: {
+                  url: `data:image/png;base64,${screenshotBase64}`,
+                  detail: 'low'
+                }
+              }
+            ] : prompt
+          }
+        ];
+        
+        response = await this.openai.chat.completions.create({
+          model: 'gpt-4o',
+          messages,
+          max_tokens: maxTokens,
+          temperature: 0.1
+        }, {
+          timeout: this.aggressiveTimeout
+        });
+        
+        usedProvider = 'openai-gpt4o-fallback';
+        logger.info('✅ OpenAI fallback successful');
+      }
 
-      const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o',
-        messages,
-        max_tokens: maxTokens,
-        temperature: 0.1
-      }, {
-        timeout: this.aggressiveTimeout
-      });
-
-      const content = response.choices[0]?.message?.content;
+      // Extract content based on provider used
+      let content: string;
+      if (usedProvider.startsWith('claude')) {
+        content = response.content[0]?.text;
+      } else {
+        content = response.choices[0]?.message?.content;
+      }
+      
       if (!content) {
-        throw new Error('No response from OpenAI');
+        throw new Error(`No response from ${usedProvider}`);
+      }
+
+      // 🔧 STEP 3: Check if vision analysis failed and retry if using OpenAI
+      if (this.isVisionFailure(content) && screenshotBase64 && validScreenshot) {
+        logger.warn('🔄 Vision failure detected, attempting retry...');
+        
+        // Only retry with OpenAI (Claude doesn't support detail levels)
+        if (usedProvider.includes('openai') && this.openai) {
+          logger.info('🔄 Retrying with OpenAI high detail...');
+          
+          const retryMessages: any[] = [
+            {
+              role: 'system',
+              content: 'You are a desktop automation assistant. Analyze the screenshot and return precise JSON actions. Be extremely concise and fast.'
+            },
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: prompt },
+                {
+                  type: 'image_url',
+                  image_url: {
+                    url: `data:image/png;base64,${screenshotBase64}`,
+                    detail: 'high' // 🔧 Use high detail for retry
+                  }
+                }
+              ]
+            }
+          ];
+          
+          const retryResponse = await this.openai.chat.completions.create({
+            model: 'gpt-4o',
+            messages: retryMessages,
+            max_tokens: maxTokens,
+            temperature: 0.2
+          }, {
+            timeout: this.aggressiveTimeout
+          });
+          
+          const retryContent = retryResponse.choices[0]?.message?.content;
+          if (retryContent && !this.isVisionFailure(retryContent)) {
+            logger.info('✅ OpenAI high detail retry succeeded');
+            const retryLatency = performance.now() - startTime;
+            const retryResult: FastLLMResponse = {
+              text: retryContent,
+              provider: 'openai-gpt4o-retry',
+              latencyMs: retryLatency
+            };
+            
+            await this.setFastCache(cacheKey, retryResult);
+            return retryResult;
+          }
+        }
+        
+        // If retry failed or not applicable, use fallback
+        logger.warn('🚨 Vision retry failed or not applicable, using fallback heuristic');
+        const fallbackResponse = this.generateFallbackResponse(prompt);
+        return {
+          text: fallbackResponse,
+          provider: 'fallback-heuristic',
+          latencyMs: performance.now() - startTime
+        };
       }
 
       const latencyMs = performance.now() - startTime;
@@ -279,6 +421,27 @@ export class FastLLMRouter {
 
       return fallbackResult;
     }
+  }
+
+  /**
+   * Detect if GPT-4o failed to analyze the screenshot
+   */
+  private isVisionFailure(content: string): boolean {
+    const failurePatterns = [
+      'unable to analyze',
+      'cannot analyze',
+      'can\'t analyze',
+      'appears to be an image of a forest',
+      'i\'m sorry, i can\'t assist',
+      'i cannot see',
+      'unable to see',
+      'cannot see the',
+      'i\'m unable to',
+      'please provide the correct screenshot'
+    ];
+    
+    const lowerContent = content.toLowerCase();
+    return failurePatterns.some(pattern => lowerContent.includes(pattern));
   }
 
   /**

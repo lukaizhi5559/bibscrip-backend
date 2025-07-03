@@ -10,9 +10,10 @@ import youtubeRouter from './youtube';
 import authRouter from './auth';
 import bibliographyRouter from './bibliography';
 import visualAgentRouter from './visualAgent';
-import fastVisionAgentRouter from './fastVisionAgent';
+
 import integrationRouter from './integration';
 import analyticsRouter from './analytics';
+import uiIndexedAgentRouter from './uiIndexedAgent';
 // Import other route modules directly instead of using dynamic imports
 
 const router = Router();
@@ -173,6 +174,22 @@ router.get('/', (req, res) => {
           'GET /api/youtube - Search YouTube videos',
           'GET /api/youtube/video/{id} - Get video details'
         ]
+      },
+      'ui-indexed-agent': {
+        path: '/api/ui-indexed-agent',
+        description: 'UI-Indexed Intelligent Agent for desktop automation',
+        endpoints: [
+          'GET /api/ui-indexed-agent/health - Get agent health status',
+          'POST /api/ui-indexed-agent/daemon/start - Start UI indexer daemon',
+          'POST /api/ui-indexed-agent/daemon/stop - Stop UI indexer daemon',
+          'GET /api/ui-indexed-agent/ui-index - Get current UI index',
+          'GET /api/ui-indexed-agent/ui-index/search - Search UI elements',
+          'POST /api/ui-indexed-agent/execute-task - Execute task using UI index',
+          'POST /api/ui-indexed-agent/validate-task - Validate task feasibility',
+          'DELETE /api/ui-indexed-agent/ui-index/cache - Clear UI index cache',
+          'GET /api/ui-indexed-agent/active-apps - Get active applications',
+          'POST /api/ui-indexed-agent/cleanup - Cleanup stale UI elements'
+        ]
       }
     },
     documentation: {
@@ -194,9 +211,10 @@ router.use('/youtube', youtubeRouter);
 router.use('/auth', authRouter);
 router.use('/bibliography', bibliographyRouter);
 router.use('/visual-agent', visualAgentRouter);
-router.use('/fast-vision-agent', fastVisionAgentRouter);
+
 router.use('/integration', integrationRouter);
 router.use('/analytics', analyticsRouter);
+router.use('/ui-indexed-agent', uiIndexedAgentRouter);
 
 // All routers are explicitly imported and mounted above
 // No need for dynamic mounting as it can cause route conflicts

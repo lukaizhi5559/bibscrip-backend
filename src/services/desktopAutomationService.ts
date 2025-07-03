@@ -1,6 +1,8 @@
 import { mouse, keyboard, screen, Key, Button } from '@nut-tree-fork/nut-js';
 import { logger } from '../utils/logger';
-import { Action, ActionPlan } from './visualAgentService';
+import { Action as VisualAgentAction } from './visualAgentService';
+import { LLMPlanner, ActionPlan as LLMActionPlan, PlanningContext, Action as PlannerAction } from '../planner/generatePlan';
+import { UIElement } from '../agent/uiIndexerDaemon';
 
 export interface ExecutionResult {
   success: boolean;
@@ -9,13 +11,25 @@ export interface ExecutionResult {
   error?: string;
   duration: number;
   timestamp: string;
+  finalScreenshot?: string;
 }
 
 export interface ActionExecutionResult {
-  action: Action;
+  action: VisualAgentAction;
   success: boolean;
   error?: string;
   duration: number;
+  actualCoordinates?: { x: number; y: number };
+  screenshot?: string; // base64 encoded screenshot
+}
+
+export interface ExecutionOptions {
+  timeout?: number; // Total execution timeout in ms
+  screenshotOnError?: boolean;
+  screenshotOnSuccess?: boolean;
+  validateAfterEachAction?: boolean;
+  retryFailedActions?: boolean;
+  maxRetries?: number;
 }
 
 /**
@@ -23,9 +37,12 @@ export interface ActionExecutionResult {
  * Executes actions using nut.js for precise desktop interaction
  */
 export class DesktopAutomationService {
-  private isInitialized = false;
+  private static instance: DesktopAutomationService;
+  private initialized = false;
+  private llmPlanner: LLMPlanner;
 
   constructor() {
+    this.llmPlanner = new LLMPlanner();
     this.initialize();
   }
 
@@ -43,18 +60,18 @@ export class DesktopAutomationService {
       screen.config.confidence = 0.8;
       screen.config.autoHighlight = false; // Disable highlighting for performance
       
-      this.isInitialized = true;
+      this.initialized = true;
       logger.info('Desktop Automation Service initialized successfully');
     } catch (error) {
       logger.error('Failed to initialize Desktop Automation Service:', { error });
-      this.isInitialized = false;
+      this.initialized = false;
     }
   }
 
   /**
    * Execute a single action
    */
-  async executeAction(action: Action): Promise<ActionExecutionResult> {
+  async executeAction(action: VisualAgentAction): Promise<ActionExecutionResult> {
     const startTime = performance.now();
     
     try {
@@ -125,75 +142,83 @@ export class DesktopAutomationService {
   }
 
   /**
-   * Execute complete action plan
+   * Execute a high-level task using LLM planning (Natural Language → Plan → Execution)
    */
-  async executeActionPlan(actionPlan: ActionPlan): Promise<ExecutionResult> {
+  async executeTask(
+    taskDescription: string,
+    uiElements: UIElement[],
+    activeApp: { name: string; windowTitle: string },
+    options: ExecutionOptions & { maxActions?: number; allowFallback?: boolean } = {}
+  ): Promise<ExecutionResult & { actionPlan?: LLMActionPlan; planningTime?: number }> {
     const startTime = performance.now();
     const timestamp = new Date().toISOString();
     
-    if (!this.isInitialized) {
+    if (!this.initialized) {
       return {
         success: false,
         executedActions: 0,
-        totalActions: actionPlan.actions.length,
+        totalActions: 0,
         error: 'Desktop Automation Service not initialized',
         duration: 0,
         timestamp
       };
     }
 
-    logger.info('Starting action plan execution', {
-      totalActions: actionPlan.actions.length,
-      confidence: actionPlan.confidence,
-      reasoning: actionPlan.reasoning
-    });
-
-    let executedActions = 0;
-    const results: ActionExecutionResult[] = [];
-
     try {
-      for (const action of actionPlan.actions) {
-        const result = await this.executeAction(action);
-        results.push(result);
-        
-        if (result.success) {
-          executedActions++;
-        } else {
-          // Stop execution on first failure for safety
-          logger.warn('Stopping action plan execution due to failed action', {
-            failedAction: action.type,
-            error: result.error
-          });
-          break;
-        }
-      }
+      logger.info('Starting high-level task execution', {
+        task: taskDescription,
+        elementCount: uiElements.length,
+        activeApp: activeApp.name
+      });
 
+      // Step 1: Generate action plan using LLMPlanner
+      const planningContext: PlanningContext = {
+        taskDescription,
+        uiElements,
+        activeApp,
+        maxActions: options.maxActions || 10,
+        allowFallback: options.allowFallback !== false
+      };
+
+      const planningStartTime = performance.now();
+      const actionPlan = await this.llmPlanner.generatePlan(planningContext);
+      const planningTime = performance.now() - planningStartTime;
+
+      logger.info('Action plan generated', {
+        actionCount: actionPlan.actions.length,
+        confidence: actionPlan.confidence,
+        planningTime: `${planningTime.toFixed(2)}ms`,
+        fallbackRequired: actionPlan.fallbackRequired
+      });
+
+      // Step 2: Convert planner actions to executor actions
+      const executorActions = this.convertPlannerActionsToExecutorActions(actionPlan.actions);
+
+      // Step 3: Execute the converted actions
+      const executionResult = await this.executeActionPlan(executorActions, options);
+
+      const totalTime = performance.now() - startTime;
+      
+      return {
+        ...executionResult,
+        actionPlan,
+        planningTime,
+        duration: totalTime
+      };
+
+    } catch (error) {
       const duration = performance.now() - startTime;
-      const success = executedActions === actionPlan.actions.length;
-
-      logger.info('Action plan execution completed', {
-        success,
-        executedActions,
-        totalActions: actionPlan.actions.length,
+      logger.error('High-level task execution failed:', {
+        error: error instanceof Error ? error.message : error,
+        task: taskDescription,
         duration: `${duration.toFixed(2)}ms`
       });
 
       return {
-        success,
-        executedActions,
-        totalActions: actionPlan.actions.length,
-        duration,
-        timestamp
-      };
-    } catch (error) {
-      const duration = performance.now() - startTime;
-      logger.error('Action plan execution failed:', { error });
-
-      return {
         success: false,
-        executedActions,
-        totalActions: actionPlan.actions.length,
-        error: error instanceof Error ? error.message : String(error),
+        executedActions: 0,
+        totalActions: 0,
+        error: `Task execution failed: ${error instanceof Error ? error.message : error}`,
         duration,
         timestamp
       };
@@ -201,9 +226,275 @@ export class DesktopAutomationService {
   }
 
   /**
+   * Validate if a task is feasible with current UI elements
+   */
+  async validateTaskFeasibility(
+    taskDescription: string,
+    uiElements: UIElement[]
+  ): Promise<{
+    feasible: boolean;
+    confidence: number;
+    reasoning: string;
+    requiredElements: string[];
+  }> {
+    try {
+      return await this.llmPlanner.validateTaskFeasibility(taskDescription, uiElements);
+    } catch (error) {
+      logger.error('Task feasibility validation failed:', { error });
+      return {
+        feasible: false,
+        confidence: 0.2,
+        reasoning: `Validation failed: ${error instanceof Error ? error.message : error}`,
+        requiredElements: []
+      };
+    }
+  }
+
+  /**
+   * Convert planner actions to executor actions (handle interface differences)
+   */
+  private convertPlannerActionsToExecutorActions(plannerActions: PlannerAction[]): VisualAgentAction[] {
+    return plannerActions.map(action => {
+      const executorAction: VisualAgentAction = {
+        type: this.mapActionType(action.type),
+        coordinates: action.coordinates,
+        text: action.text,
+        key: action.key,
+        duration: action.waitMs,
+        direction: action.scrollDirection,
+        amount: action.scrollAmount
+      };
+
+      // Handle drag action mapping
+      if (action.type === 'drag' && action.dragTo) {
+        executorAction.startCoordinates = action.coordinates;
+        executorAction.coordinates = action.dragTo;
+      }
+
+      return executorAction;
+    });
+  }
+
+  /**
+   * Map action types between planner and executor interfaces
+   */
+  private mapActionType(plannerType: PlannerAction['type']): VisualAgentAction['type'] {
+    switch (plannerType) {
+      case 'key':
+        return 'keyPress';
+      case 'click':
+      case 'doubleClick':
+      case 'rightClick':
+      case 'type':
+      case 'scroll':
+      case 'drag':
+      case 'wait':
+      case 'screenshot':
+        return plannerType;
+      default:
+        logger.warn('Unknown planner action type, defaulting to screenshot:', { type: plannerType });
+        return 'screenshot';
+    }
+  }
+
+  /**
+   * Execute complete action plan with advanced options
+   */
+  async executeActionPlan(
+    actions: VisualAgentAction[], 
+    options: ExecutionOptions = {}
+  ): Promise<ExecutionResult> {
+    const startTime = performance.now();
+    const timestamp = new Date().toISOString();
+    
+    if (!this.initialized) {
+      return {
+        success: false,
+        executedActions: 0,
+        totalActions: actions.length,
+        error: 'Desktop Automation Service not initialized',
+        duration: 0,
+        timestamp
+      };
+    }
+
+    const {
+      timeout = 30000, // 30 seconds default
+      screenshotOnError = true,
+      screenshotOnSuccess = false,
+      validateAfterEachAction = false,
+      retryFailedActions = true,
+      maxRetries = 2
+    } = options;
+
+    logger.info('Starting action plan execution', {
+      totalActions: actions.length,
+      timeout,
+      retryFailedActions,
+      maxRetries
+    });
+
+    let executedActions = 0;
+    const results: ActionExecutionResult[] = [];
+    let executionError: string | undefined;
+
+    try {
+      // Set execution timeout
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('Execution timeout')), timeout);
+      });
+
+      // Execute actions with timeout
+      await Promise.race([
+        this.executeActionsSequentially(
+          actions, 
+          results, 
+          { screenshotOnError, validateAfterEachAction, retryFailedActions, maxRetries }
+        ),
+        timeoutPromise
+      ]);
+
+      // Count results
+      executedActions = results.filter(r => r.success).length;
+
+    } catch (error) {
+      executionError = error instanceof Error ? error.message : String(error);
+      logger.error('Action plan execution failed:', { error: executionError });
+    }
+
+    // Capture final screenshot if requested
+    let finalScreenshot: string | undefined;
+    const failedActions = results.filter(r => !r.success).length;
+    if (screenshotOnSuccess || (screenshotOnError && failedActions > 0)) {
+      try {
+        finalScreenshot = await this.captureScreenshot();
+      } catch (error) {
+        logger.warn('Failed to capture final screenshot:', { error });
+      }
+    }
+
+    const duration = performance.now() - startTime;
+    const success = executedActions === actions.length && !executionError;
+
+    logger.info('Action plan execution completed', {
+      success,
+      executedActions,
+      totalActions: actions.length,
+      failedActions,
+      duration: `${duration.toFixed(2)}ms`
+    });
+
+    return {
+      success,
+      executedActions,
+      totalActions: actions.length,
+      error: executionError,
+      duration,
+      timestamp,
+      finalScreenshot
+    };
+  }
+
+  /**
+   * Execute actions sequentially with retry logic
+   */
+  private async executeActionsSequentially(
+    actions: VisualAgentAction[],
+    results: ActionExecutionResult[],
+    options: {
+      screenshotOnError: boolean;
+      validateAfterEachAction: boolean;
+      retryFailedActions: boolean;
+      maxRetries: number;
+    }
+  ): Promise<void> {
+    for (let i = 0; i < actions.length; i++) {
+      const action = actions[i];
+      
+      logger.debug(`Executing action ${i + 1}/${actions.length}:`, { 
+        type: action.type,
+        coordinates: action.coordinates,
+        text: action.text?.substring(0, 50)
+      });
+
+      let result = await this.executeAction(action);
+      
+      // Retry failed actions if enabled
+      if (!result.success && options.retryFailedActions) {
+        for (let retry = 1; retry <= options.maxRetries; retry++) {
+          logger.warn(`Retrying action ${i + 1}, attempt ${retry}/${options.maxRetries}`);
+          await this.delay(500 * retry); // Exponential backoff
+          result = await this.executeAction(action);
+          
+          if (result.success) {
+            logger.info(`Action ${i + 1} succeeded on retry ${retry}`);
+            break;
+          }
+        }
+      }
+
+      results.push(result);
+
+      // Stop execution if critical action fails
+      if (!result.success && this.isCriticalAction(action)) {
+        logger.error(`Critical action failed, stopping execution:`, { action: action.type });
+        break;
+      }
+
+      // Add delay between actions
+      if (i < actions.length - 1) {
+        await this.delay(100); // ACTION_DELAY
+      }
+
+      // Validate state after each action if requested
+      if (options.validateAfterEachAction) {
+        await this.validateActionResult(action, result);
+      }
+    }
+  }
+
+  /**
+   * Capture screenshot as base64 string
+   */
+  private async captureScreenshot(): Promise<string> {
+    try {
+      // Use type assertion to handle API differences in nut-js fork
+      const screenAny = screen as any;
+      const screenshot = await screenAny.grabScreen();
+      return screenshot.toString('base64');
+    } catch (error) {
+      logger.error('Screenshot capture failed:', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Check if action is critical (should stop execution if it fails)
+   */
+  private isCriticalAction(action: VisualAgentAction): boolean {
+    return ['click', 'doubleClick', 'type'].includes(action.type);
+  }
+
+  /**
+   * Validate action result (placeholder for future validation logic)
+   */
+  private async validateActionResult(action: VisualAgentAction, result: ActionExecutionResult): Promise<void> {
+    if (!result.success) {
+      logger.warn('Action validation failed:', { actionType: action.type, error: result.error });
+    }
+  }
+
+  /**
+   * Delay execution for specified milliseconds
+   */
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
    * Move mouse to coordinates
    */
-  private async moveMouse(action: Action): Promise<void> {
+  private async moveMouse(action: VisualAgentAction): Promise<void> {
     if (!action.coordinates) {
       throw new Error('Mouse move action requires coordinates');
     }
@@ -216,7 +507,7 @@ export class DesktopAutomationService {
   /**
    * Click at coordinates
    */
-  private async click(action: Action): Promise<void> {
+  private async click(action: VisualAgentAction): Promise<void> {
     if (action.coordinates) {
       // Move to coordinates first, then click
       await mouse.move([
@@ -230,7 +521,7 @@ export class DesktopAutomationService {
   /**
    * Right click at coordinates
    */
-  private async rightClick(action: Action): Promise<void> {
+  private async rightClick(action: VisualAgentAction): Promise<void> {
     if (action.coordinates) {
       // Move to coordinates first, then right click
       await mouse.move([
@@ -244,7 +535,7 @@ export class DesktopAutomationService {
   /**
    * Double click at coordinates
    */
-  private async doubleClick(action: Action): Promise<void> {
+  private async doubleClick(action: VisualAgentAction): Promise<void> {
     if (action.coordinates) {
       // Move to coordinates first, then double click
       await mouse.move([
@@ -258,7 +549,7 @@ export class DesktopAutomationService {
   /**
    * Drag from one coordinate to another
    */
-  private async drag(action: Action): Promise<void> {
+  private async drag(action: VisualAgentAction): Promise<void> {
     if (!action.coordinates) {
       throw new Error('Drag action requires coordinates');
     }
@@ -285,7 +576,7 @@ export class DesktopAutomationService {
   /**
    * Type text
    */
-  private async type(action: Action): Promise<void> {
+  private async type(action: VisualAgentAction): Promise<void> {
     if (!action.text) {
       throw new Error('Type action requires text');
     }
@@ -296,7 +587,7 @@ export class DesktopAutomationService {
   /**
    * Press specific key
    */
-  private async keyPress(action: Action): Promise<void> {
+  private async keyPress(action: VisualAgentAction): Promise<void> {
     if (!action.key) {
       throw new Error('Key press action requires key');
     }
@@ -308,7 +599,7 @@ export class DesktopAutomationService {
   /**
    * Wait for specified duration
    */
-  private async wait(action: Action): Promise<void> {
+  private async wait(action: VisualAgentAction): Promise<void> {
     const duration = action.duration || 1000; // Default 1 second
     await new Promise(resolve => setTimeout(resolve, duration));
   }
@@ -316,7 +607,7 @@ export class DesktopAutomationService {
   /**
    * Scroll in specified direction
    */
-  private async scroll(action: Action): Promise<void> {
+  private async scroll(action: VisualAgentAction): Promise<void> {
     const amount = action.amount || 3; // Default scroll amount
     
     switch (action.direction) {
@@ -460,7 +751,7 @@ export class DesktopAutomationService {
    * Check if service is ready
    */
   isReady(): boolean {
-    return this.isInitialized;
+    return this.initialized;
   }
 
   /**

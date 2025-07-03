@@ -446,7 +446,7 @@ router.post('/execute', authenticate, asyncHandler(async (req, res) => {
     }
     
     // Execute action plan
-    const result = await desktopAutomationService.executeActionPlan(actionPlan);
+    const result = await desktopAutomationService.executeActionPlan(actionPlan.actions);
     
     res.json({
       success: result.success,
@@ -531,7 +531,7 @@ router.post('/execute-prompt', authenticate, asyncHandler(async (req, res) => {
     // Step 3: Execute action plan (unless dry run)
     let executionResult: ExecutionResult | null = null;
     if (!validatedData.dryRun) {
-      executionResult = await desktopAutomationService.executeActionPlan(llmResponse.actionPlan);
+      executionResult = await desktopAutomationService.executeActionPlan(llmResponse.actionPlan.actions);
     }
     
     // Prepare response context (without raw buffer)

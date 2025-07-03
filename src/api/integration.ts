@@ -525,7 +525,7 @@ router.post('/visual-agent/workflow', authenticate, asyncHandler(async (req, res
         }
       }
       
-      executionResult = await desktopAutomationService.executeActionPlan(llmResponse.actionPlan);
+      executionResult = await desktopAutomationService.executeActionPlan(llmResponse.actionPlan.actions);
     }
     
     // Send workflow completed event

@@ -8,6 +8,7 @@ import router from './api';
 import { logger } from './utils/logger';
 import { vectorDbService } from './services/vectorDbService';
 import { fetchBibleIds } from './utils/bible';
+import { uiIndexerDaemon } from './agent/uiIndexerDaemon';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -135,6 +136,15 @@ async function initializeServices() {
     // Initialize Bible API by fetching all available translations
     await fetchBibleIds();
     logger.info('Bible API IDs initialized');
+
+    // Initialize UI Indexer Daemon for desktop automation
+    try {
+      await uiIndexerDaemon.start();
+      logger.info('UI Indexer Daemon started successfully');
+    } catch (error) {
+      logger.error('Failed to start UI Indexer Daemon:', { error });
+      // Don't fail server startup if daemon fails - it's not critical for basic API functionality
+    }
 
     // Add other service initializations here as needed
     // ...
