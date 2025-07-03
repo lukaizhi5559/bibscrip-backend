@@ -7,8 +7,12 @@ import { logger } from '../utils/logger';
 
 // BibScrip Action Schema for validation
 const ActionSchema = z.object({
-  type: z.enum(['moveMouse', 'click', 'type', 'wait', 'scroll', 'keyPress', 'screenshot']),
+  type: z.enum(['moveMouse', 'click', 'rightClick', 'doubleClick', 'type', 'wait', 'scroll', 'keyPress', 'screenshot', 'drag']),
   coordinates: z.object({
+    x: z.number(),
+    y: z.number()
+  }).optional(),
+  startCoordinates: z.object({
     x: z.number(),
     y: z.number()
   }).optional(),

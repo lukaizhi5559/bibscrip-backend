@@ -67,6 +67,15 @@ export class DesktopAutomationService {
         case 'click':
           await this.click(action);
           break;
+        case 'rightClick':
+          await this.rightClick(action);
+          break;
+        case 'doubleClick':
+          await this.doubleClick(action);
+          break;
+        case 'drag':
+          await this.drag(action);
+          break;
         case 'type':
           await this.type(action);
           break;
@@ -216,6 +225,61 @@ export class DesktopAutomationService {
     }
     
     await mouse.click(Button.LEFT);
+  }
+
+  /**
+   * Right click at coordinates
+   */
+  private async rightClick(action: Action): Promise<void> {
+    if (action.coordinates) {
+      // Move to coordinates first, then right click
+      await mouse.move([
+        { x: action.coordinates.x, y: action.coordinates.y }
+      ]);
+    }
+    
+    await mouse.click(Button.RIGHT);
+  }
+
+  /**
+   * Double click at coordinates
+   */
+  private async doubleClick(action: Action): Promise<void> {
+    if (action.coordinates) {
+      // Move to coordinates first, then double click
+      await mouse.move([
+        { x: action.coordinates.x, y: action.coordinates.y }
+      ]);
+    }
+    
+    await mouse.doubleClick(Button.LEFT);
+  }
+
+  /**
+   * Drag from one coordinate to another
+   */
+  private async drag(action: Action): Promise<void> {
+    if (!action.coordinates) {
+      throw new Error('Drag action requires coordinates');
+    }
+    
+    // For drag, we need both start and end coordinates
+    // If only one coordinate is provided, we assume current mouse position as start
+    const currentPos = await mouse.getPosition();
+    const startX = action.startCoordinates?.x ?? currentPos.x;
+    const startY = action.startCoordinates?.y ?? currentPos.y;
+    
+    // Move to start position
+    await mouse.move([{ x: startX, y: startY }]);
+    
+    // Press and hold
+    await mouse.pressButton(Button.LEFT);
+    
+    // Drag to end position
+    await mouse.move([{ x: action.coordinates.x, y: action.coordinates.y }]);
+    
+    // Release
+    await mouse.releaseButton(Button.LEFT);
   }
 
   /**

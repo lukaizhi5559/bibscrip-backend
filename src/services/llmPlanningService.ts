@@ -178,7 +178,7 @@ export class LLMPlanningService {
       const prompt = visualAgentService.createLLMPrompt(context);
 
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4-vision-preview',
+        model: 'gpt-4o',
         messages: [
           {
             role: 'user',

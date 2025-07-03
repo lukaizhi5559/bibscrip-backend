@@ -10,6 +10,7 @@ import youtubeRouter from './youtube';
 import authRouter from './auth';
 import bibliographyRouter from './bibliography';
 import visualAgentRouter from './visualAgent';
+import visionFirstAgentRouter from './visionFirstAgent';
 import integrationRouter from './integration';
 import analyticsRouter from './analytics';
 // Import other route modules directly instead of using dynamic imports
@@ -164,6 +165,15 @@ router.get('/', (req, res) => {
           'GET /api/visual-agent/screen-dimensions - Get screen dimensions'
         ]
       },
+      'vision-first-agent': {
+        path: '/api/vision-first-agent',
+        description: 'Vision-first desktop automation with real-time feedback loop',
+        endpoints: [
+          'POST /api/vision-first-agent/execute-task - Execute task with vision-first approach',
+          'GET /api/vision-first-agent/analyze-state - Analyze current visual state',
+          'GET /api/vision-first-agent/health - Check service health'
+        ]
+      },
       youtube: {
         path: '/api/youtube',
         description: 'YouTube API proxy',
@@ -192,6 +202,7 @@ router.use('/youtube', youtubeRouter);
 router.use('/auth', authRouter);
 router.use('/bibliography', bibliographyRouter);
 router.use('/visual-agent', visualAgentRouter);
+router.use('/vision-first-agent', visionFirstAgentRouter);
 router.use('/integration', integrationRouter);
 router.use('/analytics', analyticsRouter);
 

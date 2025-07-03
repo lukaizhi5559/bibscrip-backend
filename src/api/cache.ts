@@ -145,7 +145,7 @@ router.get('/:key', expressAsyncHandler(async (req: Request, res: Response) => {
  *                 example: { "verse": "For God so loved the world...", "translation": "ESV" }
  *               ttl:
  *                 type: number
- *                 description: Time-to-live in milliseconds (default: 24 hours)
+ *                 description: Time-to-live in milliseconds (default 24 hours)
  *                 example: 3600000
  *                 default: 86400000
  *     responses:
