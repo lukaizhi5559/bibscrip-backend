@@ -9,6 +9,8 @@ import askRouter from './ask';
 import youtubeRouter from './youtube';
 import authRouter from './auth';
 import bibliographyRouter from './bibliography';
+import visualAgentRouter from './visualAgent';
+import integrationRouter from './integration';
 // Import other route modules directly instead of using dynamic imports
 
 const router = Router();
@@ -25,6 +27,8 @@ router.use('/ask', askRouter);
 router.use('/youtube', youtubeRouter);
 router.use('/auth', authRouter);
 router.use('/bibliography', bibliographyRouter);
+router.use('/visual-agent', visualAgentRouter);
+router.use('/integration', integrationRouter);
 
 // Function to mount additional route modules that may not be critical
 async function mountAdditionalRoutes() {
