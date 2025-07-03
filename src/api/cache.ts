@@ -24,7 +24,63 @@ function getNamespaceFromKey(key: string): string {
 const router = Router();
 
 /**
- * GET handler for retrieving cached items
+ * @swagger
+ * /api/cache/{key}:
+ *   get:
+ *     summary: Retrieve cached item by key
+ *     tags: [Cache]
+ *     description: Get a cached value by its key. Returns the cached data if found and not expired.
+ *     parameters:
+ *       - in: path
+ *         name: key
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Cache key (supports namespacing with colon separator, e.g., 'namespace:keyname')
+ *         example: 'bible:verse:john3:16'
+ *     responses:
+ *       200:
+ *         description: Cache hit - item found and returned
+ *         headers:
+ *           Cache-Control:
+ *             description: Cache control header with max-age
+ *             schema:
+ *               type: string
+ *           X-Cache:
+ *             description: Cache status indicator
+ *             schema:
+ *               type: string
+ *               example: 'HIT'
+ *         content:
+ *           application/json:
+ *             schema:
+ *               description: The cached value (can be any JSON type)
+ *               example: { "verse": "For God so loved the world..." }
+ *       404:
+ *         description: Cache miss - item not found or expired
+ *         headers:
+ *           Cache-Control:
+ *             description: No-cache header
+ *             schema:
+ *               type: string
+ *               example: 'no-cache'
+ *           X-Cache:
+ *             description: Cache status indicator
+ *             schema:
+ *               type: string
+ *               example: 'MISS'
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: 'Cache miss'
+ *       400:
+ *         description: Invalid request - no cache key provided
+ *       500:
+ *         description: Cache access error
  */
 router.get('/:key', expressAsyncHandler(async (req: Request, res: Response) => {
   try {
@@ -63,7 +119,57 @@ router.get('/:key', expressAsyncHandler(async (req: Request, res: Response) => {
 }));
 
 /**
- * POST handler for storing cache items
+ * @swagger
+ * /api/cache:
+ *   post:
+ *     summary: Store item in cache
+ *     tags: [Cache]
+ *     description: Store a key-value pair in the cache with optional TTL (time-to-live)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - key
+ *               - value
+ *             properties:
+ *               key:
+ *                 type: string
+ *                 description: Cache key (supports namespacing with colon separator)
+ *                 example: 'bible:verse:john3:16'
+ *               value:
+ *                 description: Value to cache (can be any JSON type)
+ *                 example: { "verse": "For God so loved the world...", "translation": "ESV" }
+ *               ttl:
+ *                 type: number
+ *                 description: Time-to-live in milliseconds (default: 24 hours)
+ *                 example: 3600000
+ *                 default: 86400000
+ *     responses:
+ *       200:
+ *         description: Item successfully cached
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *       400:
+ *         description: Invalid request - key and value are required
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: 'Key and value are required'
+ *       500:
+ *         description: Cache write error
  */
 router.post('/', expressAsyncHandler(async (req: Request, res: Response) => {
   try {
@@ -106,7 +212,51 @@ router.post('/', expressAsyncHandler(async (req: Request, res: Response) => {
 }));
 
 /**
- * DELETE handler for clearing cache
+ * @swagger
+ * /api/cache/{key}:
+ *   delete:
+ *     summary: Delete cached item or clear cache
+ *     tags: [Cache]
+ *     description: Delete a specific cached item by key, clear an entire namespace, or clear all cache
+ *     parameters:
+ *       - in: path
+ *         name: key
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: |
+ *           Cache key to delete. Special values:
+ *           - 'all': Clear all cache entries
+ *           - 'namespace:all': Clear all entries in a namespace
+ *           - 'namespace:keyname': Delete specific key
+ *         example: 'bible:verse:john3:16'
+ *     responses:
+ *       200:
+ *         description: Cache deletion successful
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   description: Optional success message
+ *                   example: 'All cache entries cleared'
+ *       404:
+ *         description: Cache key or namespace not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: 'Cache key not found'
+ *       500:
+ *         description: Cache deletion error
  */
 router.delete('/:key', expressAsyncHandler(async (req: Request, res: Response) => {
   try {

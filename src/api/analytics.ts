@@ -12,7 +12,70 @@ let analyticsEvents: any[] = [];
 const router = Router();
 
 /**
- * POST handler for recording analytics events
+ * @swagger
+ * /api/analytics:
+ *   post:
+ *     summary: Record analytics events
+ *     tags: [Analytics]
+ *     description: Submit analytics events for tracking user behavior, performance metrics, and system usage
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: array
+ *             items:
+ *               type: object
+ *               properties:
+ *                 type:
+ *                   type: string
+ *                   description: Event type (e.g., 'pageView', 'ai_request', 'cache_operation')
+ *                   example: 'pageView'
+ *                 userId:
+ *                   type: string
+ *                   description: Unique user identifier
+ *                   example: 'user123'
+ *                 path:
+ *                   type: string
+ *                   description: Page path for pageView events
+ *                   example: '/dashboard'
+ *                 operation:
+ *                   type: string
+ *                   description: Operation type for cache events
+ *                   example: 'hit'
+ *                 timestamp:
+ *                   type: string
+ *                   format: date-time
+ *                   description: Event timestamp
+ *                 metadata:
+ *                   type: object
+ *                   description: Additional event metadata
+ *     responses:
+ *       200:
+ *         description: Events recorded successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 eventsReceived:
+ *                   type: number
+ *                   example: 5
+ *       400:
+ *         description: Invalid events format
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: 'Invalid events format, array expected'
+ *       500:
+ *         description: Analytics processing error
  */
 router.post('/', typedAsyncHandler(async (req: Request, res: Response) => {
   try {
@@ -48,8 +111,74 @@ router.post('/', typedAsyncHandler(async (req: Request, res: Response) => {
 }));
 
 /**
- * GET handler to retrieve analytics summary
- * For admin/monitoring purposes
+ * @swagger
+ * /api/analytics:
+ *   get:
+ *     summary: Get analytics summary or raw data
+ *     tags: [Analytics]
+ *     description: Retrieve analytics data summary or raw events for monitoring and analysis
+ *     parameters:
+ *       - in: query
+ *         name: format
+ *         schema:
+ *           type: string
+ *           enum: [summary, raw]
+ *           default: summary
+ *         description: Response format - 'summary' for aggregated data or 'raw' for full event data
+ *     responses:
+ *       200:
+ *         description: Analytics data retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               oneOf:
+ *                 - type: object
+ *                   description: Analytics summary (default)
+ *                   properties:
+ *                     totalEvents:
+ *                       type: number
+ *                       example: 150
+ *                     uniqueUsers:
+ *                       type: number
+ *                       example: 25
+ *                     eventCounts:
+ *                       type: object
+ *                       additionalProperties:
+ *                         type: number
+ *                       example: { "pageView": 80, "ai_request": 45, "cache_operation": 25 }
+ *                     pageViews:
+ *                       type: object
+ *                       additionalProperties:
+ *                         type: number
+ *                       example: { "/dashboard": 30, "/search": 25, "/profile": 15 }
+ *                     aiStats:
+ *                       type: object
+ *                       properties:
+ *                         totalRequests:
+ *                           type: number
+ *                           example: 45
+ *                     cacheStats:
+ *                       type: object
+ *                       properties:
+ *                         hits:
+ *                           type: number
+ *                           example: 20
+ *                         misses:
+ *                           type: number
+ *                           example: 5
+ *                         hitRatio:
+ *                           type: number
+ *                           format: float
+ *                           example: 0.8
+ *                     lastUpdated:
+ *                       type: string
+ *                       format: date-time
+ *                 - type: array
+ *                   description: Raw analytics events (when format=raw)
+ *                   items:
+ *                     type: object
+ *       500:
+ *         description: Analytics retrieval error
  */
 router.get('/', typedAsyncHandler(async (req: Request, res: Response) => {
   try {

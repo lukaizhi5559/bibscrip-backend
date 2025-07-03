@@ -116,7 +116,126 @@ ragService.initialize().catch(error => {
 });
 
 /**
- * Enhanced POST handler with RAG, request pooling, rate limiting, and analytics
+ * @swagger
+ * /api/ask:
+ *   post:
+ *     summary: AI-powered Bible verse query and analysis
+ *     tags: [AI Query]
+ *     description: Submit questions about Bible verses and receive AI-powered responses with relevant verse references, RAG-enhanced context, and semantic analysis
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - question
+ *             properties:
+ *               question:
+ *                 type: string
+ *                 description: The question or query about Bible verses
+ *                 example: "What does the Bible say about love?"
+ *               translation:
+ *                 type: string
+ *                 description: Preferred Bible translation (ESV, KJV, NIV, etc.)
+ *                 example: "ESV"
+ *                 enum: [ESV, KJV, NKJV, NLT, NASB, NRSV, MSG, AMP, CSB, WEB, NIV]
+ *               context:
+ *                 type: string
+ *                 description: Additional context for the query
+ *                 example: "I'm studying about relationships"
+ *               maxVerses:
+ *                 type: number
+ *                 description: Maximum number of verses to return
+ *                 example: 5
+ *                 minimum: 1
+ *                 maximum: 20
+ *     responses:
+ *       200:
+ *         description: AI response with Bible verses and analysis
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 aiResponse:
+ *                   type: string
+ *                   description: AI-generated response to the query
+ *                   example: "The Bible speaks extensively about love..."
+ *                 verses:
+ *                   type: array
+ *                   description: Relevant Bible verses
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       reference:
+ *                         type: string
+ *                         example: "1 Corinthians 13:4"
+ *                       text:
+ *                         type: string
+ *                         example: "Love is patient, love is kind..."
+ *                       translation:
+ *                         type: string
+ *                         example: "ESV"
+ *                 metadata:
+ *                   type: object
+ *                   properties:
+ *                     provider:
+ *                       type: string
+ *                       description: AI provider used
+ *                       example: "openai"
+ *                     fromCache:
+ *                       type: boolean
+ *                       description: Whether response was cached
+ *                     latencyMs:
+ *                       type: number
+ *                       description: Response latency in milliseconds
+ *                     tokenUsage:
+ *                       type: object
+ *                       properties:
+ *                         prompt:
+ *                           type: number
+ *                         completion:
+ *                           type: number
+ *                         total:
+ *                           type: number
+ *                     complexity:
+ *                       type: string
+ *                       enum: [simple, moderate, complex]
+ *                       description: Query complexity assessment
+ *       400:
+ *         description: Invalid request parameters
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: "Question is required"
+ *       429:
+ *         description: Rate limit exceeded
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: "Rate limit exceeded"
+ *                 retryAfter:
+ *                   type: number
+ *                   description: Seconds to wait before retrying
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: "AI service unavailable"
  */
 router.post('/', [
   // Apply middleware for logging, rate limiting and quota checks

@@ -25,7 +25,86 @@ async function handleLLMRequest(req: Request, res: Response): Promise<LLMResult>
 const router = Router();
 
 /**
- * POST handler for generating AI responses
+ * @swagger
+ * /api/generate:
+ *   post:
+ *     summary: Generate AI responses
+ *     tags: [AI Generation]
+ *     description: Generate AI text responses using LLM services with prompt input and performance metrics
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - prompt
+ *             properties:
+ *               prompt:
+ *                 type: string
+ *                 description: The text prompt for AI generation
+ *                 example: "Write a brief explanation of artificial intelligence"
+ *                 minLength: 1
+ *                 maxLength: 4000
+ *     responses:
+ *       200:
+ *         description: AI response generated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 text:
+ *                   type: string
+ *                   description: Generated AI response text
+ *                   example: "Artificial intelligence (AI) refers to the simulation of human intelligence..."
+ *                 provider:
+ *                   type: string
+ *                   description: AI provider used for generation
+ *                   example: "openai"
+ *                 tokenUsage:
+ *                   type: object
+ *                   description: Token usage statistics
+ *                   properties:
+ *                     prompt:
+ *                       type: number
+ *                       description: Tokens used in prompt
+ *                       example: 15
+ *                     completion:
+ *                       type: number
+ *                       description: Tokens used in completion
+ *                       example: 85
+ *                     total:
+ *                       type: number
+ *                       description: Total tokens used
+ *                       example: 100
+ *                 latencyMs:
+ *                   type: number
+ *                   description: Response latency in milliseconds
+ *                   example: 1250
+ *       400:
+ *         description: Invalid request parameters
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: "Invalid request: prompt is required and must be a string"
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: "Internal server error"
+ *                 details:
+ *                   type: string
+ *                   description: Error details (only in development mode)
  */
 router.post('/', expressAsyncHandler(async (req: Request, res: Response) => {
   const requestStartTime = performance.now();
