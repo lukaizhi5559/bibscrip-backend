@@ -1,4 +1,4 @@
-// Retrieval Augmented Generation (RAG) System for BibScrip
+// Retrieval Augmented Generation (RAG) System for ThinkDrop AI
 import { vectorDbService, SearchResult } from './vectorDbService';
 import { generateEmbedding } from './embeddingService';
 import { NAMESPACE } from '../config/vectorDb';
@@ -7,7 +7,7 @@ import { logger } from '../utils/logger';
 import { analytics } from '../utils/analytics';
 
 /**
- * The complexity level of a theological query
+ * The complexity level of a user query
  */
 export enum QueryComplexity {
   SIMPLE = 'simple',
@@ -16,12 +16,17 @@ export enum QueryComplexity {
 }
 
 /**
- * Source types for theological content
+ * Source types for content in ThinkDrop AI system
  */
 export enum ContentSource {
   BIBLE_VERSE = 'bible_verse',
   COMMENTARY = 'commentary',
   ANSWERED_QUESTION = 'answered_question',
+  BIBLIOGRAPHY = 'bibliography',
+  RESEARCH_DOCUMENT = 'research_document',
+  AUTOMATION_CONTEXT = 'automation_context',
+  CACHED_RESPONSE = 'cached_response',
+  USER_DOCUMENT = 'user_document',
 }
 
 /**
@@ -203,30 +208,63 @@ export class RagService {
    * @returns Complexity level
    */
   public async classifyQuery(query: string): Promise<QueryComplexity> {
-    // TODO: For a production system, implement a more sophisticated classifier
-    // using a small ML model or content-based heuristics
-    
-    // Simple heuristics for now:
-    const complexWords = ['why', 'compare', 'contrast', 'explain', 'theological', 'doctrine', 'reconcile'];
-    const moderateWords = ['how', 'what is', 'meaning', 'interpret', 'context'];
-    
-    const queryLower = query.toLowerCase();
-    
-    if (complexWords.some(word => queryLower.includes(word))) {
-      return QueryComplexity.COMPLEX;
-    } else if (moderateWords.some(word => queryLower.includes(word))) {
+    try {
+      // General-purpose heuristics for query complexity
+      const queryLower = query.toLowerCase();
+      const queryLength = query.length;
+      const wordCount = query.split(/\s+/).length;
+      
+      // Complex queries - research, analysis, multi-step reasoning
+      const complexKeywords = [
+        'analyze', 'compare', 'evaluate', 'research', 'investigate',
+        'methodology', 'framework', 'systematic', 'comprehensive',
+        'relationship', 'correlation', 'causation', 'implications',
+        'theology', 'doctrine', 'hermeneutics', 'exegesis', // Keep theological terms for backward compatibility
+        'automation', 'workflow', 'integration', 'architecture'
+      ];
+      
+      // Simple queries - direct lookups, basic questions
+      const simplePatterns = [
+        /what is/,
+        /who is/,
+        /when did/,
+        /where is/,
+        /how to/,
+        /find .+/,
+        /show me/,
+        /list .+/,
+        /verse about/, // Keep Bible patterns for backward compatibility
+        /bible verse/,
+        /scripture about/
+      ];
+      
+      // Complex if contains complex keywords or is very long
+      if (complexKeywords.some(keyword => queryLower.includes(keyword)) || 
+          queryLength > 200 || wordCount > 30) {
+        return QueryComplexity.COMPLEX;
+      }
+      
+      // Simple if matches simple patterns or is very short
+      if (simplePatterns.some(pattern => pattern.test(queryLower)) || 
+          queryLength < 50 || wordCount < 8) {
+        return QueryComplexity.SIMPLE;
+      }
+      
+      // Default to moderate for most queries
       return QueryComplexity.MODERATE;
-    } else {
-      return QueryComplexity.SIMPLE;
+    } catch (error) {
+      logger.error('Error classifying query complexity', { error });
+      return QueryComplexity.MODERATE;
     }
   }
 
   /**
    * Retrieve relevant context from the vector database
    * @param query User's query
+   * @param namespaces Optional specific namespaces to search (defaults to all available)
    * @returns Array of context documents
    */
-  public async retrieveContext(query: string): Promise<ContextDocument[]> {
+  public async retrieveContext(query: string, namespaces?: string[]): Promise<ContextDocument[]> {
     const startTime = performance.now();
     
     try {
@@ -238,73 +276,79 @@ export class RagService {
       // Array to hold all retrieved contexts
       const contexts: ContextDocument[] = [];
       
-      // Get Bible verses (higher number for Bible verses to prioritize them)
-      const bibleVerses = await vectorDbService.searchSimilar(
-        query,
-        NAMESPACE.BIBLE_VERSES,
-        5, // Top 5 relevant verses
-        0.65 // Lower threshold for Bible verses
-      );
+      // Define search configurations for different content types
+      const searchConfigs = [
+        // Bible content (maintain backward compatibility)
+        { namespace: NAMESPACE.BIBLE_VERSES, topK: 5, threshold: 0.65, source: ContentSource.BIBLE_VERSE },
+        { namespace: NAMESPACE.COMMENTARIES, topK: 3, threshold: 0.7, source: ContentSource.COMMENTARY },
+        { namespace: NAMESPACE.ANSWERED_QUESTIONS, topK: 2, threshold: 0.75, source: ContentSource.ANSWERED_QUESTION },
+        
+        // ThinkDrop AI content types
+        { namespace: NAMESPACE.BIBLIOGRAPHY, topK: 4, threshold: 0.7, source: ContentSource.BIBLIOGRAPHY },
+        { namespace: NAMESPACE.RESEARCH_DOCUMENTS, topK: 3, threshold: 0.72, source: ContentSource.RESEARCH_DOCUMENT },
+        { namespace: NAMESPACE.AUTOMATION_CONTEXT, topK: 2, threshold: 0.8, source: ContentSource.AUTOMATION_CONTEXT },
+        { namespace: NAMESPACE.FAST_VISION_CACHE, topK: 2, threshold: 0.85, source: ContentSource.CACHED_RESPONSE },
+        { namespace: NAMESPACE.USER_DOCUMENTS, topK: 3, threshold: 0.7, source: ContentSource.USER_DOCUMENT },
+      ];
       
-      // Get commentaries
-      const commentaries = await vectorDbService.searchSimilar(
-        query,
-        NAMESPACE.COMMENTARIES,
-        3, // Top 3 commentaries
-        0.7
-      );
+      // Filter search configs if specific namespaces are requested
+      const activeConfigs = namespaces 
+        ? searchConfigs.filter(config => namespaces.includes(config.namespace))
+        : searchConfigs;
       
-      // Get previously answered questions
-      const answeredQuestions = await vectorDbService.searchSimilar(
-        query,
-        NAMESPACE.ANSWERED_QUESTIONS,
-        2, // Top 2 answered questions
-        0.75 // Higher threshold for QA matches
-      );
-      
-      // Transform search results to context documents
-      bibleVerses.forEach(result => {
-        contexts.push({
-          text: result.text,
-          source: ContentSource.BIBLE_VERSE,
-          reference: result.metadata?.reference || 'Unknown reference',
-          score: result.score,
-          metadata: result.metadata,
-        });
+      // Search across all configured namespaces
+      const searchPromises = activeConfigs.map(async (config) => {
+        try {
+          const results = await vectorDbService.searchSimilar(
+            query,
+            config.namespace,
+            config.topK,
+            config.threshold
+          );
+          
+          return results.map(result => ({
+            text: result.text,
+            source: config.source,
+            reference: this.extractReference(result, config.source),
+            score: result.score,
+            metadata: { ...result.metadata, namespace: config.namespace },
+          }));
+        } catch (error) {
+          logger.debug(`Failed to search namespace ${config.namespace}`, { error });
+          return [];
+        }
       });
       
-      commentaries.forEach(result => {
-        contexts.push({
-          text: result.text,
-          source: ContentSource.COMMENTARY,
-          reference: result.metadata?.source || 'Unknown commentary',
-          score: result.score,
-          metadata: result.metadata,
-        });
+      // Wait for all searches to complete
+      const searchResults = await Promise.all(searchPromises);
+      
+      // Flatten and combine all results
+      searchResults.forEach(results => {
+        contexts.push(...results);
       });
       
-      answeredQuestions.forEach(result => {
-        contexts.push({
-          text: result.text,
-          source: ContentSource.ANSWERED_QUESTION,
-          reference: result.metadata?.question || 'Related question',
-          score: result.score,
-          metadata: result.metadata,
-        });
-      });
-      
-      // Sort all contexts by relevance score
+      // Sort all contexts by relevance score (highest first)
       contexts.sort((a, b) => b.score - a.score);
+      
+      // Limit total results to prevent overwhelming the LLM
+      const maxResults = 15;
+      const finalContexts = contexts.slice(0, maxResults);
       
       // Track RAG operation in analytics
       analytics.trackRagOperation({
         operation: 'retrieve',
         status: 'success',
-        documentCount: contexts.length,
+        documentCount: finalContexts.length,
+        sourceType: finalContexts.length > 0 ? finalContexts[0].source : 'none',
         latencyMs: performance.now() - startTime,
       });
       
-      return contexts;
+      logger.debug(`Retrieved ${finalContexts.length} contexts from ${activeConfigs.length} namespaces`, {
+        queryLength: query.length,
+        namespaces: activeConfigs.map(c => c.namespace)
+      });
+      
+      return finalContexts;
     } catch (error) {
       logger.error('Error retrieving context for query', { error, query });
       
@@ -319,6 +363,34 @@ export class RagService {
       return [];
     }
   }
+  
+  /**
+   * Extract appropriate reference based on content source
+   */
+  private extractReference(result: SearchResult, source: ContentSource): string {
+    const metadata = result.metadata || {};
+    
+    switch (source) {
+      case ContentSource.BIBLE_VERSE:
+        return metadata.reference || 'Unknown reference';
+      case ContentSource.COMMENTARY:
+        return metadata.source || 'Unknown commentary';
+      case ContentSource.ANSWERED_QUESTION:
+        return metadata.question || 'Related question';
+      case ContentSource.BIBLIOGRAPHY:
+        return metadata.title || metadata.author || 'Bibliography entry';
+      case ContentSource.RESEARCH_DOCUMENT:
+        return metadata.title || metadata.filename || 'Research document';
+      case ContentSource.AUTOMATION_CONTEXT:
+        return metadata.task || metadata.context || 'Automation context';
+      case ContentSource.CACHED_RESPONSE:
+        return metadata.prompt || 'Cached response';
+      case ContentSource.USER_DOCUMENT:
+        return metadata.filename || metadata.title || 'User document';
+      default:
+        return 'Unknown source';
+    }
+  }
 
   /**
    * Format retrieved contexts into a prompt for the LLM
@@ -327,37 +399,89 @@ export class RagService {
    */
   private formatContextsForPrompt(contexts: ContextDocument[]): string {
     if (contexts.length === 0) {
-      return 'No relevant Bible passages or commentaries found.';
+      return 'No relevant context found.';
     }
     
-    let formattedContext = 'Here are relevant Bible passages and commentaries:\n\n';
+    let formattedContext = 'Here is relevant context from various sources:\n\n';
     
-    // Format Bible verses
-    const bibleVerses = contexts.filter(c => c.source === ContentSource.BIBLE_VERSE);
-    if (bibleVerses.length > 0) {
-      formattedContext += '==== BIBLE VERSES ====\n';
-      bibleVerses.forEach(verse => {
-        formattedContext += `${verse.reference}: "${verse.text}"\n\n`;
-      });
-    }
+    // Group contexts by source type
+    const contextsBySource = contexts.reduce((acc, context) => {
+      if (!acc[context.source]) {
+        acc[context.source] = [];
+      }
+      acc[context.source].push(context);
+      return acc;
+    }, {} as Record<ContentSource, ContextDocument[]>);
     
-    // Format commentaries
-    const commentaries = contexts.filter(c => c.source === ContentSource.COMMENTARY);
-    if (commentaries.length > 0) {
-      formattedContext += '==== COMMENTARIES ====\n';
-      commentaries.forEach(commentary => {
-        formattedContext += `From ${commentary.reference}:\n${commentary.text}\n\n`;
-      });
-    }
+    // Format each source type with appropriate headers and formatting
+    const sourceFormatters = {
+      [ContentSource.BIBLE_VERSE]: (items: ContextDocument[]) => {
+        formattedContext += '==== BIBLE VERSES ====\n';
+        items.forEach(verse => {
+          formattedContext += `${verse.reference}: "${verse.text}"\n\n`;
+        });
+      },
+      [ContentSource.COMMENTARY]: (items: ContextDocument[]) => {
+        formattedContext += '==== COMMENTARIES ====\n';
+        items.forEach(commentary => {
+          formattedContext += `From ${commentary.reference}:\n${commentary.text}\n\n`;
+        });
+      },
+      [ContentSource.ANSWERED_QUESTION]: (items: ContextDocument[]) => {
+        formattedContext += '==== PREVIOUSLY ANSWERED QUESTIONS ====\n';
+        items.forEach(qa => {
+          formattedContext += `Q: ${qa.reference}\nA: ${qa.text}\n\n`;
+        });
+      },
+      [ContentSource.BIBLIOGRAPHY]: (items: ContextDocument[]) => {
+        formattedContext += '==== BIBLIOGRAPHY ENTRIES ====\n';
+        items.forEach(bib => {
+          formattedContext += `${bib.reference}:\n${bib.text}\n\n`;
+        });
+      },
+      [ContentSource.RESEARCH_DOCUMENT]: (items: ContextDocument[]) => {
+        formattedContext += '==== RESEARCH DOCUMENTS ====\n';
+        items.forEach(doc => {
+          formattedContext += `From ${doc.reference}:\n${doc.text}\n\n`;
+        });
+      },
+      [ContentSource.AUTOMATION_CONTEXT]: (items: ContextDocument[]) => {
+        formattedContext += '==== AUTOMATION CONTEXT ====\n';
+        items.forEach(ctx => {
+          formattedContext += `${ctx.reference}:\n${ctx.text}\n\n`;
+        });
+      },
+      [ContentSource.CACHED_RESPONSE]: (items: ContextDocument[]) => {
+        formattedContext += '==== SIMILAR PREVIOUS RESPONSES ====\n';
+        items.forEach(cached => {
+          formattedContext += `Previous query: ${cached.reference}\nResponse: ${cached.text}\n\n`;
+        });
+      },
+      [ContentSource.USER_DOCUMENT]: (items: ContextDocument[]) => {
+        formattedContext += '==== USER DOCUMENTS ====\n';
+        items.forEach(doc => {
+          formattedContext += `From ${doc.reference}:\n${doc.text}\n\n`;
+        });
+      }
+    };
     
-    // Format previously answered questions
-    const answeredQuestions = contexts.filter(c => c.source === ContentSource.ANSWERED_QUESTION);
-    if (answeredQuestions.length > 0) {
-      formattedContext += '==== PREVIOUSLY ANSWERED SIMILAR QUESTIONS ====\n';
-      answeredQuestions.forEach(qa => {
-        formattedContext += `Q: ${qa.reference}\nA: ${qa.text}\n\n`;
-      });
-    }
+    // Apply formatters in priority order
+    const priorityOrder = [
+      ContentSource.CACHED_RESPONSE,
+      ContentSource.ANSWERED_QUESTION,
+      ContentSource.AUTOMATION_CONTEXT,
+      ContentSource.BIBLIOGRAPHY,
+      ContentSource.RESEARCH_DOCUMENT,
+      ContentSource.USER_DOCUMENT,
+      ContentSource.BIBLE_VERSE,
+      ContentSource.COMMENTARY
+    ];
+    
+    priorityOrder.forEach(source => {
+      if (contextsBySource[source] && contextsBySource[source].length > 0) {
+        sourceFormatters[source](contextsBySource[source]);
+      }
+    });
     
     return formattedContext;
   }
@@ -442,15 +566,37 @@ export class RagService {
    * Create a prompt for the LLM that includes retrieved context
    * @param query User's question
    * @param contexts Retrieved context
+   * @param systemPrompt Optional custom system prompt (defaults to general-purpose)
    * @returns Formatted prompt with context
    */
-  public createAugmentedPrompt(query: string, contexts: ContextDocument[]): string {
+  public createAugmentedPrompt(query: string, contexts: ContextDocument[], systemPrompt?: string): string {
     const formattedContext = this.formatContextsForPrompt(contexts);
     
-    const prompt = `
-Answer the following question about the Bible using the provided context. 
+    // Default system prompt for ThinkDrop AI
+    const defaultSystemPrompt = `You are an intelligent assistant for Thinkdrop AI. Answer the user's question using the provided context from retrieved sources whenever possible.
+
+- Prioritize the retrieved context when relevant, and cite sources clearly (e.g., [Source Name] or [1]).
+- If the context does not contain enough information, respond using general knowledge, but indicate when you're doing so.
+- Be concise, accurate, and helpful. Structure your answer logically.
+- When multiple sources are relevant, synthesize them for a complete answer.
+
+Always distinguish between cited context and model-generated inference.`;
+    
+    // Detect if this is a Bible-related query for backward compatibility
+    const isBibleQuery = query.toLowerCase().includes('bible') || 
+                        query.toLowerCase().includes('scripture') || 
+                        query.toLowerCase().includes('verse') ||
+                        contexts.some(c => c.source === ContentSource.BIBLE_VERSE || c.source === ContentSource.COMMENTARY);
+    
+    const finalSystemPrompt = systemPrompt || 
+      (isBibleQuery ? 
+        `Answer the following question about the Bible using the provided context.
 If the context doesn't contain relevant information, rely on your general knowledge but clearly indicate this.
-Always cite specific Bible verses when they're directly relevant to the answer.
+Always cite specific Bible verses when they're directly relevant to the answer.` :
+        defaultSystemPrompt);
+    
+    const prompt = `
+${finalSystemPrompt}
 
 CONTEXT:
 ${formattedContext}

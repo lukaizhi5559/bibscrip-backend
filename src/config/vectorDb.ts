@@ -1,5 +1,5 @@
 // Vector Database Configuration for RAG system
-import { Pinecone, Index, RecordMetadata } from '@pinecone-database/pinecone';
+import { Pinecone, Index } from '@pinecone-database/pinecone';
 import dotenv from 'dotenv';
 import { logger } from '../utils/logger';
 
@@ -8,9 +8,21 @@ dotenv.config();
 // Index configuration
 const INDEX_NAME = process.env.PINECONE_INDEX || 'bibscrip-index';
 const NAMESPACE = {
+  // Bible content (backward compatibility)
   BIBLE_VERSES: 'bible-verses',
   COMMENTARIES: 'commentaries',
   ANSWERED_QUESTIONS: 'answered-questions',
+  
+  // ThinkDrop AI content types
+  BIBLIOGRAPHY: 'bibliography',
+  RESEARCH_DOCUMENTS: 'research_documents',
+  AUTOMATION_CONTEXT: 'automation_context',
+  FAST_VISION_CACHE: 'fast_vision_cache',
+  USER_DOCUMENTS: 'user_documents',
+  
+  // Additional utility namespaces
+  CACHED_RESPONSES: 'cached_responses',
+  SYSTEM_CONTEXT: 'system_context',
 };
 
 // Pinecone client initialization with better error handling
