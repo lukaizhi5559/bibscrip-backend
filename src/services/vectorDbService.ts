@@ -2,7 +2,7 @@
 import { Index } from '@pinecone-database/pinecone';
 import { initVectorDb, getIndex as getConfigIndex, NAMESPACE } from '../config/vectorDb';
 import { generateEmbedding } from './embeddingService';
-import { prepareVectorForPinecone } from '../util/vectorUtils';
+import { prepareVectorForPinecone } from '../utils/vectorUtils';
 import { logger } from '../utils';
 
 // Type declarations for Pinecone SDK v6.1.0 to fix TypeScript errors

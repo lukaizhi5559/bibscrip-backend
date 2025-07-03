@@ -1,10 +1,14 @@
 import { Router } from 'express';
 import fs from 'fs';
 import path from 'path';
-import bibleRoutes from './bible';
-import askRoutes from './ask';
-import vectorRoutes from './vector';
-import cacheRoutes from './cache';
+import bibleRouter from './bible';
+import vectorRouter from './vector';
+import cacheRouter from './cache';
+import generateRouter from './generate';
+import askRouter from './ask';
+import youtubeRouter from './youtube';
+import authRouter from './auth';
+import bibliographyRouter from './bibliography';
 // Import other route modules directly instead of using dynamic imports
 
 const router = Router();
@@ -12,11 +16,15 @@ const router = Router();
 // Get the absolute path to the current directory
 const apiDir = __dirname;
 
-// Mount routes explicitly to ensure they're available immediately
-router.use('/bible', bibleRoutes);
-router.use('/ask', askRoutes);
-router.use('/vector', vectorRoutes);
-router.use('/cache', cacheRoutes);
+// Mount routers
+router.use('/bible', bibleRouter);
+router.use('/vector', vectorRouter);
+router.use('/cache', cacheRouter);
+router.use('/generate', generateRouter);
+router.use('/ask', askRouter);
+router.use('/youtube', youtubeRouter);
+router.use('/auth', authRouter);
+router.use('/bibliography', bibliographyRouter);
 
 // Function to mount additional route modules that may not be critical
 async function mountAdditionalRoutes() {
