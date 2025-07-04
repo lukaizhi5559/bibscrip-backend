@@ -1,5 +1,5 @@
 // Rate limiting middleware for API endpoints
-import { Request, Response, NextFunction } from 'express';
+import { Request, Response, NextFunction, RequestHandler } from 'express';
 import { quotaService } from '../services/quotaService';
 import { analytics } from '../utils/analytics';
 import { logger } from '../utils/logger';

@@ -1,0 +1,151 @@
+import { getBestLLMResponse } from '../utils/llmRouter';
+
+export interface LLMResponse {
+  text: string;
+  provider?: string;
+  latencyMs?: number;
+}
+
+export interface IntentParseResult {
+  intent: string;
+  confidence: number;
+  parameters: Record<string, any>;
+  needsClarification: boolean;
+  clarificationQuestions?: string[];
+}
+
+export interface AgentCodeGenResult {
+  code: string;
+  dependencies: string[];
+  executionTarget: 'frontend' | 'backend';
+  databaseRequirements?: string[];
+}
+
+export class LLMService {
+  private static instance: LLMService;
+
+  public static getInstance(): LLMService {
+    if (!LLMService.instance) {
+      LLMService.instance = new LLMService();
+    }
+    return LLMService.instance;
+  }
+
+  async generateResponse(prompt: string): Promise<LLMResponse> {
+    try {
+      const result = await getBestLLMResponse(prompt);
+      return {
+        text: result,
+        provider: 'llm-router'
+      };
+    } catch (error) {
+      throw new Error(`LLM generation failed: ${error}`);
+    }
+  }
+
+  async parseUserIntent(userRequest: string): Promise<IntentParseResult> {
+    const prompt = `
+Analyze the following user request and extract the intent, parameters, and determine if clarification is needed:
+
+User Request: "${userRequest}"
+
+Respond with a JSON object containing:
+- intent: string (the main action the user wants to perform)
+- confidence: number (0-1, how confident you are about the intent)
+- parameters: object (extracted parameters from the request)
+- needsClarification: boolean (true if the request is too vague)
+- clarificationQuestions: string[] (questions to ask if clarification is needed)
+
+Example response:
+{
+  "intent": "create_automation_agent",
+  "confidence": 0.8,
+  "parameters": {"task": "file management", "target": "desktop"},
+  "needsClarification": false
+}
+`;
+
+    try {
+      const response = await this.generateResponse(prompt);
+      return JSON.parse(response.text);
+    } catch (error) {
+      // Fallback for parsing errors
+      return {
+        intent: 'unknown',
+        confidence: 0.1,
+        parameters: {},
+        needsClarification: true,
+        clarificationQuestions: ['Could you please provide more details about what you want to accomplish?']
+      };
+    }
+  }
+
+  async generateAgentCode(agentName: string, description: string, requirements: string[]): Promise<AgentCodeGenResult> {
+    const prompt = `
+Generate TypeScript code for an automation agent with the following specifications:
+
+Agent Name: ${agentName}
+Description: ${description}
+Requirements: ${requirements.join(', ')}
+
+Generate a complete TypeScript module that:
+1. Exports a class named ${agentName}Agent
+2. Implements the required functionality
+3. Includes proper error handling
+4. Declares all necessary dependencies
+5. Specifies execution target (frontend/backend)
+6. Lists any database requirements
+
+Respond with a JSON object containing:
+- code: string (the complete TypeScript code)
+- dependencies: string[] (npm packages needed)
+- executionTarget: "frontend" | "backend"
+- databaseRequirements: string[] (optional, database tables/schemas needed)
+
+Example response:
+{
+  "code": "export class FileManagerAgent { ... }",
+  "dependencies": ["fs-extra", "path"],
+  "executionTarget": "backend",
+  "databaseRequirements": ["file_operations"]
+}
+`;
+
+    try {
+      const response = await this.generateResponse(prompt);
+      return JSON.parse(response.text);
+    } catch (error) {
+      // Fallback code generation
+      return {
+        code: `export class ${agentName}Agent {
+  constructor() {
+    // TODO: Implement ${description}
+  }
+
+  async execute(): Promise<any> {
+    throw new Error('Agent implementation pending');
+  }
+}`,
+        dependencies: [],
+        executionTarget: 'backend'
+      };
+    }
+  }
+
+  async generateClarificationResponse(originalRequest: string, clarificationAnswers: Record<string, string>): Promise<string> {
+    const prompt = `
+Original user request: "${originalRequest}"
+
+Clarification answers:
+${Object.entries(clarificationAnswers).map(([q, a]) => `Q: ${q}\nA: ${a}`).join('\n\n')}
+
+Based on the original request and clarification answers, provide a clear, actionable response about what the user wants to accomplish.
+`;
+
+    const response = await this.generateResponse(prompt);
+    return response.text;
+  }
+}
+
+// Export singleton instance
+export const llmService = LLMService.getInstance();

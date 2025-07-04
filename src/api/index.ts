@@ -9,9 +9,9 @@ import askRouter from './ask';
 import youtubeRouter from './youtube';
 import authRouter from './auth';
 import bibliographyRouter from './bibliography';
-import visualAgentRouter from './visualAgent';
+import agentsRouter from './agents';
 import actionPlannerRouter from './actionPlanner';
-import integrationRouter from './integration';
+// Removed: visualAgentRouter, integrationRouter (moved to Electron client)
 import analyticsRouter from './analytics';
 import automationAnalyticsRouter from './automationAnalytics';
 // Removed: uiIndexedAgentRouter, enhancedVisualAgentRouter (moved to Electron client)
@@ -93,6 +93,20 @@ router.get('/', (req, res) => {
           'DELETE /api/bibliography/{id} - Delete bibliography entry',
           'GET /api/bibliography/search - Search bibliography entries',
           'GET /api/bibliography/{id}/citation - Generate citation'
+        ]
+      },
+      agents: {
+        path: '/api/agents',
+        description: 'Agent orchestration and management for ThinkDrop AI',
+        endpoints: [
+          'POST /api/agents/orchestrate - Orchestrate user request and manage agents',
+          'GET /api/agents - Get all agents',
+          'GET /api/agents/{name} - Get specific agent by name',
+          'DELETE /api/agents/{name} - Delete agent by name',
+          'POST /api/agents/intent/parse - Parse user intent without executing',
+          'POST /api/agents/generate - Generate new agent code',
+          'GET /api/agents/communications - Get agent communications log',
+          'POST /api/agents/communications - Log agent communication'
         ]
       },
       analytics: {
@@ -232,13 +246,10 @@ router.use('/ask', askRouter);
 router.use('/youtube', youtubeRouter);
 router.use('/auth', authRouter);
 router.use('/bibliography', bibliographyRouter);
-router.use('/visual-agent', visualAgentRouter);
-
-router.use('/integration', integrationRouter);
+router.use('/agents', agentsRouter);
+// Removed: /visual-agent and /integration endpoints (moved to Electron client)
 router.use('/analytics', analyticsRouter);
-router.use('/ui-indexed-agent', uiIndexedAgentRouter);
 router.use('/automation-analytics', automationAnalyticsRouter);
-router.use('/enhanced-visual-agent', enhancedVisualAgentRouter);
 
 // All routers are explicitly imported and mounted above
 // No need for dynamic mounting as it can cause route conflicts

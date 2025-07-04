@@ -5,12 +5,10 @@ import morgan from 'morgan';
 import swaggerJSDoc from 'swagger-jsdoc';
 import swaggerUi from 'swagger-ui-express';
 import router from './api';
-import uiIndexedAgentRouter from './api/uiIndexedAgent';
 import automationAnalyticsRouter from './api/automationAnalytics';
 import { logger } from './utils/logger';
 import { vectorDbService } from './services/vectorDbService';
 import { fetchBibleIds } from './utils/bible';
-import { uiIndexerDaemon } from './agent/uiIndexerDaemon';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -109,7 +107,6 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
 
 // Mount API routes
 app.use('/api', router);
-app.use('/api/ui-indexed-agent', uiIndexedAgentRouter);
 app.use('/api/automation-analytics', automationAnalyticsRouter);
 
 // Health check endpoint
@@ -141,14 +138,7 @@ async function initializeServices() {
     await fetchBibleIds();
     logger.info('Bible API IDs initialized');
 
-    // Initialize UI Indexer Daemon for desktop automation
-    try {
-      await uiIndexerDaemon.start();
-      logger.info('UI Indexer Daemon started successfully');
-    } catch (error) {
-      logger.error('Failed to start UI Indexer Daemon:', { error });
-      // Don't fail server startup if daemon fails - it's not critical for basic API functionality
-    }
+    // UI Indexer Daemon removed - desktop automation moved to Electron client
 
     // Add other service initializations here as needed
     // ...

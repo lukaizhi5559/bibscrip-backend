@@ -111,8 +111,7 @@ const router = express.Router();
  *       500:
  *         description: Internal server error
  */
-router.post('/plan', authenticateJWT, rateLimiter('/api/action-planner/plan'), async (req: Request, res: Response, next: NextFunction) => {
-  try {
+router.post('/plan', authenticateJWT, expressAsyncHandler(rateLimiter('/api/action-planner/plan'))), expressAsyncHandler(async (req: Request, res: Response, next: NextFunction) => {
   const startTime = performance.now();
   let sessionId: string | undefined;
 
@@ -122,12 +121,11 @@ router.post('/plan', authenticateJWT, rateLimiter('/api/action-planner/plan'), a
     try {
       requestData = validateElectronRequest(req.body);
     } catch (validationError) {
-      res.status(400).json({
+      return res.status(400).json({
         success: false,
         error: 'Invalid request data',
         details: validationError instanceof Error ? validationError.message : 'Validation failed'
       });
-      return;
     }
     
     // Create automation session for tracking
@@ -180,8 +178,7 @@ router.post('/plan', authenticateJWT, rateLimiter('/api/action-planner/plan'), a
       }
     );
 
-    res.json(response);
-
+    return res.json(response);
   } catch (error: any) {
     logger.error('Action planning failed', { 
       error: error.message, 
@@ -208,18 +205,7 @@ router.post('/plan', authenticateJWT, rateLimiter('/api/action-planner/plan'), a
       sessionId
     );
 
-    res.status(500).json(errorResponse);
-  }
-  } catch (unexpectedError: any) {
-    logger.error('Unexpected error in action planner', {
-      error: unexpectedError instanceof Error ? unexpectedError.message : String(unexpectedError),
-      stack: unexpectedError instanceof Error ? unexpectedError.stack : undefined
-    });
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error',
-      timestamp: new Date().toISOString()
-    });
+    return res.status(500).json(errorResponse);
   }
 });
 
