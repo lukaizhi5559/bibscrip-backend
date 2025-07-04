@@ -102,7 +102,56 @@ export class LLMRouter {
     // Generate a cache key for this prompt
     const cacheKey = this.generateCacheKey(prompt);
     
-    // Step 1-3: Try premium providers first (OpenAI, Claude, Gemini)
+    // Step 1: Check Redis cache FIRST - exact match (fastest)
+    try {
+      const cachedResponse = await this.getCachedResponse(cacheKey);
+      if (cachedResponse) {
+        console.log('Using Redis cached response');
+        return {
+          ...cachedResponse,
+          provider: `cached-${cachedResponse.provider}`
+        };
+      }
+    } catch (error) {
+      console.warn('Redis cache lookup failed:', error);
+      // Continue to semantic cache
+    }
+    
+    // Step 2: Check semantic cache - similar questions (cost-effective)
+    try {
+      // Import ragService dynamically to avoid circular dependencies
+      const { ragService } = await import('../services/ragService');
+      
+      // Use the public process method to get RAG result which includes semantic cache check
+      const ragResult = await ragService.process(prompt);
+      
+      // Check if we got contexts from cache (indicating a semantic cache hit)
+      if (ragResult.contexts.length > 0) {
+        // Look for cached responses in the contexts
+        const cachedResponse = ragResult.contexts.find(ctx => 
+          ctx.source.toString().includes('cached_response') || 
+          ctx.source.toString().includes('answered_question')
+        );
+        
+        if (cachedResponse && cachedResponse.score > 0.8) { // High similarity threshold
+          console.log('Using semantic cached response', {
+            score: cachedResponse.score,
+            source: cachedResponse.source
+          });
+          
+          return {
+            text: cachedResponse.text,
+            provider: 'semantic-cache',
+            latencyMs: ragResult.latencyMs
+          };
+        }
+      }
+    } catch (error) {
+      console.warn('Semantic cache lookup failed:', error);
+      // Continue to LLM providers
+    }
+    
+    // Step 2-4: Try premium providers (OpenAI, Claude, Gemini)
     const premiumProviders = ['openai', 'claude', 'gemini'];
     for (const provider of premiumProviders) {
       try {
@@ -114,21 +163,6 @@ export class LLMRouter {
         console.warn(`Provider ${provider} failed:`, error);
         // Continue to next provider
       }
-    }
-    
-    // Step 4: Check cache before moving to less premium options
-    try {
-      const cachedResponse = await this.getCachedResponse(cacheKey);
-      if (cachedResponse) {
-        console.log('Using cached response');
-        return {
-          ...cachedResponse,
-          provider: `cached-${cachedResponse.provider}`
-        };
-      }
-    } catch (error) {
-      console.warn('Cache lookup failed:', error);
-      // Continue to other providers if cache fails
     }
     
     // Step 5-6: Try cost-effective external API providers (both are external APIs, not local)

@@ -6,6 +6,7 @@ import vectorRouter from './vector';
 import cacheRouter from './cache';
 import generateRouter from './generate';
 import askRouter from './ask';
+import llmRouter from './llm';
 import youtubeRouter from './youtube';
 import authRouter from './auth';
 import bibliographyRouter from './bibliography';
@@ -122,6 +123,15 @@ router.get('/', (req, res) => {
         description: 'AI-powered Bible verse queries',
         endpoints: [
           'POST /api/ask - Ask AI-powered Bible questions'
+        ]
+      },
+      llm: {
+        path: '/api/llm',
+        description: 'Unified LLM Core - Automation-focused AI queries with intent detection',
+        endpoints: [
+          'POST /api/llm/ask - AI-powered queries with automation intent detection',
+          'GET /api/llm/health - Check health of unified LLM core services',
+          'GET /api/llm/stats - Get LLM usage statistics and performance metrics'
         ]
       },
       cache: {
@@ -243,6 +253,7 @@ router.use('/vector', vectorRouter);
 router.use('/cache', cacheRouter);
 router.use('/generate', generateRouter);
 router.use('/ask', askRouter);
+router.use('/llm', llmRouter);
 router.use('/youtube', youtubeRouter);
 router.use('/auth', authRouter);
 router.use('/bibliography', bibliographyRouter);
