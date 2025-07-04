@@ -10,10 +10,11 @@ import youtubeRouter from './youtube';
 import authRouter from './auth';
 import bibliographyRouter from './bibliography';
 import visualAgentRouter from './visualAgent';
-
+import actionPlannerRouter from './actionPlanner';
 import integrationRouter from './integration';
 import analyticsRouter from './analytics';
-import uiIndexedAgentRouter from './uiIndexedAgent';
+import automationAnalyticsRouter from './automationAnalytics';
+// Removed: uiIndexedAgentRouter, enhancedVisualAgentRouter (moved to Electron client)
 // Import other route modules directly instead of using dynamic imports
 
 const router = Router();
@@ -190,6 +191,27 @@ router.get('/', (req, res) => {
           'GET /api/ui-indexed-agent/active-apps - Get active applications',
           'POST /api/ui-indexed-agent/cleanup - Cleanup stale UI elements'
         ]
+      },
+      'automation-analytics': {
+        path: '/api/automation-analytics',
+        description: 'Automation session logging and analytics',
+        endpoints: [
+          'GET /api/automation-analytics/sessions - Get automation sessions with filtering',
+          'GET /api/automation-analytics/sessions/{sessionId} - Get specific session details',
+          'DELETE /api/automation-analytics/sessions/{sessionId} - Delete session and logs',
+          'POST /api/automation-analytics/cleanup - Cleanup old sessions',
+          'GET /api/automation-analytics/stats - Get automation statistics',
+          'GET /api/automation-analytics/performance - Get performance metrics'
+        ]
+      },
+      'enhanced-visual-agent': {
+        path: '/api/enhanced-visual-agent',
+        description: 'Enhanced visual agent with robust app navigation and multi-step automation',
+        endpoints: [
+          'POST /api/enhanced-visual-agent/execute-task - Execute task with app navigation',
+          'GET /api/enhanced-visual-agent/health - Get enhanced agent health status',
+          'POST /api/enhanced-visual-agent/verify-app - Verify if specific app is focused'
+        ]
       }
     },
     documentation: {
@@ -215,6 +237,8 @@ router.use('/visual-agent', visualAgentRouter);
 router.use('/integration', integrationRouter);
 router.use('/analytics', analyticsRouter);
 router.use('/ui-indexed-agent', uiIndexedAgentRouter);
+router.use('/automation-analytics', automationAnalyticsRouter);
+router.use('/enhanced-visual-agent', enhancedVisualAgentRouter);
 
 // All routers are explicitly imported and mounted above
 // No need for dynamic mounting as it can cause route conflicts

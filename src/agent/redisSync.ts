@@ -40,7 +40,7 @@ export class RedisSync {
       const appKey = this.getAppKey(firstElement.appName, firstElement.windowTitle);
       
       // Store elements for this app/window
-      await redis.setex(
+      await redis.setEx(
         appKey,
         this.DEFAULT_TTL,
         JSON.stringify(elements)
@@ -55,7 +55,13 @@ export class RedisSync {
       logger.debug(`Synced ${elements.length} elements to Redis for ${firstElement.appName}`);
 
     } catch (error) {
-      logger.error('Failed to sync elements to Redis:', { error });
+      const errorDetails = {
+        message: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined,
+        type: error?.constructor?.name || typeof error,
+        raw: error
+      };
+      logger.error('Failed to sync elements to Redis:', { error: errorDetails });
     } finally {
       await this.releaseSyncLock();
     }
@@ -109,7 +115,7 @@ export class RedisSync {
 
       // Cache the search result
       if (allResults.length > 0) {
-        await redis.setex(searchKey, 60, JSON.stringify(allResults)); // 1 minute cache
+        await redis.setEx(searchKey, 60, JSON.stringify(allResults)); // 1 minute cache
       }
 
       return appName ? allResults.filter(el => el.appName === appName) : allResults;
@@ -146,7 +152,7 @@ export class RedisSync {
 
       // Cache the role search result
       if (allResults.length > 0) {
-        await redis.setex(roleKey, 120, JSON.stringify(allResults)); // 2 minute cache
+        await redis.setEx(roleKey, 120, JSON.stringify(allResults)); // 2 minute cache
       }
 
       return appName ? allResults.filter(el => el.appName === appName) : allResults;
@@ -253,14 +259,19 @@ export class RedisSync {
       // Keep only the most recent 20 apps
       const trimmedApps = activeApps.slice(0, 20);
       
-      await redis.setex(
+      await redis.setEx(
         this.ACTIVE_APPS_KEY,
         this.DEFAULT_TTL,
         JSON.stringify(trimmedApps)
       );
       
     } catch (error) {
-      logger.error('Failed to update active apps:', { error });
+      const errorDetails = {
+        message: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined,
+        type: error?.constructor?.name || typeof error
+      };
+      logger.error('Failed to update active apps:', { error: errorDetails });
     }
   }
 
@@ -281,11 +292,16 @@ export class RedisSync {
       // Cache role-based indexes
       for (const [role, roleElements] of Object.entries(roleGroups)) {
         const roleKey = this.getSearchKey('role', role);
-        await redis.setex(roleKey, 120, JSON.stringify(roleElements)); // 2 minute cache
+        await redis.setEx(roleKey, 120, JSON.stringify(roleElements)); // 2 minute cache
       }
       
     } catch (error) {
-      logger.error('Failed to create search indexes:', { error });
+      const errorDetails = {
+        message: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined,
+        type: error?.constructor?.name || typeof error
+      };
+      logger.error('Failed to create search indexes:', { error: errorDetails });
     }
   }
 
@@ -306,11 +322,19 @@ export class RedisSync {
   private async acquireSyncLock(): Promise<boolean> {
     try {
       const redis = await getRedisClient();
-      const result = await redis.set(this.SYNC_LOCK_KEY, '1', 'EX', this.LOCK_TTL, 'NX');
+      const result = await redis.set(this.SYNC_LOCK_KEY, '1', {
+        EX: this.LOCK_TTL,
+        NX: true
+      });
       return result === 'OK';
       
     } catch (error) {
-      logger.error('Failed to acquire sync lock:', { error });
+      const errorDetails = {
+        message: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined,
+        type: error?.constructor?.name || typeof error
+      };
+      logger.error('Failed to acquire sync lock:', { error: errorDetails });
       return false;
     }
   }

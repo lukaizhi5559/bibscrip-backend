@@ -5,6 +5,8 @@ import morgan from 'morgan';
 import swaggerJSDoc from 'swagger-jsdoc';
 import swaggerUi from 'swagger-ui-express';
 import router from './api';
+import uiIndexedAgentRouter from './api/uiIndexedAgent';
+import automationAnalyticsRouter from './api/automationAnalytics';
 import { logger } from './utils/logger';
 import { vectorDbService } from './services/vectorDbService';
 import { fetchBibleIds } from './utils/bible';
@@ -107,6 +109,8 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
 
 // Mount API routes
 app.use('/api', router);
+app.use('/api/ui-indexed-agent', uiIndexedAgentRouter);
+app.use('/api/automation-analytics', automationAnalyticsRouter);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
