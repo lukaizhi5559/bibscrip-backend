@@ -7,6 +7,7 @@ import { logger } from '../utils/logger';
 import { getBestLLMResponse } from '../utils/llmRouter';
 import { llmOrchestratorService, EnhancedLLMResponse } from './llmOrchestrator';
 import { jsonRecoveryService, JsonRecoveryResult } from './jsonRecoveryService';
+import { AgentVerificationService } from './agentVerificationService';
 
 export interface AgentAction {
   name: string;
@@ -81,7 +82,7 @@ export interface AgentGenerationResult {
     database_type?: string;
     schema?: Record<string, any>;
   };
-  status: 'generated' | 'error';
+  status: 'generated' | 'error' | 'enriched';
   confidence: number;
   test_cases?: any[];
   issues?: string[];
@@ -92,8 +93,11 @@ export interface AgentGenerationResult {
  * Enhanced Orchestration Service with LLM Intelligence
  */
 export class OrchestrationService {
+  private agentVerificationService: AgentVerificationService;
+
   constructor() {
     logger.info('Orchestration Service initialized with LLM intelligence');
+    this.agentVerificationService = new AgentVerificationService();
   }
 
   /**
@@ -285,11 +289,107 @@ export class OrchestrationService {
         };
       }
 
+      // Run agent verification and enrichment
+      let finalAgentCode = agentData.code;
+      let verificationIssues: string[] = [];
+      let enrichmentApplied = false;
+      
+      try {
+        // Step 1: Verify the agent code
+        const verificationRequest = {
+          agentCode: finalAgentCode,
+          agentMetadata: {
+            name: agentData.name,
+            description: agentData.description,
+            execution_target: agentData.execution_target,
+            dependencies: agentData.dependencies
+          },
+          desiredBehavior: `Agent should: ${agentData.description}`,
+          testCases: [{
+            name: 'Basic execution test',
+            params: {},
+            shouldSucceed: true
+          }]
+        };
+        
+        const verificationResult = await this.agentVerificationService.verifyAgent(verificationRequest);
+        
+        // Step 2: If enrichment suggestions are available and auto-enrichment is enabled, apply them
+        if (verificationResult.enrichmentSuggestions && verificationResult.enrichmentSuggestions.length > 0) {
+          logger.info('Agent has enrichment suggestions, attempting auto-enrichment', {
+            agentName: agentData.name,
+            suggestionsCount: verificationResult.enrichmentSuggestions.length,
+            issuesCount: verificationResult.issues.length,
+            suggestions: verificationResult.enrichmentSuggestions.map((s: any) => ({
+              type: s.type,
+              confidence: s.confidence,
+              description: s.description
+            }))
+          });
+          
+          // Apply enrichment if confidence is high enough (>= 80%)
+          const highConfidenceSuggestions = verificationResult.enrichmentSuggestions
+            .filter((s: any) => s.confidence >= 0.8);
+          
+          logger.info('Enrichment confidence analysis', {
+            agentName: agentData.name,
+            totalSuggestions: verificationResult.enrichmentSuggestions.length,
+            highConfidenceSuggestions: highConfidenceSuggestions.length,
+            hasFinalAgentCode: !!verificationResult.finalAgentCode,
+            finalAgentCodeLength: verificationResult.finalAgentCode ? verificationResult.finalAgentCode.length : 0
+          });
+          
+          if (highConfidenceSuggestions.length > 0 && verificationResult.finalAgentCode) {
+            // Use the enriched code from the verification service
+            finalAgentCode = verificationResult.finalAgentCode;
+            enrichmentApplied = true;
+            
+            // Update dependencies if they were re-analyzed during enrichment
+            if (verificationResult.dependencies && verificationResult.dependencies.length > 0) {
+              agentData.dependencies = verificationResult.dependencies;
+              logger.info('Dependencies updated from enrichment', {
+                agentName: agentData.name,
+                originalDeps: agentData.dependencies,
+                enrichedDeps: verificationResult.dependencies
+              });
+            }
+            
+            logger.info('Auto-enrichment applied', {
+              agentName: agentData.name,
+              suggestionsApplied: highConfidenceSuggestions.length
+            });
+          } else {
+            logger.info('Auto-enrichment skipped', {
+              agentName: agentData.name,
+              reason: highConfidenceSuggestions.length === 0 ? 'No high-confidence suggestions' : 'No final agent code available'
+            });
+          }
+        } else {
+          logger.info('No enrichment suggestions generated', {
+            agentName: agentData.name,
+            hasEnrichmentSuggestions: !!verificationResult.enrichmentSuggestions,
+            suggestionsLength: verificationResult.enrichmentSuggestions ? verificationResult.enrichmentSuggestions.length : 0
+          });
+        }
+        
+        // Collect verification issues for reporting
+        verificationIssues = verificationResult.issues.map(issue => 
+          `[${issue.severity}] ${issue.description}${issue.line ? ` (Line ${issue.line})` : ''}`
+        );
+        
+      } catch (verificationError) {
+        logger.warn('Agent verification failed, proceeding without verification', {
+          agentName: agentData.name,
+          error: verificationError instanceof Error ? verificationError.message : String(verificationError)
+        });
+        verificationIssues.push('Verification service unavailable');
+      }
+
       const result: AgentGenerationResult = {
         agent: {
           name: agentData.name,
           description: agentData.description,
-          code: agentData.code,
+          code: finalAgentCode, // Use verified/enriched code
           dependencies: agentData.dependencies || [],
           capabilities: this.extractCapabilities(agentData),
           execution_target: agentData.execution_target || 'frontend',
@@ -297,10 +397,10 @@ export class OrchestrationService {
           database_type: agentData.database_type,
           schema: agentData.schema
         },
-        status: 'generated',
+        status: enrichmentApplied ? 'enriched' : 'generated',
         confidence: this.calculateAgentConfidence(agentData),
         test_cases: this.generateTestCases(agentData),
-        issues: this.validateAgentCode(agentData),
+        issues: [...this.validateAgentCode(agentData), ...verificationIssues],
         llm_response: llmResponse
       };
 

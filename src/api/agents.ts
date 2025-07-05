@@ -4,6 +4,7 @@ import { AgentOrchestrationService } from '../services/agentOrchestrationService
 import { llmOrchestratorService } from '../services/llmOrchestrator';
 import { authenticate } from '../middleware/auth';
 import { logger } from '../utils/logger';
+import { verifyAgent, enrichAgent, testAgent } from './agents/verify';
 
 const router = Router();
 
@@ -590,6 +591,11 @@ router.post('/communications', authenticate, async (req: Request, res: Response)
     return;
   }
 });
+
+// Agent Verification Endpoints
+router.use('/verify', verifyAgent);
+router.use('/enrich', enrichAgent);
+router.use('/test', testAgent);
 
 /**
  * @swagger
