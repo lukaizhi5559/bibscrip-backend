@@ -110,35 +110,66 @@ Respond in this JSON format:
  * Agent Generation Prompt
  */
 function buildGenerateAgentPrompt(userQuery: string, context?: any): string {
-  const agentFormatString = JSON.stringify(AGENT_FORMAT_TEMPLATE, null, 2);
+  const requirements = context?.requirements || [];
+  const name = context?.name || 'GeneratedAgent';
   
-  return `
-You are an expert agent developer for Thinkdrop AI. Create a modular, reusable agent based on the user's requirements.
+  return `You are an expert agent developer. Create a TypeScript agent based on these requirements.
 
 User Request: "${userQuery}"
+Agent Name: ${name}
+Requirements: ${requirements.join(', ')}
 
-Requirements:
-- Use the exact agent format structure provided below
-- Write clean, executable TypeScript code
-- Include all necessary dependencies
-- Choose appropriate execution_target (frontend for UI automation, backend for API/data processing)
-- Implement a robust execute() method
-- Handle errors gracefully
-- Include proper TypeScript types
+Analyze the user request and determine what services, APIs, or platforms are needed. Then generate appropriate secrets, config, and dependencies.
 
-Agent Format Structure:
-${agentFormatString}
+SPECIAL INSTRUCTIONS FOR STARTUP/AUTOMATION TASKS:
+- If the request involves "startup", "boot", "automatically when computer starts", create code that sets up OS-specific startup automation
+- For macOS: Use launchctl and plist files, or Login Items
+- For Windows: Use startup folder, registry, or Task Scheduler
+- For Linux: Use systemd, cron @reboot, or autostart files
+- Include OS detection and appropriate implementation for each platform
+- Don't just open the application once - set up persistent startup automation
 
-Instructions:
-1. Analyze the user's request to understand the specific task
-2. Determine the appropriate agent name (PascalCase, descriptive)
-3. List all required npm dependencies
-4. Choose execution target based on the task type
-5. Write the complete agent implementation
-6. Ensure the code is production-ready
+EXECUTION TARGET RULES:
+- ALWAYS use "execution_target": "frontend" for personal automation, desktop tasks, file management, startup automation, and user-specific workflows
+- Only use "execution_target": "backend" for server-side APIs, database operations, or multi-user shared services
+- For this request, use "frontend" unless it's explicitly a server/API service
 
-Respond with a valid JSON object matching the agent format exactly.
-  `.trim();
+CRITICAL JSON FORMATTING RULES:
+- You MUST return valid JSON - no syntax errors allowed
+- In the "code" field, you MUST properly escape all quotes and backslashes
+- Use double quotes for JSON strings, escape internal double quotes as \\" 
+- Use \\\\n for newlines in code strings
+- Use \\\\\\\\ for literal backslashes in code
+- Test your JSON mentally before responding
+
+Respond with ONLY a valid JSON object in this exact format:
+{
+  "name": "${name}",
+  "description": "Brief description of what this agent does",
+  "code": "export default {\\n  name: '${name}',\\n  description: 'Agent description',\\n  async execute(params, context) {\\n    try {\\n      // Implementation here\\n      console.log('Executing ${name}...');\\n      return { success: true, result: 'Task completed' };\\n    } catch (error) {\\n      return { success: false, error: error.message };\\n    }\\n  }\\n};",
+  "dependencies": ["axios"],
+  "execution_target": "frontend",
+  "requires_database": false,
+  "config": {},
+  "secrets": {},
+  "orchestrator_metadata": {
+    "chain_order": 1,
+    "next_agents": [],
+    "resources": { "memory_mb": 256, "network_required": true }
+  }
+}
+
+IMPORTANT GUIDELINES:
+- EXECUTION TARGET: Use "frontend" for ALL personal automation, desktop tasks, file operations, startup automation, and user-specific workflows. Only use "backend" for server APIs or multi-user services.
+- JSON VALIDATION: Your response must be parseable by JSON.parse() - no exceptions!
+- CODE ESCAPING: All quotes, backslashes, and newlines in the code field must be properly escaped
+- Only include secrets that are actually needed for the specific task
+- Use descriptive secret names that match the service (e.g., "github_token", "stripe_secret_key")
+- Config should contain settings relevant to the agent's functionality
+- Dependencies should only include packages actually used in the code
+- Make the code implementation functional and specific to the user's request
+
+Return ONLY the JSON object, no markdown code blocks or other text.`;
 }
 
 /**
@@ -199,9 +230,53 @@ Respond in this JSON format:
 }
 
 /**
- * Bible/Ask Prompt (Enhanced from existing /ask functionality)
+ * Ask Prompt (Fitted for Thinkdrop AI - General Purpose Assistant)
  */
 function buildAskPrompt(userQuery: string, context?: any): string {
+  const { ragSources, knowledgeBase, userPreferences } = context || {};
+  
+  let prompt = `
+You are Thinkdrop AI, an intelligent, helpful, and discerning assistant. You answer with clarity, humility, and wisdom — grounded in a Biblical worldview and traditional conservative values.
+
+You are capable of researching, analyzing, problem-solving, and explaining complex topics across technology, philosophy, culture, personal productivity, business, theology, and everyday life. You are careful to respect truth, reason, and spiritual integrity in all responses.
+
+User Question: "${userQuery}"
+  `.trim();
+
+  // Add RAG context if available
+  if (ragSources && ragSources.length > 0) {
+    prompt += `\n\nRelevant Context Sources:\n`;
+    ragSources.forEach((source: any, index: number) => {
+      prompt += `${index + 1}. ${source.source} (Score: ${source.score}): ${source.reference}\n`;
+    });
+  }
+
+  // Add knowledge base context if available
+  if (knowledgeBase && knowledgeBase.length > 0) {
+    prompt += `\n\nRelevant Knowledge Base:\n`;
+    knowledgeBase.forEach((item: any, index: number) => {
+      prompt += `${index + 1}. ${item.title}: ${item.summary}\n`;
+    });
+  }
+
+  prompt += `\n\nInstructions:
+- Provide a comprehensive, thoughtful response
+- Use clear, accessible language
+- Be accurate and factual
+- If the question is unclear, ask for clarification
+- Provide actionable insights when appropriate
+- Consider multiple perspectives when relevant
+- Structure your response logically
+
+Response:`;
+
+  return prompt;
+}
+
+/* ARCHIVED: Bible/Ask Prompt (Enhanced from existing /ask functionality)
+ * Commented out for future use if Bible functionality is needed
+ *
+function buildBibleAskPrompt(userQuery: string, context?: any): string {
   const { verses, ragSources, preferredTranslation } = context || {};
   
   let prompt = `
@@ -239,6 +314,7 @@ Response:`;
 
   return prompt;
 }
+*/
 
 /**
  * Get prompt metadata for logging and debugging

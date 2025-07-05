@@ -11,6 +11,7 @@ import { logger } from '../utils/logger';
 export interface EnhancedLLMOptions {
   provider?: string;
   promptType?: 'intent' | 'generate_agent' | 'orchestrate' | 'ask';
+  taskType?: 'intent' | 'generate_agent' | 'orchestrate' | 'ask'; // For cache bypass control
   forceRefresh?: boolean;
   timeout?: number;
   metadata?: Record<string, any>;
@@ -73,11 +74,20 @@ export class LLMOrchestratorService {
         metadata: promptMetadata
       });
 
-      // Process through base LLM router
-      let response: LLMResponse;
-      // Use standard processing with fallback chain
-      response = await this.baseLLMRouter.processPrompt(prompt);
-      processingSteps.push(`Processed with fallback chain, used: ${response.provider}`);
+      // Process through base LLM router with task-specific options
+      const routerOptions = {
+        skipCache: llmOptions.forceRefresh || false,
+        taskType: task
+      };
+      
+      const response = await this.baseLLMRouter.processPrompt(prompt, routerOptions);
+      processingSteps.push(`Processed with task: ${task}, used: ${response.provider}`);
+      
+      if (routerOptions.skipCache) {
+        processingSteps.push('Cache bypassed due to forceRefresh option');
+      } else if (task === 'generate_agent') {
+        processingSteps.push('Semantic cache skipped for agent generation');
+      }
       
       // Note: Provider-specific requests would require extending the base LLMRouter
       // For now, we rely on the intelligent fallback system
@@ -132,7 +142,10 @@ export class LLMOrchestratorService {
    * Process agent generation requests
    */
   async processAgentGeneration(description: string, requirements?: any): Promise<EnhancedLLMResponse> {
-    return this.processPrompt('generate_agent', { userQuery: description, context: requirements }, { promptType: 'generate_agent' });
+    return this.processPrompt('generate_agent', { userQuery: description, context: requirements }, { 
+      promptType: 'generate_agent',
+      forceRefresh: true // Always bypass cache for agent generation to ensure fresh code
+    });
   }
 
   /**
@@ -188,10 +201,11 @@ export class LLMOrchestratorService {
    * Process orchestration planning
    */
   async processOrchestration(userQuery: string, context?: any): Promise<EnhancedLLMResponse> {
-    return this.processPrompt('orchestrate', { userQuery, context }, { promptType: 'orchestrate' });
+    return this.processPrompt('orchestrate', { userQuery, context }, { 
+      promptType: 'orchestrate',
+      taskType: 'orchestrate' // This will bypass semantic cache for orchestration
+    });
   }
-
-
 
   /**
    * Process with specific provider (for testing or specific requirements)

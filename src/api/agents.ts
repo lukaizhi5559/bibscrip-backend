@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { orchestrationService } from '../services/orchestrationService';
+import { AgentOrchestrationService } from '../services/agentOrchestrationService';
 import { llmOrchestratorService } from '../services/llmOrchestrator';
 import { authenticate } from '../middleware/auth';
 import { logger } from '../utils/logger';
@@ -94,7 +95,8 @@ router.post('/orchestrate', authenticate, async (req: Request, res: Response): P
  */
 router.get('/', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
-    const agents = await orchestrationService.getAllAgents();
+    const agentOrchestrationService = AgentOrchestrationService.getInstance();
+    const agents = await agentOrchestrationService.getAllAgents();
     res.json(agents);
   } catch (error) {
     logger.error('Error getting all agents:', error as Error);
@@ -130,7 +132,8 @@ router.get('/', authenticate, async (req: Request, res: Response): Promise<void>
 router.get('/:name', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
     const { name } = req.params;
-    const agent = await orchestrationService.getAgentByName(name);
+    const agentOrchestrationService = AgentOrchestrationService.getInstance();
+    const agent = await agentOrchestrationService.getAgent(name);
 
     if (!agent) {
       res.status(404).json({
@@ -282,37 +285,208 @@ router.post('/generate', authenticate, async (req: Request, res: Response): Prom
 
     logger.info('Generating agent with unified LLM core', { name, description });
 
-    // Use unified LLM core for enhanced agent generation
-    const llmResponse = await llmOrchestratorService.processAgentGeneration(description, { name, context });
+    // Use orchestrationService which internally calls the LLM (no duplicate calls)
     const result = await orchestrationService.generateAgent(description, { name, context });
     
     if (result.status === 'error') {
       res.status(400).json({
         error: 'Agent generation failed',
         issues: result.issues,
-        llm_details: {
-          provider: llmResponse.provider,
-          latency: llmResponse.latencyMs,
-          fromCache: llmResponse.fromCache
-        }
+        llm_metadata: result.llm_response ? {
+          provider: result.llm_response.provider,
+          latencyMs: result.llm_response.latencyMs,
+          fromCache: result.llm_response.fromCache
+        } : undefined
       });
       return;
     }
 
+    // Store the generated agent in the database
+    const agentOrchestrationService = AgentOrchestrationService.getInstance();
+    
+    // Ensure the agent has all required properties for the Agent interface
+    const completeAgent = {
+      ...result.agent,
+      parameters: {}, // Default empty parameters
+      version: '1.0.0', // Default version
+      config: {}, // Default empty config
+      secrets: {}, // Default empty secrets
+      orchestrator_metadata: {}, // Default empty orchestrator metadata
+      database_type: (result.agent.database_type === 'sqlite' || result.agent.database_type === 'duckdb') 
+        ? result.agent.database_type as 'sqlite' | 'duckdb'
+        : undefined // Ensure database_type is valid or undefined
+    };
+    
+    logger.info('Attempting to store agent in database', { agentName: completeAgent.name });
+    
+    let storedAgent;
+    try {
+      storedAgent = await agentOrchestrationService.storeAgent(completeAgent);
+      logger.info('Agent stored in database successfully', { agentName: storedAgent.name, agentId: storedAgent.id });
+    } catch (storageError) {
+      logger.error('Failed to store agent in database', {
+        agentName: completeAgent.name,
+        error: storageError instanceof Error ? storageError.message : String(storageError),
+        stack: storageError instanceof Error ? storageError.stack : undefined
+      });
+      
+      // Continue with the response even if storage fails, but use the original agent
+      storedAgent = completeAgent;
+    }
+
     res.json({
       status: result.status,
-      agent: result.agent,
+      agent: storedAgent,
       confidence: result.confidence,
       issues: result.issues,
-      llm_details: {
-        provider: llmResponse.provider,
-        latency: llmResponse.latencyMs,
-        fromCache: llmResponse.fromCache
-      }
+      llm_metadata: result.llm_response ? {
+        provider: result.llm_response.provider,
+        latencyMs: result.llm_response.latencyMs,
+        fromCache: result.llm_response.fromCache
+      } : undefined
     });
     return;
   } catch (error) {
     logger.error('Error generating agent:', error as Error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: (error as Error).message,
+    });
+    return;
+  }
+});
+
+/**
+ * @swagger
+ * /api/agents/generate/batch:
+ *   post:
+ *     summary: Generate multiple agents in parallel for multi-agent workflows
+ *     tags: [Agents]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               agents:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     name:
+ *                       type: string
+ *                       description: Agent name
+ *                     description:
+ *                       type: string
+ *                       description: Agent description/role
+ *                     context:
+ *                       type: string
+ *                       description: Additional context for agent generation
+ *                   required:
+ *                     - name
+ *                     - description
+ *             required:
+ *               - agents
+ *     responses:
+ *       200:
+ *         description: Batch agent generation results
+ *       400:
+ *         description: Invalid request or generation failed
+ */
+router.post('/generate/batch', authenticate, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { agents } = req.body;
+
+    if (!agents || !Array.isArray(agents) || agents.length === 0) {
+      res.status(400).json({
+        error: 'Agents array is required and must not be empty',
+      });
+      return;
+    }
+
+    // Validate each agent spec
+    for (const [index, agent] of agents.entries()) {
+      if (!agent.name || !agent.description) {
+        res.status(400).json({
+          error: `Agent at index ${index} is missing required name or description`,
+        });
+        return;
+      }
+    }
+
+    logger.info('Starting batch agent generation', { 
+      agentCount: agents.length,
+      agentNames: agents.map((a: any) => a.name)
+    });
+
+    // Use orchestrationService batch generation
+    const batchResult = await orchestrationService.generateAgentsBatch(agents);
+    
+    // Store successful agents in the database
+    const agentOrchestrationService = AgentOrchestrationService.getInstance();
+    const storedAgents = [];
+    const storageErrors = [];
+    
+    for (const result of batchResult.successful) {
+      try {
+        const completeAgent = {
+          ...result.agent,
+          parameters: {},
+          version: '1.0.0',
+          config: {},
+          secrets: {},
+          orchestrator_metadata: {},
+          database_type: (result.agent.database_type === 'sqlite' || result.agent.database_type === 'duckdb') 
+            ? result.agent.database_type as 'sqlite' | 'duckdb'
+            : undefined
+        };
+        
+        const storedAgent = await agentOrchestrationService.storeAgent(completeAgent);
+        storedAgents.push({
+          ...result,
+          agent: storedAgent
+        });
+        
+        logger.info('Successfully stored agent from batch', { agentName: storedAgent.name });
+      } catch (storageError) {
+        logger.error('Failed to store agent from batch', {
+          agentName: result.agent.name,
+          error: storageError instanceof Error ? storageError.message : String(storageError)
+        });
+        
+        storageErrors.push({
+          agentName: result.agent.name,
+          error: storageError instanceof Error ? storageError.message : String(storageError)
+        });
+      }
+    }
+
+    // Return comprehensive batch results
+    res.status(200).json({
+      status: 'batch_completed',
+      summary: {
+        ...batchResult.summary,
+        stored: storedAgents.length,
+        storageErrors: storageErrors.length
+      },
+      results: {
+        successful: storedAgents,
+        failed: batchResult.failed,
+        storageErrors
+      },
+      performance: {
+        totalLatencyMs: batchResult.summary.totalLatency,
+        averageLatencyMs: batchResult.summary.averageLatency,
+        parallelSpeedup: `${((batchResult.summary.averageLatency * batchResult.summary.total) / batchResult.summary.totalLatency).toFixed(2)}x`
+      }
+    });
+    return;
+    
+  } catch (error) {
+    logger.error('Error in batch agent generation:', error as Error);
     res.status(500).json({
       error: 'Internal server error',
       message: (error as Error).message,
@@ -478,7 +652,7 @@ router.post('/llm/analyze', authenticate, async (req: Request, res: Response): P
         } else {
           metadata = {
             provider: 'unknown',
-            latency: 0,
+            latencyMs: 0,
             fromCache: false,
             timestamp: new Date().toISOString()
           };
@@ -488,7 +662,7 @@ router.post('/llm/analyze', authenticate, async (req: Request, res: Response): P
         llmResponse = await llmOrchestratorService.processAgentGeneration(query, context);
         metadata = {
           provider: llmResponse.provider || 'unknown',
-          latency: llmResponse.latencyMs || 0,
+          latencyMs: llmResponse.latencyMs || 0,
           fromCache: llmResponse.fromCache || false,
           timestamp: new Date().toISOString()
         };
@@ -497,7 +671,7 @@ router.post('/llm/analyze', authenticate, async (req: Request, res: Response): P
         llmResponse = await llmOrchestratorService.processOrchestration(query, context);
         metadata = {
           provider: llmResponse.provider || 'unknown',
-          latency: llmResponse.latencyMs || 0,
+          latencyMs: llmResponse.latencyMs || 0,
           fromCache: llmResponse.fromCache || false,
           timestamp: new Date().toISOString()
         };
@@ -506,7 +680,7 @@ router.post('/llm/analyze', authenticate, async (req: Request, res: Response): P
         llmResponse = await llmOrchestratorService.processAsk(query, context);
         metadata = {
           provider: llmResponse.provider || 'unknown',
-          latency: llmResponse.latencyMs || 0,
+          latencyMs: llmResponse.latencyMs || 0,
           fromCache: llmResponse.fromCache || false,
           timestamp: new Date().toISOString()
         };

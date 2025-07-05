@@ -17,6 +17,86 @@ export interface Agent {
   created_at?: Date;
   updated_at?: Date;
   version: string;
+  // New fields for enhanced agent orchestration
+  config: AgentConfig;
+  secrets: AgentSecrets;
+  orchestrator_metadata: OrchestratorMetadata;
+}
+
+/**
+ * Agent configuration for runtime behavior
+ */
+export interface AgentConfig {
+  // Voice and communication settings
+  voice?: {
+    provider: 'elevenlabs' | 'openai' | 'azure';
+    voice_id?: string;
+    language: string;
+    speed?: number;
+  };
+  // Platform-specific settings
+  platforms?: {
+    telegram?: {
+      chat_id?: string;
+      parse_mode?: 'HTML' | 'Markdown';
+    };
+    email?: {
+      smtp_server?: string;
+      port?: number;
+    };
+  };
+  // Execution preferences
+  execution?: {
+    timeout_ms?: number;
+    retry_count?: number;
+    parallel?: boolean;
+  };
+  // Custom configuration
+  [key: string]: any;
+}
+
+/**
+ * Agent secrets and API keys (should be encrypted)
+ */
+export interface AgentSecrets {
+  // API tokens
+  telegram_bot_token?: string;
+  openai_api_key?: string;
+  elevenlabs_api_key?: string;
+  // Authentication
+  oauth_tokens?: Record<string, string>;
+  // Custom secrets
+  [key: string]: any;
+}
+
+/**
+ * Orchestrator metadata for multi-agent workflows
+ */
+export interface OrchestratorMetadata {
+  // Workflow chain information
+  chain_order?: number;
+  next_agents?: string[];
+  previous_agents?: string[];
+  // Conditional execution
+  conditions?: {
+    success_action?: string;
+    failure_action?: string;
+    timeout_action?: string;
+  };
+  // Resource requirements
+  resources?: {
+    memory_mb?: number;
+    cpu_cores?: number;
+    network_required?: boolean;
+  };
+  // MCP protocol settings
+  mcp?: {
+    protocol_version?: string;
+    message_format?: 'json' | 'xml';
+    encryption?: boolean;
+  };
+  // Custom metadata
+  [key: string]: any;
 }
 
 export interface AgentCommunication {
@@ -222,12 +302,19 @@ Focus on practical, working code that integrates with existing Thinkdrop infrast
         throw new Error('Generated agent missing required fields');
       }
 
-      return {
+      // Create agent with all required fields
+      const agent: Agent = {
         ...agentData,
         id: uuidv4(),
         created_at: new Date(),
         updated_at: new Date(),
+        // Provide default values for new required fields
+        config: {},
+        secrets: {},
+        orchestrator_metadata: {},
       };
+      
+      return agent;
     } catch (error) {
       logger.error(`Error generating agent ${agentName}:`, error as Error);
       throw new Error(`Failed to generate agent: ${(error as Error).message}`);
@@ -243,8 +330,8 @@ Focus on practical, working code that integrates with existing Thinkdrop infrast
         INSERT INTO agents (
           id, name, description, parameters, dependencies, 
           execution_target, requires_database, database_type, 
-          code, version
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          code, version, config, secrets, orchestrator_metadata
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         ON CONFLICT (name) DO UPDATE SET
           description = EXCLUDED.description,
           parameters = EXCLUDED.parameters,
@@ -254,6 +341,9 @@ Focus on practical, working code that integrates with existing Thinkdrop infrast
           database_type = EXCLUDED.database_type,
           code = EXCLUDED.code,
           version = EXCLUDED.version,
+          config = EXCLUDED.config,
+          secrets = EXCLUDED.secrets,
+          orchestrator_metadata = EXCLUDED.orchestrator_metadata,
           updated_at = NOW()
         RETURNING *
       `, [
@@ -266,7 +356,10 @@ Focus on practical, working code that integrates with existing Thinkdrop infrast
         agent.requires_database,
         agent.database_type,
         agent.code,
-        agent.version
+        agent.version,
+        JSON.stringify(agent.config),
+        JSON.stringify(agent.secrets),
+        JSON.stringify(agent.orchestrator_metadata)
       ]);
 
       return result.rows[0] as Agent;

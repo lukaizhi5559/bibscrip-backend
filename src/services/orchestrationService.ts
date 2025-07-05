@@ -3,8 +3,10 @@
  * Handles multi-agent workflow planning and coordination using LLM intelligence
  */
 
-import { llmOrchestratorService, EnhancedLLMResponse } from './llmOrchestrator';
 import { logger } from '../utils/logger';
+import { getBestLLMResponse } from '../utils/llmRouter';
+import { llmOrchestratorService, EnhancedLLMResponse } from './llmOrchestrator';
+import { jsonRecoveryService, JsonRecoveryResult } from './jsonRecoveryService';
 
 export interface AgentAction {
   name: string;
@@ -241,10 +243,10 @@ export class OrchestrationService {
       // Use LLM to generate agent code
       const llmResponse = await llmOrchestratorService.processAgentGeneration(description, requirements);
       
-      // Parse the LLM response
-      const agentData = this.parseAgentResponse(llmResponse.text);
+      // Parse the LLM response using intelligent JSON recovery
+      const rawAgentData = await this.parseAgentResponse(llmResponse.text);
       
-      if (!agentData) {
+      if (!rawAgentData) {
         return {
           agent: {
             name: 'UnknownAgent',
@@ -258,6 +260,27 @@ export class OrchestrationService {
           status: 'error',
           confidence: 0,
           issues: ['LLM failed to generate valid agent code'],
+          llm_response: llmResponse
+        };
+      }
+
+      // Validate and enhance the agent data (includes code wrapping if needed)
+      const agentData = this.validateAndEnhanceAgent(rawAgentData);
+      
+      if (!agentData) {
+        return {
+          agent: {
+            name: 'ValidationFailedAgent',
+            description: 'Agent validation failed',
+            code: '// Agent validation failed',
+            dependencies: [],
+            capabilities: [],
+            execution_target: 'frontend',
+            requires_database: false
+          },
+          status: 'error',
+          confidence: 0,
+          issues: ['Agent validation failed'],
           llm_response: llmResponse
         };
       }
@@ -311,6 +334,167 @@ export class OrchestrationService {
       };
     }
   }
+
+  /**
+   * Generate multiple agents in parallel using Promise.allSettled
+   * Each agent gets its own focused LLM call for better isolation and reliability
+   */
+  async generateAgentsBatch(agentSpecs: Array<{name: string, description: string, context?: string}>): Promise<{
+    results: AgentGenerationResult[];
+    successful: AgentGenerationResult[];
+    failed: AgentGenerationResult[];
+    summary: {
+      total: number;
+      successful: number;
+      failed: number;
+      successRate: number;
+      totalLatency: number;
+      averageLatency: number;
+    };
+  }> {
+    const startTime = performance.now();
+    
+    try {
+      logger.info('Starting parallel agent generation', { 
+        agentCount: agentSpecs.length,
+        agents: agentSpecs.map(spec => spec.name),
+        method: 'promise_parallel'
+      });
+
+      // Generate all agents in parallel using Promise.allSettled
+      // Return promises directly for true parallelism - let Promise.allSettled handle everything
+      const agentPromises = agentSpecs.map((spec, index) => {
+        logger.info(`Starting generation for agent ${index + 1}/${agentSpecs.length}`, { 
+          name: spec.name,
+          description: spec.description.substring(0, 100) + '...'
+        });
+        
+        // Use focused context for each agent to avoid confusion
+        const focusedDescription = `${spec.description}. Focus specifically on: ${spec.description}`;
+        
+        // Return the promise directly - Promise.allSettled will handle success/failure
+        return this.generateAgent(focusedDescription, spec.context);
+      });
+
+      // Wait for all agent generations to complete in parallel
+      const results = await Promise.allSettled(agentPromises);
+      
+      // Process results and separate successful from failed
+      const agentResults: AgentGenerationResult[] = [];
+      const successful: AgentGenerationResult[] = [];
+      const failed: AgentGenerationResult[] = [];
+      
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
+          const agentResult = result.value;
+          agentResults.push(agentResult);
+          
+          if (agentResult.status === 'generated') {
+            logger.info(`Completed generation for agent ${index + 1}/${agentSpecs.length}`, {
+              name: agentResult.agent.name,
+              status: agentResult.status,
+              confidence: agentResult.confidence
+            });
+            successful.push(agentResult);
+          } else {
+            logger.error(`Failed to generate agent ${index + 1}/${agentSpecs.length}`, {
+              name: agentSpecs[index].name,
+              error: agentResult.issues
+            });
+            failed.push(agentResult);
+          }
+        } else {
+          // Promise was rejected
+          const failedResult: AgentGenerationResult = {
+            agent: {
+              name: agentSpecs[index].name,
+              description: agentSpecs[index].description,
+              code: '// Promise rejection error',
+              dependencies: [],
+              capabilities: [],
+              execution_target: 'frontend',
+              requires_database: false
+            },
+            status: 'error',
+            confidence: 0,
+            issues: [`Promise rejection: ${result.reason}`]
+          };
+
+          logger.error(`Failed to generate agent ${index + 1}/${agentSpecs.length}`, {
+            name: agentSpecs[index].name,
+            error: result.reason
+          });
+          
+          agentResults.push(failedResult);
+          failed.push(failedResult);
+        }
+      });
+      
+      const totalLatency = performance.now() - startTime;
+      const summary = {
+        total: agentSpecs.length,
+        successful: successful.length,
+        failed: failed.length,
+        successRate: successful.length / agentSpecs.length,
+        totalLatency,
+        averageLatency: totalLatency / agentSpecs.length
+      };
+      
+      logger.info('Batch agent generation completed', {
+        ...summary,
+        successfulAgents: successful.map(r => r.agent.name),
+        failedAgents: failed.map(r => r.agent.name)
+      });
+      
+      return {
+        results: agentResults,
+        successful,
+        failed,
+        summary
+      };
+      
+    } catch (error) {
+      const totalLatency = performance.now() - startTime;
+      
+      logger.error('Batch agent generation failed completely', {
+        error: error instanceof Error ? error.message : String(error),
+        agentCount: agentSpecs.length,
+        totalLatency
+      });
+      
+      // Return all failed results
+      const failedResults = agentSpecs.map(spec => ({
+        agent: {
+          name: spec.name,
+          description: spec.description,
+          code: '// Batch generation system error',
+          dependencies: [],
+          capabilities: [],
+          execution_target: 'frontend' as const,
+          requires_database: false
+        },
+        status: 'error' as const,
+        confidence: 0,
+        issues: [`Batch system error: ${error instanceof Error ? error.message : String(error)}`]
+      }));
+      
+      return {
+        results: failedResults,
+        successful: [],
+        failed: failedResults,
+        summary: {
+          total: agentSpecs.length,
+          successful: 0,
+          failed: agentSpecs.length,
+          successRate: 0,
+          totalLatency,
+          averageLatency: totalLatency / agentSpecs.length
+        }
+      };
+    }
+  }
+
+
 
   /**
    * Get all agents (placeholder - would integrate with database)
@@ -386,17 +570,452 @@ export class OrchestrationService {
     }
   }
 
-  private parseAgentResponse(response: string): any {
+  private async parseAgentResponse(response: string): Promise<any> {
     try {
+      // Log the raw response for debugging
+      logger.info('Raw LLM response for agent generation', { 
+        responseLength: response.length,
+        responsePreview: response.substring(0, 200) + '...'
+      });
+
+      // Use intelligent JSON recovery service
+      const recoveryResult = await jsonRecoveryService.recoverJson(
+        response,
+        `{
+          "name": "string",
+          "description": "string", 
+          "code": "string (complete TypeScript code)",
+          "dependencies": ["array", "of", "strings"],
+          "execution_target": "frontend|backend",
+          "requires_database": boolean,
+          "version": "string",
+          "config": {},
+          "secrets": {},
+          "orchestrator_metadata": {}
+        }`
+      );
+
+      if (recoveryResult.success && recoveryResult.parsedData) {
+        logger.info('JSON recovery successful', {
+          method: recoveryResult.recoveryMethod,
+          confidence: recoveryResult.confidence
+        });
+        
+        return this.validateAndEnhanceAgent(recoveryResult.parsedData);
+      } else {
+        logger.error('JSON recovery failed', {
+          method: recoveryResult.recoveryMethod,
+          error: recoveryResult.originalError,
+          responsePreview: response.substring(0, 500)
+        });
+        return null;
+      }
+      
+    } catch (error) {
+      logger.error('Unexpected error in parseAgentResponse', {
+        error: (error as Error).message,
+        stack: (error as Error).stack
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Extract balanced JSON from response using brace counting
+   */
+  private extractBalancedJson(text: string): string | null {
+    const firstBrace = text.indexOf('{');
+    if (firstBrace === -1) return null;
+    
+    let braceCount = 0;
+    let inString = false;
+    let escaped = false;
+    
+    for (let i = firstBrace; i < text.length; i++) {
+      const char = text[i];
+      
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      
+      if (char === '\\') {
+        escaped = true;
+        continue;
+      }
+      
+      if (char === '"' && !escaped) {
+        inString = !inString;
+        continue;
+      }
+      
+      if (!inString) {
+        if (char === '{') {
+          braceCount++;
+        } else if (char === '}') {
+          braceCount--;
+          if (braceCount === 0) {
+            return text.substring(firstBrace, i + 1);
+          }
+        }
+      }
+    }
+    
+    return null;
+  }
+
+  /**
+   * Attempt to parse JSON with progressive error recovery
+   */
+  private attemptJsonParse(jsonStr: string): any {
+    // First attempt: direct parsing
+    try {
+      const parsed = JSON.parse(jsonStr);
+      logger.info('Direct JSON parse successful');
+      return parsed;
+    } catch (error) {
+      logger.debug('Direct JSON parse failed, attempting recovery', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+    
+    // Second attempt: fix common issues
+    let fixedJson = jsonStr;
+    
+    try {
+      // Remove trailing commas
+      fixedJson = fixedJson.replace(/,\s*([}\]])/g, '$1');
+      
+      // Fix unclosed strings at end
+      if (fixedJson.match(/"[^"]*$/)) {
+        fixedJson += '"';
+      }
+      
+      // Fix missing closing braces/brackets
+      const openBraces = (fixedJson.match(/\{/g) || []).length;
+      const closeBraces = (fixedJson.match(/\}/g) || []).length;
+      const openBrackets = (fixedJson.match(/\[/g) || []).length;
+      const closeBrackets = (fixedJson.match(/\]/g) || []).length;
+      
+      if (openBraces > closeBraces) {
+        fixedJson += '}'.repeat(openBraces - closeBraces);
+      }
+      if (openBrackets > closeBrackets) {
+        fixedJson += ']'.repeat(openBrackets - closeBrackets);
+      }
+      
+      // Fix common template literal issues
+      fixedJson = fixedJson.replace(/`([^`]*)`/g, '"$1"'); // Convert template literals to strings
+      fixedJson = fixedJson.replace(/\$\{[^}]*\}/g, '"PLACEHOLDER"'); // Replace template expressions
+      
+      const parsed = JSON.parse(fixedJson);
+      logger.info('JSON recovery successful');
+      return parsed;
+    } catch (error) {
+      logger.debug('JSON recovery failed', {
+        error: error instanceof Error ? error.message : String(error),
+        fixedJson: fixedJson.substring(0, 200)
+      });
+    }
+    
+    // Third attempt: extract key-value pairs manually
+    try {
+      return this.manualJsonExtraction(jsonStr);
+    } catch (error) {
+      logger.debug('Manual JSON extraction failed', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+    
+    return null;
+  }
+
+  /**
+   * Manual extraction of key-value pairs when JSON parsing fails
+   */
+  private manualJsonExtraction(text: string): any {
+    const result: any = {};
+    
+    // Extract common agent fields using regex
+    const patterns = {
+      name: /["']name["']\s*:\s*["']([^"']+)["']/i,
+      description: /["']description["']\s*:\s*["']([^"']+)["']/i,
+      execution_target: /["']execution_target["']\s*:\s*["']([^"']+)["']/i,
+      requires_database: /["']requires_database["']\s*:\s*(true|false)/i,
+      version: /["']version["']\s*:\s*["']([^"']+)["']/i
+    };
+    
+    for (const [key, pattern] of Object.entries(patterns)) {
+      const match = text.match(pattern);
+      if (match) {
+        if (key === 'requires_database') {
+          result[key] = match[1] === 'true';
+        } else {
+          result[key] = match[1];
+        }
+      }
+    }
+    
+    // Extract code block
+    const codeMatch = text.match(/["']code["']\s*:\s*["']([\s\S]*?)["'](?=\s*[,}])/i) ||
+                     text.match(/["']code["']\s*:\s*`([\s\S]*?)`/i);
+    if (codeMatch) {
+      result.code = codeMatch[1];
+    }
+    
+    // Extract dependencies array
+    const depsMatch = text.match(/["']dependencies["']\s*:\s*\[([^\]]*?)\]/i);
+    if (depsMatch) {
+      result.dependencies = depsMatch[1]
+        .split(',')
+        .map(dep => dep.trim().replace(/["']/g, ''))
+        .filter(dep => dep.length > 0);
+    }
+    
+    logger.info('Manual JSON extraction completed', {
+      extractedFields: Object.keys(result),
+      hasName: !!result.name,
+      hasCode: !!result.code
+    });
+    
+    return Object.keys(result).length > 0 ? result : null;
+  }
+
+  /**
+   * Extract agent information from plain text when JSON parsing completely fails
+   */
+  private extractAgentFromText(text: string): any {
+    logger.info('Attempting to extract agent from plain text');
+    
+    // Try to find agent name and description from common patterns
+    const nameMatch = text.match(/(?:agent|name)\s*:?\s*["']?([^\n"']+)["']?/i);
+    const descMatch = text.match(/(?:description|desc)\s*:?\s*["']?([^\n"']+)["']?/i);
+    
+    const name = nameMatch ? nameMatch[1].trim() : 'ExtractedAgent';
+    const description = descMatch ? descMatch[1].trim() : 'Agent extracted from LLM response';
+    
+    return {
+      name,
+      description,
+      code: this.generateFallbackCode(name, description),
+      dependencies: [],
+      execution_target: 'frontend',
+      requires_database: false,
+      version: 'v1.0.0',
+      config: {},
+      secrets: {},
+      orchestrator_metadata: {
+        chain_order: 1,
+        next_agents: [],
+        resources: { memory_mb: 256, network_required: true }
+      }
+    };
+  }
+
+  /**
+   * Generate fallback code when agent code is missing or invalid
+   */
+  private generateFallbackCode(name: string, description: string): string {
+    return `// ${name} - ${description}
+// Generated fallback code due to parsing issues
+
+export default {
+  name: '${name}',
+  description: '${description}',
+  
+  async execute(params = {}) {
+    console.log('Executing ${name}...');
+    console.log('Parameters:', params);
+    
+    try {
+      // TODO: Implement actual agent logic
+      // This is a fallback implementation
+      
+      return {
+        success: true,
+        result: 'Agent executed successfully (fallback mode)',
+        timestamp: new Date().toISOString(),
+        params
+      };
+    } catch (error) {
+      console.error('Agent execution error:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+        timestamp: new Date().toISOString()
+      };
+    }
+  }
+};`;
+  }
+
+  /**
+   * Check if code is already in proper agent module format
+   */
+  private isProperAgentModuleFormat(code: string): boolean {
+  // Check for the expected agent module structure
+  const hasExportDefault = code.includes('export default');
+  const hasExecuteMethod = code.includes('async execute(') || code.includes('execute(');
+  const hasNameProperty = code.includes('name:');
+  
+  return hasExportDefault && hasExecuteMethod && hasNameProperty;
+}
+
+  /**
+   * Unescape code string to remove \n, \t, \', etc. and make it readable
+   */
+  private unescapeCode(code: string): string {
+    try {
+      // Handle common escape sequences
+      return code
+        .replace(/\\n/g, '\n')     // Convert \n to actual newlines
+        .replace(/\\t/g, '\t')     // Convert \t to actual tabs
+        .replace(/\\r/g, '\r')     // Convert \r to actual carriage returns
+        .replace(/\\'/g, "'")      // Convert \' to actual single quotes
+        .replace(/\\"/g, '"')     // Convert \" to actual double quotes
+        .replace(/\\\\/g, '\\');   // Convert \\ to actual backslashes
+    } catch (error) {
+      logger.warn('Failed to unescape code, using original', { error: error instanceof Error ? error.message : String(error) });
+      return code;
+    }
+  }
+
+  /**
+   * Wrap standalone code in proper agent module format
+   */
+  private wrapCodeInAgentModule(standaloneCode: string, name: string, description: string): string {
+    // Clean up the standalone code (remove any trailing semicolons or exports)
+    let cleanCode = standaloneCode.trim();
+    
+    // Remove any existing export statements that might conflict
+    cleanCode = cleanCode.replace(/^export\s+default\s+/gm, '');
+    cleanCode = cleanCode.replace(/^module\.exports\s*=\s*/gm, '');
+    
+    // Create the proper agent module wrapper
+    return `export default {
+  name: '${name}',
+  description: '${description}',
+  
+  async execute(params, context) {
+    try {
+      // Original standalone code wrapped in execute method
+      ${cleanCode.split('\n').map(line => '      ' + line).join('\n')}
+      
+      return { 
+        success: true, 
+        result: 'Agent executed successfully',
+        timestamp: new Date().toISOString()
+      };
+    } catch (error) {
+      console.error('Agent execution error:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+        timestamp: new Date().toISOString()
+      };
+    }
+  }
+};`;
+}  
+
+  /**
+   * Validate and enhance parsed agent data
+   */
+  private validateAndEnhanceAgent(parsed: any): any {
+    // Ensure required fields exist
+    if (!parsed.name || typeof parsed.name !== 'string') {
+      logger.warn('Agent missing or invalid name field');
+      return null;
+    }
+    
+    if (!parsed.description || typeof parsed.description !== 'string') {
+      logger.warn('Agent missing or invalid description field');
+      return null;
+    }
+    
+    // Validate and fix code field
+    if (!parsed.code || typeof parsed.code !== 'string' || parsed.code.length < 10) {
+      logger.warn('Agent code is missing or too short, generating fallback', {
+        hasCode: !!parsed.code,
+        codeLength: parsed.code ? parsed.code.length : 0
+      });
+      parsed.code = this.generateFallbackCode(parsed.name, parsed.description);
+    } else {
+      // Unescape the code to remove \n, \t, \', etc. and make it readable
+      parsed.code = this.unescapeCode(parsed.code);
+      
+      // Check if code is already in proper agent module format
+      if (!this.isProperAgentModuleFormat(parsed.code)) {
+        logger.info('Converting standalone code to proper agent module format', {
+          name: parsed.name,
+          originalCodeLength: parsed.code.length
+        });
+        parsed.code = this.wrapCodeInAgentModule(parsed.code, parsed.name, parsed.description);
+      }
+    }
+    
+    // Ensure arrays are properly formatted
+    if (!Array.isArray(parsed.dependencies)) {
+      parsed.dependencies = [];
+    }
+    
+    // Set defaults for missing fields
+    parsed.execution_target = parsed.execution_target || 'frontend';
+    parsed.requires_database = Boolean(parsed.requires_database);
+    parsed.version = parsed.version || 'v1.0.0';
+    
+    // Add enhanced fields with defaults
+    parsed.config = parsed.config || {};
+    parsed.secrets = parsed.secrets || {};
+    parsed.orchestrator_metadata = parsed.orchestrator_metadata || {
+      chain_order: 1,
+      next_agents: [],
+      resources: { memory_mb: 256, network_required: true }
+    };
+    
+    logger.info('Agent validation and enhancement completed', { 
+      name: parsed.name,
+      hasCode: !!parsed.code,
+      codeLength: parsed.code ? parsed.code.length : 0,
+      dependencies: parsed.dependencies.length,
+      executionTarget: parsed.execution_target
+    });
+    
+    return parsed;
+  }
+
+  /**
+   * Legacy method for backward compatibility - uses basic JSON extraction
+   */
+  private parseAgentResponseLegacy(response: string): any {
+    logger.warn('Using legacy parseAgentResponse method - consider updating caller to use async version');
+    
+    try {
+      // Basic JSON extraction for legacy compatibility
       const jsonMatch = response.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         return JSON.parse(jsonMatch[0]);
       }
       return null;
     } catch (error) {
-      logger.warn('Failed to parse agent response', { error });
+      logger.error('Legacy JSON parsing failed', {
+        error: (error as Error).message,
+        responsePreview: response.substring(0, 200)
+      });
       return null;
     }
+  }
+
+  /**
+   * Handle parsing errors with detailed logging and recovery
+   */
+  private handleParsingError(error: Error, context: string): null {
+    logger.error(`JSON parsing error in ${context}`, {
+      error: error.message,
+      stack: error.stack,
+      context
+    });
+    return null;
   }
 
   private generateNextSteps(plan: any): string[] {

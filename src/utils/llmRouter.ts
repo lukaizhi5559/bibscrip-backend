@@ -98,57 +98,64 @@ export class LLMRouter {
   /**
    * Process a prompt through available LLM providers with fallbacks
    */
-  async processPrompt(prompt: string): Promise<LLMResponse> {
+  async processPrompt(prompt: string, options: { skipCache?: boolean; taskType?: string } = {}): Promise<LLMResponse> {
     // Generate a cache key for this prompt
     const cacheKey = this.generateCacheKey(prompt);
     
     // Step 1: Check Redis cache FIRST - exact match (fastest)
-    try {
-      const cachedResponse = await this.getCachedResponse(cacheKey);
-      if (cachedResponse) {
-        console.log('Using Redis cached response');
-        return {
-          ...cachedResponse,
-          provider: `cached-${cachedResponse.provider}`
-        };
+    if (!options.skipCache) {
+      try {
+        const cachedResponse = await this.getCachedResponse(cacheKey);
+        if (cachedResponse) {
+          console.log('Using Redis cached response');
+          return {
+            ...cachedResponse,
+            provider: `cached-${cachedResponse.provider}`
+          };
+        }
+      } catch (error) {
+        console.warn('Redis cache lookup failed:', error);
+        // Continue to semantic cache
       }
-    } catch (error) {
-      console.warn('Redis cache lookup failed:', error);
-      // Continue to semantic cache
     }
     
     // Step 2: Check semantic cache - similar questions (cost-effective)
-    try {
-      // Import ragService dynamically to avoid circular dependencies
-      const { ragService } = await import('../services/ragService');
-      
-      // Use the public process method to get RAG result which includes semantic cache check
-      const ragResult = await ragService.process(prompt);
-      
-      // Check if we got contexts from cache (indicating a semantic cache hit)
-      if (ragResult.contexts.length > 0) {
-        // Look for cached responses in the contexts
-        const cachedResponse = ragResult.contexts.find(ctx => 
-          ctx.source.toString().includes('cached_response') || 
-          ctx.source.toString().includes('answered_question')
-        );
+    // Skip semantic cache for agent generation and orchestration to prevent incorrect matches
+    if (!options.skipCache && options.taskType !== 'generate_agent' && options.taskType !== 'orchestrate') {
+      try {
+        // Import ragService dynamically to avoid circular dependencies
+        const { ragService } = await import('../services/ragService');
         
-        if (cachedResponse && cachedResponse.score > 0.8) { // High similarity threshold
-          console.log('Using semantic cached response', {
-            score: cachedResponse.score,
-            source: cachedResponse.source
-          });
+        // Use the public process method to get RAG result which includes semantic cache check
+        const ragResult = await ragService.process(prompt);
+        
+        // Check if we got contexts from cache (indicating a semantic cache hit)
+        if (ragResult.contexts.length > 0) {
+          // Look for cached responses in the contexts
+          const cachedResponse = ragResult.contexts.find(ctx => 
+            ctx.source.toString().includes('cached_response') || 
+            ctx.source.toString().includes('answered_question')
+          );
           
-          return {
-            text: cachedResponse.text,
-            provider: 'semantic-cache',
-            latencyMs: ragResult.latencyMs
-          };
+          if (cachedResponse && cachedResponse.score > 0.8) { // High similarity threshold
+            console.log('Using semantic cached response', {
+              score: cachedResponse.score,
+              source: cachedResponse.source
+            });
+            
+            return {
+              text: cachedResponse.text,
+              provider: 'semantic-cache',
+              latencyMs: ragResult.latencyMs
+            };
+          }
         }
+      } catch (error) {
+        console.warn('Semantic cache lookup failed:', error);
+        // Continue to LLM providers
       }
-    } catch (error) {
-      console.warn('Semantic cache lookup failed:', error);
-      // Continue to LLM providers
+    } else if (options.taskType === 'generate_agent' || options.taskType === 'orchestrate') {
+      console.log(`Semantic cache bypassed for task type: ${options.taskType}`);
     }
     
     // Step 2-4: Try premium providers (OpenAI, Claude, Gemini)
