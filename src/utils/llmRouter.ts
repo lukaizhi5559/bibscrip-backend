@@ -377,7 +377,7 @@ export class LLMRouter {
         model: 'gpt-4-turbo-preview',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.7,
-        max_tokens: 1024
+        max_tokens: 4096  // Increased for complex orchestration responses
       });
       
       const latencyMs = performance.now() - startTime;
@@ -414,7 +414,7 @@ export class LLMRouter {
           model: 'gpt-3.5-turbo',
           messages: [{ role: 'user', content: prompt }],
           temperature: 0.7,
-          max_tokens: 1024
+          max_tokens: 4096  // Increased for complex orchestration responses
         });
         
         const latencyMs = performance.now() - startTime;
@@ -485,7 +485,7 @@ export class LLMRouter {
         model: 'deepseek-chat',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.7,
-        max_tokens: 1024
+        max_tokens: 4096  // Increased for complex orchestration responses
       }, {
         headers: {
           'Authorization': `Bearer ${apiKey}`,
@@ -544,7 +544,7 @@ export class LLMRouter {
         model: 'mistral-medium',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.7,
-        maxTokens: 1024
+        maxTokens: 4096
       });
       
       const latencyMs = performance.now() - startTime;
@@ -598,7 +598,7 @@ export class LLMRouter {
       const client = new Anthropic({ apiKey });
       const response = await client.messages.create({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 1024,
+        max_tokens: 4096,  // Increased for complex orchestration responses
         temperature: 0.7,
         messages: [{ role: 'user', content: prompt }]
       });
@@ -752,7 +752,7 @@ export class LLMRouter {
           { role: 'user', content: prompt }
         ],
         temperature: 0.7,
-        max_tokens: 1024
+        max_tokens: 4096  // Increased for complex orchestration responses
       }, {
         headers: {
           'Authorization': `Bearer ${apiKey}`,

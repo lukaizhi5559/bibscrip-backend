@@ -597,6 +597,544 @@ router.use('/verify', verifyAgent);
 router.use('/enrich', enrichAgent);
 router.use('/test', testAgent);
 
+// ========== PHASE 2: AGENT CONFIG, MEMORY, AND DEPENDENCIES ENDPOINTS ==========
+
+/**
+ * @swagger
+ * /api/agents/{name}/config:
+ *   get:
+ *     summary: Get agent configuration
+ *     tags: [Agents]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: name
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Agent name
+ *     responses:
+ *       200:
+ *         description: Agent configuration
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 config:
+ *                   type: object
+ *                 secrets:
+ *                   type: object
+ *                 orchestrator_metadata:
+ *                   type: object
+ *       404:
+ *         description: Agent not found
+ */
+router.get('/:name/config', authenticate, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { name } = req.params;
+    const agentOrchestrationService = AgentOrchestrationService.getInstance();
+    const agent = await agentOrchestrationService.getAgent(name);
+
+    if (!agent) {
+      res.status(404).json({
+        error: 'Agent not found',
+        name
+      });
+      return;
+    }
+
+    // Return configuration without sensitive data
+    const config = {
+      config: agent.config || {},
+      secrets: agent.secrets ? Object.keys(agent.secrets).reduce((acc, key) => {
+        // Mask sensitive values but show structure
+        if (typeof agent.secrets[key] === 'object' && agent.secrets[key] !== null) {
+          acc[key] = Object.keys(agent.secrets[key]).reduce((subAcc, subKey) => {
+            subAcc[subKey] = '***MASKED***';
+            return subAcc;
+          }, {} as any);
+        } else {
+          acc[key] = '***MASKED***';
+        }
+        return acc;
+      }, {} as any) : {},
+      orchestrator_metadata: agent.orchestrator_metadata || {}
+    };
+
+    res.json(config);
+    return;
+  } catch (error) {
+    logger.error('Error getting agent config:', error as Error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: (error as Error).message,
+    });
+    return;
+  }
+});
+
+/**
+ * @swagger
+ * /api/agents/{name}/config:
+ *   post:
+ *     summary: Update agent configuration
+ *     tags: [Agents]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: name
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Agent name
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               config:
+ *                 type: object
+ *                 description: Agent configuration settings
+ *               secrets:
+ *                 type: object
+ *                 description: Agent secrets (will be encrypted)
+ *               orchestrator_metadata:
+ *                 type: object
+ *                 description: MCP and orchestration metadata
+ *     responses:
+ *       200:
+ *         description: Configuration updated successfully
+ *       404:
+ *         description: Agent not found
+ */
+router.post('/:name/config', authenticate, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { name } = req.params;
+    const { config, secrets, orchestrator_metadata } = req.body;
+    const agentOrchestrationService = AgentOrchestrationService.getInstance();
+    
+    const agent = await agentOrchestrationService.getAgent(name);
+    if (!agent) {
+      res.status(404).json({
+        error: 'Agent not found',
+        name
+      });
+      return;
+    }
+
+    // Update agent configuration
+    const updatedAgent = {
+      ...agent,
+      config: config ? { ...agent.config, ...config } : agent.config,
+      secrets: secrets ? { ...agent.secrets, ...secrets } : agent.secrets,
+      orchestrator_metadata: orchestrator_metadata ? 
+        { ...agent.orchestrator_metadata, ...orchestrator_metadata } : 
+        agent.orchestrator_metadata
+    };
+
+    await agentOrchestrationService.storeAgent(updatedAgent);
+
+    logger.info(`Updated configuration for agent: ${name}`);
+    res.json({
+      success: true,
+      message: 'Agent configuration updated successfully',
+      agent: name
+    });
+    return;
+  } catch (error) {
+    logger.error('Error updating agent config:', error as Error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: (error as Error).message,
+    });
+    return;
+  }
+});
+
+/**
+ * @swagger
+ * /api/agents/{name}/memory:
+ *   get:
+ *     summary: Get agent memory context
+ *     tags: [Agents]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: name
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Agent name
+ *     responses:
+ *       200:
+ *         description: Agent memory context
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 memory:
+ *                   type: object
+ *                   properties:
+ *                     userId:
+ *                       type: string
+ *                     sessionId:
+ *                       type: string
+ *                     conversationHistory:
+ *                       type: array
+ *                     entityMemory:
+ *                       type: object
+ *                     lastExecutionTime:
+ *                       type: string
+ *                     customContext:
+ *                       type: object
+ *                     executionState:
+ *                       type: object
+ *       404:
+ *         description: Agent not found
+ */
+router.get('/:name/memory', authenticate, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { name } = req.params;
+    const agentOrchestrationService = AgentOrchestrationService.getInstance();
+    const agent = await agentOrchestrationService.getAgent(name);
+
+    if (!agent) {
+      res.status(404).json({
+        error: 'Agent not found',
+        name
+      });
+      return;
+    }
+
+    res.json({
+      memory: agent.memory || null,
+      hasMemory: !!agent.memory
+    });
+    return;
+  } catch (error) {
+    logger.error('Error getting agent memory:', error as Error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: (error as Error).message,
+    });
+    return;
+  }
+});
+
+/**
+ * @swagger
+ * /api/agents/{name}/memory:
+ *   post:
+ *     summary: Update agent memory context
+ *     tags: [Agents]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: name
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Agent name
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               memory:
+ *                 type: object
+ *                 properties:
+ *                   userId:
+ *                     type: string
+ *                   sessionId:
+ *                     type: string
+ *                   conversationHistory:
+ *                     type: array
+ *                     items:
+ *                       type: object
+ *                       properties:
+ *                         role:
+ *                           type: string
+ *                           enum: [user, agent, system]
+ *                         content:
+ *                           type: string
+ *                         timestamp:
+ *                           type: string
+ *                           format: date-time
+ *                   entityMemory:
+ *                     type: object
+ *                     description: Key-value pairs for entity memory
+ *                   customContext:
+ *                     type: object
+ *                     description: Custom context data
+ *                   executionState:
+ *                     type: object
+ *                     description: Current execution state
+ *               operation:
+ *                 type: string
+ *                 enum: [replace, merge, append_conversation]
+ *                 default: merge
+ *                 description: How to update the memory
+ *     responses:
+ *       200:
+ *         description: Memory updated successfully
+ *       404:
+ *         description: Agent not found
+ */
+router.post('/:name/memory', authenticate, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { name } = req.params;
+    const { memory, operation = 'merge' } = req.body;
+    const agentOrchestrationService = AgentOrchestrationService.getInstance();
+    
+    const agent = await agentOrchestrationService.getAgent(name);
+    if (!agent) {
+      res.status(404).json({
+        error: 'Agent not found',
+        name
+      });
+      return;
+    }
+
+    let updatedMemory;
+    
+    switch (operation) {
+      case 'replace':
+        updatedMemory = memory;
+        break;
+      case 'append_conversation':
+        updatedMemory = {
+          ...agent.memory,
+          conversationHistory: [
+            ...(agent.memory?.conversationHistory || []),
+            ...(memory.conversationHistory || [])
+          ],
+          lastExecutionTime: new Date().toISOString()
+        };
+        break;
+      case 'merge':
+      default:
+        updatedMemory = {
+          ...agent.memory,
+          ...memory,
+          conversationHistory: memory.conversationHistory || agent.memory?.conversationHistory || [],
+          entityMemory: {
+            ...agent.memory?.entityMemory,
+            ...memory.entityMemory
+          },
+          customContext: {
+            ...agent.memory?.customContext,
+            ...memory.customContext
+          },
+          lastExecutionTime: new Date().toISOString()
+        };
+        break;
+    }
+
+    const updatedAgent = {
+      ...agent,
+      memory: updatedMemory
+    };
+
+    await agentOrchestrationService.storeAgent(updatedAgent);
+
+    logger.info(`Updated memory for agent: ${name} (operation: ${operation})`);
+    res.json({
+      success: true,
+      message: 'Agent memory updated successfully',
+      agent: name,
+      operation
+    });
+    return;
+  } catch (error) {
+    logger.error('Error updating agent memory:', error as Error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: (error as Error).message,
+    });
+    return;
+  }
+});
+
+/**
+ * @swagger
+ * /api/agents/{name}/dependencies:
+ *   get:
+ *     summary: Get agent dependencies
+ *     tags: [Agents]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: name
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Agent name
+ *     responses:
+ *       200:
+ *         description: Agent dependencies
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 dependencies:
+ *                   type: array
+ *                   items:
+ *                     type: string
+ *                 requires_database:
+ *                   type: boolean
+ *                 execution_target:
+ *                   type: string
+ *       404:
+ *         description: Agent not found
+ */
+router.get('/:name/dependencies', authenticate, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { name } = req.params;
+    const agentOrchestrationService = AgentOrchestrationService.getInstance();
+    const agent = await agentOrchestrationService.getAgent(name);
+
+    if (!agent) {
+      res.status(404).json({
+        error: 'Agent not found',
+        name
+      });
+      return;
+    }
+
+    res.json({
+      dependencies: agent.dependencies || [],
+      requires_database: agent.requires_database || false,
+      execution_target: agent.execution_target || 'backend'
+    });
+    return;
+  } catch (error) {
+    logger.error('Error getting agent dependencies:', error as Error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: (error as Error).message,
+    });
+    return;
+  }
+});
+
+/**
+ * @swagger
+ * /api/agents/{name}/dependencies:
+ *   post:
+ *     summary: Update agent dependencies
+ *     tags: [Agents]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: name
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Agent name
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               dependencies:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                 description: List of service dependencies
+ *               requires_database:
+ *                 type: boolean
+ *                 description: Whether agent requires database access
+ *               execution_target:
+ *                 type: string
+ *                 enum: [frontend, backend]
+ *                 description: Where the agent should execute
+ *               operation:
+ *                 type: string
+ *                 enum: [replace, add, remove]
+ *                 default: replace
+ *                 description: How to update dependencies
+ *     responses:
+ *       200:
+ *         description: Dependencies updated successfully
+ *       404:
+ *         description: Agent not found
+ */
+router.post('/:name/dependencies', authenticate, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { name } = req.params;
+    const { dependencies, requires_database, execution_target, operation = 'replace' } = req.body;
+    const agentOrchestrationService = AgentOrchestrationService.getInstance();
+    
+    const agent = await agentOrchestrationService.getAgent(name);
+    if (!agent) {
+      res.status(404).json({
+        error: 'Agent not found',
+        name
+      });
+      return;
+    }
+
+    let updatedDependencies = agent.dependencies || [];
+    
+    if (dependencies && Array.isArray(dependencies)) {
+      switch (operation) {
+        case 'add':
+          updatedDependencies = [...new Set([...updatedDependencies, ...dependencies])];
+          break;
+        case 'remove':
+          updatedDependencies = updatedDependencies.filter(dep => !dependencies.includes(dep));
+          break;
+        case 'replace':
+        default:
+          updatedDependencies = dependencies;
+          break;
+      }
+    }
+
+    const updatedAgent = {
+      ...agent,
+      dependencies: updatedDependencies,
+      requires_database: requires_database !== undefined ? requires_database : agent.requires_database,
+      execution_target: execution_target || agent.execution_target
+    };
+
+    await agentOrchestrationService.storeAgent(updatedAgent);
+
+    logger.info(`Updated dependencies for agent: ${name} (operation: ${operation})`);
+    res.json({
+      success: true,
+      message: 'Agent dependencies updated successfully',
+      agent: name,
+      dependencies: updatedDependencies,
+      requires_database: updatedAgent.requires_database,
+      execution_target: updatedAgent.execution_target
+    });
+    return;
+  } catch (error) {
+    logger.error('Error updating agent dependencies:', error as Error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: (error as Error).message,
+    });
+    return;
+  }
+});
+
 /**
  * @swagger
  * /api/agents/llm/analyze:

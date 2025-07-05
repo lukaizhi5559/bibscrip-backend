@@ -648,13 +648,98 @@ export class OrchestrationService {
       // Extract JSON from LLM response
       const jsonMatch = response.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]);
+        try {
+          return JSON.parse(jsonMatch[0]);
+        } catch (parseError) {
+          // If JSON parsing fails, try to recover from truncated response
+          logger.warn('JSON parsing failed, attempting recovery', { parseError });
+          return this.recoverFromTruncatedResponse(jsonMatch[0]);
+        }
       }
       return null;
     } catch (error) {
       logger.warn('Failed to parse orchestration response', { error });
       return null;
     }
+  }
+
+  /**
+   * Attempt to recover useful information from truncated JSON response
+   */
+  private recoverFromTruncatedResponse(truncatedJson: string): any {
+    try {
+      // Try to extract agents array even if JSON is incomplete
+      const agentsMatch = truncatedJson.match(/"agents"\s*:\s*\[([\s\S]*?)\]/m);
+      const taskBreakdownMatch = truncatedJson.match(/"task_breakdown"\s*:\s*\[([\s\S]*?)\]/m);
+      
+      if (agentsMatch || taskBreakdownMatch) {
+        const recovered: any = {};
+        
+        // Try to parse agents array
+        if (agentsMatch) {
+          try {
+            const agentsJson = `[${agentsMatch[1]}]`;
+            recovered.agents = JSON.parse(agentsJson);
+          } catch (e) {
+            // If agents array is also truncated, extract individual agent objects
+            const agentObjects = this.extractAgentObjects(agentsMatch[1]);
+            if (agentObjects.length > 0) {
+              recovered.agents = agentObjects;
+            }
+          }
+        }
+        
+        // Try to parse task breakdown
+        if (taskBreakdownMatch) {
+          try {
+            const taskJson = `[${taskBreakdownMatch[1]}]`;
+            recovered.task_breakdown = JSON.parse(taskJson);
+          } catch (e) {
+            logger.warn('Could not parse task_breakdown from truncated response');
+          }
+        }
+        
+        if (recovered.agents && recovered.agents.length > 0) {
+          logger.info(`Recovered ${recovered.agents.length} agents from truncated response`);
+          return recovered;
+        }
+      }
+      
+      return null;
+    } catch (error) {
+      logger.error('Failed to recover from truncated response', { error });
+      return null;
+    }
+  }
+
+  /**
+   * Extract individual agent objects from truncated agents array string
+   */
+  private extractAgentObjects(agentsString: string): any[] {
+    const agents: any[] = [];
+    
+    try {
+      // Look for individual agent objects using regex
+      const agentMatches = agentsString.match(/\{[^{}]*"name"[^{}]*\}/g);
+      
+      if (agentMatches) {
+        for (const agentMatch of agentMatches) {
+          try {
+            const agent = JSON.parse(agentMatch);
+            if (agent.name) {
+              agents.push(agent);
+            }
+          } catch (e) {
+            // Skip malformed agent objects
+            continue;
+          }
+        }
+      }
+    } catch (error) {
+      logger.warn('Failed to extract agent objects', { error });
+    }
+    
+    return agents;
   }
 
   private parseIntentResponse(response: string): any {
