@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { orchestrationService } from '../services/orchestrationService';
 import { AgentOrchestrationService } from '../services/agentOrchestrationService';
 import { llmOrchestratorService } from '../services/llmOrchestrator';
+import { userMemoryService } from '../services/userMemoryService';
 import { authenticate } from '../middleware/auth';
 import { logger } from '../utils/logger';
 import { verifyAgent, enrichAgent, testAgent } from './agents/verify';
@@ -27,6 +28,14 @@ const router = Router();
  *                 type: string
  *                 description: User's natural language request
  *                 example: "I want to open Spotify automatically if it's not already running"
+ *               userId:
+ *                 type: string
+ *                 format: uuid
+ *                 description: Optional user ID for context enrichment
+ *               enrichWithUserContext:
+ *                 type: boolean
+ *                 description: Whether to enrich request with user memory context
+ *                 default: false
  *     responses:
  *       200:
  *         description: Orchestration result
@@ -51,7 +60,7 @@ const router = Router();
  */
 router.post('/orchestrate', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
-    const { request } = req.body;
+    const { request, userId, enrichWithUserContext = false } = req.body;
 
     if (!request || typeof request !== 'string') {
       res.status(400).json({
@@ -60,11 +69,37 @@ router.post('/orchestrate', authenticate, async (req: Request, res: Response): P
       return;
     }
 
-    logger.info(`Orchestrating request: ${request}`);
+    let finalRequest = request;
+    let userContext = null;
 
-    const result = await orchestrationService.orchestrateRequest(request);
+    // Enrich request with user context if requested and userId provided
+    if (enrichWithUserContext && userId) {
+      try {
+        const enrichedPrompt = await userMemoryService.enrichPromptWithUserContext(userId, request);
+        finalRequest = enrichedPrompt.enrichedPrompt;
+        userContext = {
+          originalPrompt: enrichedPrompt.originalPrompt,
+          appliedMemories: enrichedPrompt.appliedMemories,
+          userProfile: enrichedPrompt.userContext
+        };
+        logger.info(`Request enriched with user context for user ${userId}`);
+      } catch (contextError) {
+        logger.warn('Failed to enrich request with user context:', contextError as Error);
+        // Continue with original request if context enrichment fails
+      }
+    }
 
-    res.json(result);
+    logger.info(`Orchestrating request: ${finalRequest}`);
+
+    const result = await orchestrationService.orchestrateRequest(finalRequest);
+
+    // Include user context in response if available
+    const response = {
+      ...result,
+      ...(userContext && { userContext })
+    };
+
+    res.json(response);
     return;
   } catch (error) {
     logger.error('Error orchestrating request:', error as Error);

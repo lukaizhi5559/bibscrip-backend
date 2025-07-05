@@ -12,6 +12,7 @@ import authRouter from './auth';
 import bibliographyRouter from './bibliography';
 import agentsRouter from './agents';
 import actionPlannerRouter from './actionPlanner';
+import usersRouter from './users';
 // Removed: visualAgentRouter, integrationRouter (moved to Electron client)
 import analyticsRouter from './analytics';
 import automationAnalyticsRouter from './automationAnalytics';
@@ -216,6 +217,27 @@ router.get('/', (req, res) => {
           'POST /api/ui-indexed-agent/cleanup - Cleanup stale UI elements'
         ]
       },
+      users: {
+        path: '/api/users',
+        description: 'User-centric persistent memory and agent association for Thinkdrop AI Personal Intelligence Layer',
+        endpoints: [
+          'POST /api/users - Create new user',
+          'GET /api/users/{userId} - Get user by ID',
+          'GET /api/users/email/{email} - Get user by email',
+          'PUT /api/users/{userId} - Update user',
+          'GET /api/users/{userId}/memories - Get user memories with filtering',
+          'POST /api/users/{userId}/memories - Create user memory',
+          'GET /api/users/{userId}/memories/{memoryId} - Get specific memory',
+          'PUT /api/users/{userId}/memories/{memoryId} - Update memory',
+          'DELETE /api/users/{userId}/memories/{memoryId} - Delete memory',
+          'GET /api/users/{userId}/agents - Get user-agent associations',
+          'POST /api/users/{userId}/agents - Create user-agent association',
+          'PUT /api/users/{userId}/agents/{agentId} - Update agent association',
+          'DELETE /api/users/{userId}/agents/{agentId} - Remove agent association',
+          'GET /api/users/{userId}/context - Get enriched user context',
+          'POST /api/users/{userId}/enrich-prompt - Enrich prompt with user context'
+        ]
+      },
       'automation-analytics': {
         path: '/api/automation-analytics',
         description: 'Automation session logging and analytics',
@@ -258,6 +280,7 @@ router.use('/youtube', youtubeRouter);
 router.use('/auth', authRouter);
 router.use('/bibliography', bibliographyRouter);
 router.use('/agents', agentsRouter);
+router.use('/users', usersRouter);
 // Removed: /visual-agent and /integration endpoints (moved to Electron client)
 router.use('/analytics', analyticsRouter);
 router.use('/automation-analytics', automationAnalyticsRouter);
