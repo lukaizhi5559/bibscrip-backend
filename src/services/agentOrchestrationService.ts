@@ -4,6 +4,29 @@ import { llmPlanningService } from './llmPlanningService';
 import { getBestLLMResponse } from '../utils/llmRouter';
 import { logger } from '../utils/logger';
 
+/**
+ * Agent memory context for contextual execution and conversation history
+ */
+export interface AgentMemoryContext {
+  userId: string;
+  sessionId: string;
+  conversationHistory: Array<{
+    role: 'user' | 'agent' | 'system';
+    content: string;
+    timestamp: Date;
+  }>;
+  entityMemory: Record<string, any>; // e.g., "parent_name": "John", "preferred_method": "telegram"
+  lastExecutionTime: string;
+  customContext: Record<string, any>;
+  // Execution state tracking
+  executionState?: {
+    currentStep?: number;
+    totalSteps?: number;
+    status: 'idle' | 'running' | 'completed' | 'failed';
+    lastError?: string;
+  };
+}
+
 export interface Agent {
   id?: string;
   name: string;
@@ -21,6 +44,8 @@ export interface Agent {
   config: AgentConfig;
   secrets: AgentSecrets;
   orchestrator_metadata: OrchestratorMetadata;
+  // Phase 1: Add memory context for contextual execution
+  memory?: AgentMemoryContext;
 }
 
 /**
@@ -57,20 +82,64 @@ export interface AgentConfig {
 
 /**
  * Agent secrets and API keys (should be encrypted)
+ * Phase 1: Enhanced with structured credential types for different services
  */
 export interface AgentSecrets {
-  // API tokens
+  // Legacy API tokens (backward compatibility)
   telegram_bot_token?: string;
   openai_api_key?: string;
   elevenlabs_api_key?: string;
-  // Authentication
   oauth_tokens?: Record<string, string>;
-  // Custom secrets
+  
+  // Phase 1: Structured service credentials
+  telegram?: {
+    botToken: string;
+    chatId?: string;
+    parseMode?: 'HTML' | 'Markdown';
+    webhookUrl?: string;
+  };
+  twilio?: {
+    accountSid: string;
+    authToken: string;
+    phoneNumber: string;
+    webhookUrl?: string;
+  };
+  email?: {
+    smtpServer: string;
+    port: number;
+    username: string;
+    password: string;
+    fromAddress: string;
+  };
+  openai?: {
+    apiKey: string;
+    organizationId?: string;
+    model?: string;
+  };
+  elevenlabs?: {
+    apiKey: string;
+    voiceId?: string;
+  };
+  google?: {
+    apiKey?: string;
+    clientId?: string;
+    clientSecret?: string;
+    refreshToken?: string;
+  };
+  microsoft?: {
+    clientId?: string;
+    clientSecret?: string;
+    tenantId?: string;
+    accessToken?: string;
+  };
+  
+  // Custom secrets (maintains flexibility)
   [key: string]: any;
 }
 
 /**
  * Orchestrator metadata for multi-agent workflows
+ * Phase 1: Enhanced with improved MCP configuration
  */
 export interface OrchestratorMetadata {
   // Workflow chain information
@@ -89,11 +158,28 @@ export interface OrchestratorMetadata {
     cpu_cores?: number;
     network_required?: boolean;
   };
-  // MCP protocol settings
+  // Phase 1: Enhanced MCP protocol settings
   mcp?: {
-    protocol_version?: string;
+    // Agent identity and role
+    persona?: string;           // e.g., "CallAgent", "EmailAgent", "TaskAgent"
+    system?: string;            // e.g., "Thinkdrop MCP", "Personal Assistant"
+    
+    // Context management
+    contextKeys?: string[];     // e.g., ["parent_name", "call_message", "preferred_method"]
+    instructions?: string;      // Custom per-agent routing/execution hints
+    priority?: number;          // Execution priority (1-10, higher = more important)
+    
+    // Communication protocol
+    protocol_version?: string;  // MCP protocol version
     message_format?: 'json' | 'xml';
     encryption?: boolean;
+    
+    // Agent communication preferences
+    communication?: {
+      timeout_ms?: number;
+      retry_count?: number;
+      async_mode?: boolean;
+    };
   };
   // Custom metadata
   [key: string]: any;
