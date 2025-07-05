@@ -112,11 +112,129 @@ export class RagService {
   }
 
   /**
-   * Check if a similar question exists in cache
+   * Validate if a cached response is contextually relevant to the current question
+   * Enhanced with topic categorization and red flag detection (migrated from deprecated semanticCacheService)
+   * @param currentQuestion The current user question
+   * @param cachedQuestion The original question that generated the cached response
+   * @param cachedResponse The cached response to validate
+   * @returns true if relevant, false if should be rejected
+   */
+  private async validateCacheRelevance(
+    currentQuestion: string, 
+    cachedQuestion: string, 
+    cachedResponse: string
+  ): Promise<boolean> {
+    try {
+      logger.debug('🔍 SEMANTIC CACHE VALIDATION TRIGGERED', {
+        currentQuestion: currentQuestion.substring(0, 100),
+        cachedQuestion: cachedQuestion.substring(0, 100)
+      });
+      
+      const current = currentQuestion.toLowerCase();
+      const cached = cachedQuestion?.toLowerCase() || '';
+      const answer = cachedResponse.toLowerCase();
+      
+      // 1. EXACT MATCH: Always allow exact matches
+      if (current === cached) {
+        logger.debug('Cache validation: Exact match - APPROVED');
+        return true;
+      }
+      
+      // 2. TOPIC CATEGORIZATION: Define comprehensive topic categories
+      const topicCategories = {
+        scheduling: ['schedule', 'calendar', 'time', 'organize', 'plan', 'daily', 'routine', 'appointment'],
+        automation: ['automate', 'automatic', 'script', 'workflow', 'trigger', 'startup', 'launch'],
+        desktop: ['desktop', 'computer', 'screen', 'click', 'type', 'mouse', 'keyboard'],
+        email: ['email', 'mail', 'inbox', 'message', 'send', 'receive'],
+        files: ['file', 'folder', 'document', 'backup', 'storage', 'save'],
+        general_advice: ['how to', 'what is', 'best way', 'help', 'advice', 'recommend'],
+        bible: ['bible', 'verse', 'scripture', 'god', 'jesus', 'christian', 'faith', 'prayer'],
+        research: ['research', 'study', 'analyze', 'investigate', 'bibliography', 'citation', 'academic']
+      };
+      
+      // Get topic categories for current and cached questions
+      const getCurrentTopics = (text: string) => {
+        const topics = [];
+        for (const [category, keywords] of Object.entries(topicCategories)) {
+          if (keywords.some(keyword => text.includes(keyword))) {
+            topics.push(category);
+          }
+        }
+        return topics;
+      };
+      
+      const currentTopics = getCurrentTopics(current);
+      const cachedTopics = getCurrentTopics(cached);
+      const answerTopics = getCurrentTopics(answer);
+      
+      // Check for topic overlap
+      const hasTopicOverlap = currentTopics.some(topic => 
+        cachedTopics.includes(topic) || answerTopics.includes(topic)
+      );
+      
+      // 3. RED FLAG DETECTION: Identify completely unrelated content
+      const redFlags = [
+        'unable to identify or describe images',
+        'desktop automation involves',
+        'action plan for your task',
+        'json structure for the action plan',
+        'screenshot', 'coordinates', 'x:', 'y:',
+        'i cannot assist with that',
+        'i\'m sorry, i can\'t',
+        'as an ai language model'
+      ];
+      
+      const hasRedFlags = redFlags.some(flag => answer.includes(flag));
+      const foundRedFlags = redFlags.filter(flag => answer.includes(flag));
+      
+      // 4. VALIDATION LOGIC: Apply intelligent filtering
+      
+      // If there are red flags and no topic overlap, it's irrelevant
+      if (hasRedFlags && !hasTopicOverlap) {
+        logger.warn('Semantic cache: Blocked irrelevant response with red flags', {
+          currentQuestion: current.substring(0, 100),
+          cachedQuestion: cached.substring(0, 100),
+          redFlagsFound: foundRedFlags,
+          currentTopics,
+          cachedTopics
+        });
+        return false;
+      }
+      
+      // Require topic overlap for high relevance
+      if (!hasTopicOverlap && currentTopics.length > 0 && cachedTopics.length > 0) {
+        logger.info('Semantic cache: Blocked response due to topic mismatch', {
+          currentTopics,
+          cachedTopics,
+          similarity: 'high-but-irrelevant'
+        });
+        return false;
+      }
+      
+      // If we get here, the cache is relevant
+      logger.info('Semantic cache: Response approved', {
+        currentTopics,
+        cachedTopics,
+        hasTopicOverlap,
+        redFlagsFound: foundRedFlags.length
+      });
+      
+      return true;
+    } catch (error) {
+      logger.error('Error in cache relevance validation', { error });
+      // On error, be conservative and reject the cache
+      return false;
+    }
+  }
+
+
+
+  /**
+   * Check if a similar question exists in cache with intelligent validation
    * @param question User's question
    * @returns Cached response or null
    */
-  private async checkSemanticCache(question: string): Promise<{ response: string; cacheAge: number } | null> {
+  public async checkSemanticCache(question: string): Promise<{ response: string; cacheAge: number } | null> {
     try {
       const startTime = performance.now();
       const redisClient = await getRedisClient();
@@ -134,13 +252,32 @@ export class RagService {
         const parsed = JSON.parse(cachedData);
         const cacheAge = Date.now() - parsed.timestamp;
         
+        // INTELLIGENT VALIDATION: Check if cached response is relevant
+        const isRelevant = await this.validateCacheRelevance(question, parsed.question, parsed.response);
+        
+        if (!isRelevant) {
+          logger.info('Semantic cache hit rejected due to low relevance', {
+            currentQuestion: question.substring(0, 100),
+            cachedQuestion: parsed.question?.substring(0, 100),
+            cacheAge: cacheAge
+          });
+          
+          analytics.trackCacheOperation({
+            operation: 'miss',
+            key: cacheKey,
+            category: 'semantic'
+          });
+          
+          return null;
+        }
+        
         analytics.trackCacheOperation({
           operation: 'hit',
           key: cacheKey,
           category: 'semantic',
         });
         
-        logger.debug(`Semantic cache hit for question`, {
+        logger.debug(`Semantic cache hit validated and accepted`, {
           questionLength: question.length,
           cacheAge: cacheAge,
         });

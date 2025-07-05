@@ -276,15 +276,26 @@ router.post('/ask', [
       return;
     }
 
+    // Check if quota was exceeded and adjust processing accordingly
+    const quotaExceeded = req.quotaExceeded || false;
+    const quotaInfo = req.quotaInfo;
+    
     logger.info('Processing user query for automation intent', { 
       question: question.substring(0, 100),
-      forceRefresh 
+      forceRefresh,
+      quotaExceeded,
+      quotaInfo: quotaExceeded ? quotaInfo : undefined
     });
 
+    // If quota exceeded, prioritize cached responses and fallback providers
+    const processOptions = {
+      forceRefresh: quotaExceeded ? false : forceRefresh, // Don't force refresh if quota exceeded
+      preferCache: quotaExceeded, // Prefer cached responses when quota exceeded
+      useFallbackProviders: quotaExceeded // Use fallback providers when quota exceeded
+    };
+
     // Use unified LLM orchestrator for automation-focused queries
-    const llmResponse = await llmOrchestratorService.processAsk(question, {
-      forceRefresh
-    });
+    const llmResponse = await llmOrchestratorService.processAsk(question, processOptions);
 
     // Detect automation intent from the LLM response
     const automationIntent = await detectAutomationIntent(question, llmResponse.text);
@@ -298,7 +309,7 @@ router.post('/ask', [
       query: question
     });
 
-    res.json({
+    const response: any = {
       ai: llmResponse.text,
       requiresAutomation: automationIntent.requiresAutomation,
       automationIntent: automationIntent.requiresAutomation ? {
@@ -309,8 +320,25 @@ router.post('/ask', [
       } : null,
       provider: llmResponse.provider,
       fromCache: llmResponse.fromCache || false,
-      latencyMs: Math.round(performance.now() - requestStartTime)
-    });
+      latencyMs: Math.round(performance.now() - requestStartTime),
+      // Enhanced fallback chain visibility
+      fallbackChain: llmResponse.fallbackChain || [],
+      totalAttempts: llmResponse.totalAttempts || 1,
+      cacheType: llmResponse.cacheType || 'none'
+    };
+    
+    // Add quota information if quota was exceeded
+    if (quotaExceeded && quotaInfo) {
+      response.quotaExceeded = true;
+      response.quotaInfo = {
+        message: 'Quota exceeded - using fallback providers and cached responses',
+        resetIn: quotaInfo.resetIn,
+        upgrade: quotaInfo.upgrade
+      };
+      response.fallbackMode = true;
+    }
+    
+    res.json(response);
 
   } catch (error) {
     logger.error('Error in unified LLM ask endpoint', {

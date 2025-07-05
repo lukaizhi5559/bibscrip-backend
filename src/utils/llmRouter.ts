@@ -9,7 +9,18 @@ import { getRedisClient, REDIS_PREFIX, TTL } from '../config/redis';
 import { logger } from '../utils/logger';
 
 /**
- * Response from an LLM model
+ * Provider attempt result for fallback chain tracking
+ */
+export interface ProviderAttempt {
+  provider: string;
+  success: boolean;
+  error?: string;
+  latencyMs?: number;
+  timestamp: number;
+}
+
+/**
+ * Response from an LLM model with detailed fallback chain information
  */
 export interface LLMResponse {
   text: string;
@@ -20,6 +31,11 @@ export interface LLMResponse {
     total?: number;
   };
   latencyMs?: number;
+  // Enhanced fallback chain visibility
+  fallbackChain?: ProviderAttempt[];
+  totalAttempts?: number;
+  fromCache?: boolean;
+  cacheType?: 'redis' | 'semantic' | 'none';
 }
 
 /**
@@ -97,97 +113,210 @@ export class LLMRouter {
   
   /**
    * Process a prompt through available LLM providers with fallbacks
+   * Enhanced with detailed fallback chain tracking and visibility
    */
   async processPrompt(prompt: string, options: { skipCache?: boolean; taskType?: string } = {}): Promise<LLMResponse> {
+    const overallStartTime = performance.now();
+    const fallbackChain: ProviderAttempt[] = [];
+    
     // Generate a cache key for this prompt
     const cacheKey = this.generateCacheKey(prompt);
     
     // Step 1: Check Redis cache FIRST - exact match (fastest)
     if (!options.skipCache) {
+      const cacheStartTime = performance.now();
       try {
         const cachedResponse = await this.getCachedResponse(cacheKey);
         if (cachedResponse) {
-          console.log('Using Redis cached response');
+          const cacheLatency = performance.now() - cacheStartTime;
+          console.log('✅ Using Redis cached response');
+          
+          fallbackChain.push({
+            provider: 'redis-cache',
+            success: true,
+            latencyMs: cacheLatency,
+            timestamp: Date.now()
+          });
+          
           return {
             ...cachedResponse,
-            provider: `cached-${cachedResponse.provider}`
+            provider: `cached-${cachedResponse.provider}`,
+            fallbackChain,
+            totalAttempts: 1,
+            fromCache: true,
+            cacheType: 'redis'
           };
         }
       } catch (error) {
-        console.warn('Redis cache lookup failed:', error);
-        // Continue to semantic cache
+        const cacheLatency = performance.now() - cacheStartTime;
+        console.warn('❌ Redis cache lookup failed:', error);
+        
+        fallbackChain.push({
+          provider: 'redis-cache',
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+          latencyMs: cacheLatency,
+          timestamp: Date.now()
+        });
       }
     }
     
-    // Step 2: Check semantic cache - similar questions (cost-effective)
-    // Skip semantic cache for agent generation and orchestration to prevent incorrect matches
+    // Step 2: Check enhanced RAG semantic cache with intelligent validation
     if (!options.skipCache && options.taskType !== 'generate_agent' && options.taskType !== 'orchestrate') {
+      const semanticStartTime = performance.now();
       try {
-        // Import ragService dynamically to avoid circular dependencies
         const { ragService } = await import('../services/ragService');
+        const cacheResult = await (ragService as any).checkSemanticCache(prompt);
+        const semanticLatency = performance.now() - semanticStartTime;
         
-        // Use the public process method to get RAG result which includes semantic cache check
-        const ragResult = await ragService.process(prompt);
-        
-        // Check if we got contexts from cache (indicating a semantic cache hit)
-        if (ragResult.contexts.length > 0) {
-          // Look for cached responses in the contexts
-          const cachedResponse = ragResult.contexts.find(ctx => 
-            ctx.source.toString().includes('cached_response') || 
-            ctx.source.toString().includes('answered_question')
-          );
+        if (cacheResult) {
+          console.log('✅ Using enhanced RAG semantic cached response', {
+            cacheAge: Math.round(cacheResult.cacheAge / 1000) + 's',
+            latencyMs: Math.round(semanticLatency)
+          });
           
-          if (cachedResponse && cachedResponse.score > 0.8) { // High similarity threshold
-            console.log('Using semantic cached response', {
-              score: cachedResponse.score,
-              source: cachedResponse.source
-            });
-            
-            return {
-              text: cachedResponse.text,
-              provider: 'semantic-cache',
-              latencyMs: ragResult.latencyMs
-            };
-          }
+          fallbackChain.push({
+            provider: 'semantic-cache',
+            success: true,
+            latencyMs: semanticLatency,
+            timestamp: Date.now()
+          });
+          
+          return {
+            text: cacheResult.response,
+            provider: 'semantic-cache',
+            latencyMs: Math.round(semanticLatency),
+            fallbackChain,
+            totalAttempts: fallbackChain.length,
+            fromCache: true,
+            cacheType: 'semantic'
+          };
+        } else {
+          console.log('❌ No relevant semantic cache match found');
+          fallbackChain.push({
+            provider: 'semantic-cache',
+            success: false,
+            error: 'No relevant match found',
+            latencyMs: semanticLatency,
+            timestamp: Date.now()
+          });
         }
       } catch (error) {
-        console.warn('Semantic cache lookup failed:', error);
-        // Continue to LLM providers
+        const semanticLatency = performance.now() - semanticStartTime;
+        console.warn('❌ Enhanced RAG semantic cache lookup failed:', error);
+        
+        fallbackChain.push({
+          provider: 'semantic-cache',
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+          latencyMs: semanticLatency,
+          timestamp: Date.now()
+        });
       }
     } else if (options.taskType === 'generate_agent' || options.taskType === 'orchestrate') {
-      console.log(`Semantic cache bypassed for task type: ${options.taskType}`);
+      console.log(`⏭️  Semantic cache bypassed for task type: ${options.taskType}`);
+      fallbackChain.push({
+        provider: 'semantic-cache',
+        success: false,
+        error: `Bypassed for task type: ${options.taskType}`,
+        latencyMs: 0,
+        timestamp: Date.now()
+      });
     }
     
-    // Step 2-4: Try premium providers (OpenAI, Claude, Gemini)
-    const premiumProviders = ['openai', 'claude', 'gemini'];
-    for (const provider of premiumProviders) {
+    // Step 3: Try all LLM providers in fallback order
+    const allProviders = ['deepseek','claude', 'gemini', 'openai', 'mistral', 'lambda'];
+    console.log('🚀 Starting LLM provider fallback chain:', allProviders);
+    
+    for (const provider of allProviders) {
+      const providerStartTime = performance.now();
       try {
+        console.log(`⚡ Attempting provider: ${provider}`);
         const result = await this.callProvider(provider, prompt);
-        // Cache successful responses from premium providers
+        const providerLatency = performance.now() - providerStartTime;
+        
+        console.log(`✅ SUCCESS with provider: ${provider} (${Math.round(providerLatency)}ms)`);
+        
+        // Record successful attempt
+        fallbackChain.push({
+          provider,
+          success: true,
+          latencyMs: providerLatency,
+          timestamp: Date.now()
+        });
+        
+        // Cache successful responses
         await this.cacheResponse(cacheKey, result);
-        return result;
-      } catch (error) {
-        console.warn(`Provider ${provider} failed:`, error);
+        
+        // Return enhanced response with complete fallback chain visibility
+        return {
+          ...result,
+          fallbackChain,
+          totalAttempts: fallbackChain.length,
+          fromCache: false,
+          cacheType: 'none',
+          latencyMs: performance.now() - overallStartTime
+        };
+        
+      } catch (error: any) {
+        const providerLatency = performance.now() - providerStartTime;
+        const isQuotaError = error?.message?.toLowerCase().includes('quota') ||
+                            error?.message?.toLowerCase().includes('rate limit') ||
+                            error?.message?.toLowerCase().includes('usage limit');
+        
+        const errorType = isQuotaError ? 'QUOTA/RATE LIMIT' : 'API ERROR';
+        console.warn(`❌ Provider ${provider} failed (${errorType}): ${error?.message} (${Math.round(providerLatency)}ms)`);
+        
+        // Record failed attempt with detailed information
+        fallbackChain.push({
+          provider,
+          success: false,
+          error: `${errorType}: ${error?.message || String(error)}`,
+          latencyMs: providerLatency,
+          timestamp: Date.now()
+        });
+        
         // Continue to next provider
       }
     }
     
-    // Step 5-6: Try cost-effective external API providers (both are external APIs, not local)
-    const fallbackProviders = ['mistral', 'lambda'];
-    for (const provider of fallbackProviders) {
-      try {
-        const result = await this.callProvider(provider, prompt);
-        // Still cache results from fallbacks
-        await this.cacheResponse(cacheKey, result);
-        return result;
-      } catch (error) {
-        console.warn(`Provider ${provider} failed:`, error);
-        // Continue to next provider
-      }
+    // All providers failed - provide comprehensive error with full fallback chain
+    const totalLatency = performance.now() - overallStartTime;
+    const quotaFailures = fallbackChain.filter(attempt => 
+      attempt.error?.toLowerCase().includes('quota') || 
+      attempt.error?.toLowerCase().includes('rate limit')
+    );
+    const apiFailures = fallbackChain.filter(attempt => 
+      attempt.success === false && !quotaFailures.includes(attempt)
+    );
+    
+    console.error('💥 ALL LLM PROVIDERS FAILED - Complete Fallback Chain:');
+    fallbackChain.forEach((attempt, index) => {
+      const status = attempt.success ? '✅' : '❌';
+      const latency = attempt.latencyMs ? `${Math.round(attempt.latencyMs)}ms` : 'N/A';
+      console.error(`  ${index + 1}. ${status} ${attempt.provider} (${latency}) ${attempt.error ? `- ${attempt.error}` : ''}`);
+    });
+    
+    let errorMessage = `All LLM providers failed after ${fallbackChain.length} attempts (${Math.round(totalLatency)}ms total).`;
+    if (quotaFailures.length > 0) {
+      errorMessage += ` Quota/rate limit exceeded on: ${quotaFailures.map(f => f.provider).join(', ')}.`;
+    }
+    if (apiFailures.length > 0) {
+      errorMessage += ` API errors on: ${apiFailures.map(f => f.provider).join(', ')}.`;
     }
     
-    // All providers failed
-    throw new Error('All LLM providers failed to process the request');
+    // Even in failure, return the fallback chain for debugging
+    const errorResponse: LLMResponse = {
+      text: '',
+      provider: 'none',
+      fallbackChain,
+      totalAttempts: fallbackChain.length,
+      fromCache: false,
+      cacheType: 'none',
+      latencyMs: totalLatency
+    };
+    
+    throw new Error(`${errorMessage} Fallback chain: ${JSON.stringify(errorResponse.fallbackChain)}`);
   }
   
   /**
@@ -262,9 +391,19 @@ export class LLMRouter {
         },
         latencyMs
       };
-    } catch (error) {
-      // Log the error but don't fail yet
-      console.warn('GPT-4 Turbo failed, falling back to GPT-3.5 Turbo:', error);
+    } catch (error: any) {
+      // Check if this is a quota/rate limit error
+      const isQuotaError = error?.status === 429 || 
+                          error?.code === 'rate_limit_exceeded' ||
+                          error?.message?.toLowerCase().includes('quota') ||
+                          error?.message?.toLowerCase().includes('rate limit');
+      
+      console.warn(`GPT-4 Turbo failed (${isQuotaError ? 'QUOTA/RATE LIMIT' : 'OTHER ERROR'}), falling back to GPT-3.5 Turbo:`, {
+        status: error?.status,
+        code: error?.code,
+        message: error?.message,
+        isQuotaError
+      });
       
       try {
         // Fall back to GPT-3.5 Turbo
@@ -289,10 +428,26 @@ export class LLMRouter {
           },
           latencyMs
         };
-      } catch (fallbackError) {
-        // If both fail, we'll throw the error to try the next provider
-        console.error('OpenAI complete failure:', fallbackError);
-        throw new Error('OpenAI limit hit');
+      } catch (fallbackError: any) {
+        // Check if fallback also hit quota
+        const fallbackIsQuotaError = fallbackError?.status === 429 || 
+                                    fallbackError?.code === 'rate_limit_exceeded' ||
+                                    fallbackError?.message?.toLowerCase().includes('quota') ||
+                                    fallbackError?.message?.toLowerCase().includes('rate limit');
+        
+        console.error(`OpenAI complete failure (${fallbackIsQuotaError ? 'QUOTA/RATE LIMIT' : 'OTHER ERROR'}):`, {
+          status: fallbackError?.status,
+          code: fallbackError?.code,
+          message: fallbackError?.message,
+          isQuotaError: fallbackIsQuotaError
+        });
+        
+        // Throw with more specific error information
+        if (isQuotaError || fallbackIsQuotaError) {
+          throw new Error(`OpenAI quota/rate limit exceeded - both GPT-4 and GPT-3.5 hit limits`);
+        } else {
+          throw new Error(`OpenAI API error: ${fallbackError?.message || 'Unknown error'}`);
+        }
       }
     }
   }
@@ -442,7 +597,7 @@ export class LLMRouter {
       
       const client = new Anthropic({ apiKey });
       const response = await client.messages.create({
-        model: 'claude-3-sonnet-20240229',
+        model: 'claude-sonnet-4-20250514',
         max_tokens: 1024,
         temperature: 0.7,
         messages: [{ role: 'user', content: prompt }]
@@ -470,9 +625,27 @@ export class LLMRouter {
         },
         latencyMs
       };
-    } catch (error) {
-      console.error('Claude API error:', error);
-      throw new Error('Claude limit hit');
+    } catch (error: any) {
+      // Check if this is a quota/rate limit error
+      const isQuotaError = error?.status === 429 || 
+                          error?.code === 'rate_limit_exceeded' ||
+                          error?.message?.toLowerCase().includes('quota') ||
+                          error?.message?.toLowerCase().includes('rate limit') ||
+                          error?.message?.toLowerCase().includes('usage limit');
+      
+      console.error(`Claude API error (${isQuotaError ? 'QUOTA/RATE LIMIT' : 'OTHER ERROR'}):`, {
+        status: error?.status,
+        code: error?.code,
+        message: error?.message,
+        isQuotaError
+      });
+      
+      // Throw with more specific error information
+      if (isQuotaError) {
+        throw new Error(`Claude quota/rate limit exceeded: ${error?.message || 'Unknown quota error'}`);
+      } else {
+        throw new Error(`Claude API error: ${error?.message || 'Unknown error'}`);
+      }
     }
   }
   

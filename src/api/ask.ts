@@ -10,7 +10,7 @@ import { makeRequest, AIErrorResponse } from '../utils/request-manager';
 import { cacheManager, createCacheKey } from '../utils/cache-manager';
 import { analytics } from '../utils/analytics';
 import { logger } from '../utils/logger';
-import { semanticCache } from '../services/semanticCacheService';
+
 
 // Import RAG and scaling services
 import { ragService } from '../services/ragService';
@@ -312,8 +312,8 @@ router.post('/', [
           const aiResponse = response as AIResponseObject;
           await ragService.storeSuccessfulResponse(question, aiResponse.text);
           
-          // Store in semantic cache for future similar questions
-          await semanticCache.store(question, aiResponse);
+          // Store in semantic cache for future similar questions (handled by ragService)
+          // Note: ragService.storeSuccessfulResponse already handles semantic caching
           
           aiResult = {
             data: aiResponse,
@@ -328,8 +328,8 @@ router.post('/', [
           const responseText = typeof response === 'string' ? response : JSON.stringify(response);
           await ragService.storeSuccessfulResponse(question, responseText);
           
-          // Store in semantic cache as well
-          await semanticCache.store(question, { text: responseText, provider: 'unknown' });
+          // Store in semantic cache as well (handled by ragService)
+          // Note: ragService.storeSuccessfulResponse already handles semantic caching
           
           aiResult = {
             data: responseText,
@@ -341,12 +341,14 @@ router.post('/', [
           };
         }
       } else {
-        // First check semantic cache for similar questions
-        const semanticCacheResult = await semanticCache.find(question);
+        // First check semantic cache for similar questions with enhanced validation
+        const cachedResult = await ragService.checkSemanticCache(question);
         
-        if (semanticCacheResult) {
-          // Found a semantic match!
-          const { cachedResponse, similarity, exactMatch } = semanticCacheResult;
+        if (cachedResult) {
+          // Found a validated semantic match!
+          const { response: cachedResponse, cacheAge } = cachedResult;
+          const similarity = 1.0; // ragService already validated relevance
+          const exactMatch = false; // Assume semantic match unless exact
           
           // Log the semantic cache hit
           analytics.trackCacheOperation({
@@ -364,17 +366,15 @@ router.post('/', [
           
           // Return the cached response with metadata
           aiResult = {
-            data: cachedResponse.answer,
-            provider: cachedResponse.answer.provider || 'unknown',
+            data: cachedResponse, // ragService returns the response text directly
+            provider: 'cached-ragservice',
             fromCache: true,
             semanticMatch: !exactMatch,
             similarity: similarity,
-            originalQuestion: exactMatch ? null : cachedResponse.question,
-            tokenUsage: (typeof cachedResponse.answer === 'object' && cachedResponse.answer.tokenUsage) 
-              ? cachedResponse.answer.tokenUsage 
-              : { total: 0 },
+            originalQuestion: null, // ragService doesn't return original question
+            tokenUsage: { total: 0 }, // Cached responses don't have token usage
             latencyMs: performance.now() - requestStartTime,
-            cacheAge: Date.now() - cachedResponse.timestamp
+            cacheAge: cacheAge
           };
         } else {
           // Fallback to standard request if no semantic match
@@ -392,8 +392,8 @@ router.post('/', [
                   const aiResponse = response as AIResponseObject;
                   await ragService.storeSuccessfulResponse(question, aiResponse.text);
                   
-                  // Also store in semantic cache
-                  await semanticCache.store(question, aiResponse);
+                  // Also store in semantic cache (handled by ragService)
+                  // Note: ragService.storeSuccessfulResponse already handles semantic caching
                   
                   return aiResponse;
                 } else {
@@ -401,8 +401,8 @@ router.post('/', [
                   const responseText = typeof response === 'string' ? response : JSON.stringify(response);
                   await ragService.storeSuccessfulResponse(question, responseText);
                   
-                  // Also store in semantic cache
-                  await semanticCache.store(question, { text: responseText, provider: 'unknown' });
+                  // Also store in semantic cache (handled by ragService)
+                  // Note: ragService.storeSuccessfulResponse already handles semantic caching
                   
                   return responseText;
                 }
@@ -456,47 +456,16 @@ router.post('/', [
           const aiResponse = aiResult.data as AIResponseObject;
           aiResponseText = aiResponse.text;
         } else if (aiResult.fromCache) {
-          // Special handling for semantic cache results
+          // Special handling for semantic cache results from ragService
           console.log('AI result is from cache');
           
-          // Log the exact structure to identify the correct path to extract text
-          console.log('CACHED RESPONSE STRUCTURE:', JSON.stringify(aiResult.data, null, 2));
-          
-          // Try to extract text from common patterns in cached responses
-          if (aiResult.data.answer && typeof aiResult.data.answer === 'string') {
-            // Handle when answer is directly a string
-            console.log('Found string answer in cache');
-            aiResponseText = aiResult.data.answer;
-          } else if (aiResult.data.answer && typeof aiResult.data.answer === 'object') {
-            console.log('Found object answer in cache');
-            if (aiResult.data.answer.text) {
-              console.log('Found text property in answer object');
-              aiResponseText = aiResult.data.answer.text;
-            } else if (typeof aiResult.data.answer === 'string') {
-              console.log('Answer is directly a string');
-              aiResponseText = aiResult.data.answer;
-            }
-            // If we still don't have text, try more patterns
-            if (!aiResponseText && aiResult.data.text) {
-              console.log('Found text property directly in data');
-              aiResponseText = aiResult.data.text;
-            }
+          // ragService.checkSemanticCache returns the response directly as a string
+          if (typeof aiResult.data === 'string') {
+            console.log('Found cached response as string');
+            aiResponseText = aiResult.data;
           } else {
-            // Fallback: Try other common patterns
-            console.log('Trying fallback extraction patterns');
-            if (aiResult.data.text) {
-              aiResponseText = aiResult.data.text;
-            } else if (aiResult.data.content) {
-              aiResponseText = aiResult.data.content;
-            } else if (aiResult.data.response) {
-              aiResponseText = aiResult.data.response;
-            }
-          }
-          
-          // If we still have no text, set a fallback message
-          if (!aiResponseText) {
-            console.error('Failed to extract AI text from cache:', JSON.stringify(aiResult.data));
-            aiResponseText = 'Error extracting response from cache';
+            console.error('Unexpected cached response format:', JSON.stringify(aiResult.data));
+            aiResponseText = 'Error: Unexpected cached response format';
           }
         } else {
           // Unknown object format - log it for debugging

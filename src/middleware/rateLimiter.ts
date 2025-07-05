@@ -4,6 +4,20 @@ import { quotaService } from '../services/quotaService';
 import { analytics } from '../utils/analytics';
 import { logger } from '../utils/logger';
 
+// Extend Express Request interface to support quota information
+declare global {
+  namespace Express {
+    interface Request {
+      quotaExceeded?: boolean;
+      quotaInfo?: {
+        resetIn: number;
+        tier: string;
+        upgrade: string;
+      };
+    }
+  }
+}
+
 /**
  * Get client IP address from request
  */
@@ -129,14 +143,20 @@ export const quotaChecker = () => {
       });
       
       if (!quota.allowed) {
-        logger.warn('Quota exceeded', { ip, userId, complexity });
+        logger.warn('Quota exceeded - allowing request to proceed with LLM fallback', { ip, userId, complexity });
         
-        return res.status(429).json({
-          error: 'Quota exceeded',
-          message: 'You have reached your daily quota limit.',
+        // Instead of blocking the request, set a flag to indicate quota exceeded
+        // This allows the LLM router to use fallback providers or cached responses
+        req.quotaExceeded = true;
+        req.quotaInfo = {
           resetIn: quota.resetIn,
-          upgrade: !userId ? 'Create an account for higher limits' : 'Upgrade your plan for higher limits',
-        });
+          tier: quota.tier,
+          upgrade: !userId ? 'Create an account for higher limits' : 'Upgrade your plan for higher limits'
+        };
+        
+        // Set warning headers but don't block the request
+        res.setHeader('X-Quota-Exceeded', 'true');
+        res.setHeader('X-Quota-Fallback-Mode', 'enabled');
       }
       
       next();

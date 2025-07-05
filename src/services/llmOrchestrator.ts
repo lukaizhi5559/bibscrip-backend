@@ -4,7 +4,7 @@
  * Extends the existing LLMRouter with task-specific prompt handling
  */
 
-import { LLMRouter as BaseLLMRouter, LLMResponse } from '../utils/llmRouter';
+import { LLMRouter as BaseLLMRouter, LLMResponse, ProviderAttempt } from '../utils/llmRouter';
 import { buildPrompt, validatePromptOptions, getPromptMetadata, PromptOptions } from './promptBuilder';
 import { logger } from '../utils/logger';
 
@@ -26,6 +26,10 @@ export interface EnhancedLLMResponse {
   promptMetadata?: Record<string, any>;
   processingSteps?: string[];
   cacheHit?: boolean;
+  // Enhanced fallback chain visibility
+  fallbackChain?: ProviderAttempt[];
+  totalAttempts?: number;
+  cacheType?: 'redis' | 'semantic' | 'none';
 }
 
 /**
