@@ -75,6 +75,7 @@ export interface AgentGenerationResult {
     name: string;
     description: string;
     code: string;
+    parameters: Record<string, any>;
     dependencies: string[];
     capabilities: string[];
     execution_target: 'frontend' | 'backend';
@@ -255,7 +256,8 @@ export class OrchestrationService {
           agent: {
             name: 'UnknownAgent',
             description: 'Failed to generate agent',
-            code: '// Agent generation failed',
+            code: '',
+            parameters: {},
             dependencies: [],
             capabilities: [],
             execution_target: 'frontend',
@@ -277,6 +279,7 @@ export class OrchestrationService {
             name: 'ValidationFailedAgent',
             description: 'Agent validation failed',
             code: '// Agent validation failed',
+            parameters: {},
             dependencies: [],
             capabilities: [],
             execution_target: 'frontend',
@@ -390,6 +393,7 @@ export class OrchestrationService {
           name: agentData.name,
           description: agentData.description,
           code: finalAgentCode, // Use verified/enriched code
+          parameters: agentData.parameters || {}, // Include extracted parameters
           dependencies: agentData.dependencies || [],
           capabilities: this.extractCapabilities(agentData),
           execution_target: agentData.execution_target || 'frontend',
@@ -423,6 +427,7 @@ export class OrchestrationService {
           name: 'ErrorAgent',
           description: 'Agent generation failed',
           code: '// Generation error',
+          parameters: {},
           dependencies: [],
           capabilities: [],
           execution_target: 'frontend',
@@ -510,6 +515,7 @@ export class OrchestrationService {
               name: agentSpecs[index].name,
               description: agentSpecs[index].description,
               code: '// Promise rejection error',
+              parameters: {},
               dependencies: [],
               capabilities: [],
               execution_target: 'frontend',
@@ -568,6 +574,7 @@ export class OrchestrationService {
           name: spec.name,
           description: spec.description,
           code: '// Batch generation system error',
+          parameters: {},
           dependencies: [],
           capabilities: [],
           execution_target: 'frontend' as const,
@@ -1104,6 +1111,378 @@ export default {
 }  
 
   /**
+   * Extract parameters from agent code by analyzing both explicit parameters objects and execute function patterns
+   * Enhanced version with comprehensive parsing for destructuring, defaults, and template literals
+   */
+  private extractParametersFromCode(code: string): Record<string, any> {
+    try {
+      let parameters: Record<string, any> = {};
+      
+      // First, look for explicit parameters object in the agent code
+      // Pattern: parameters: { param1: { type: 'string', default: 'value' }, ... }
+      const explicitParamsRegex = /parameters\s*:\s*\{([\s\S]*?)\}(?=\s*,|\s*\}|$)/;
+      const explicitMatch = explicitParamsRegex.exec(code);
+      
+      if (explicitMatch) {
+        try {
+          // Extract the parameters object content
+          const paramsContent = explicitMatch[1];
+          
+          // Parse parameter definitions using a more robust approach
+          // Look for patterns like: paramName: { ... }
+          const paramDefRegex = /([a-zA-Z_$][a-zA-Z0-9_$]*)\s*:\s*\{([\s\S]*?)\}(?=\s*,|\s*$)/g;
+          let paramMatch;
+          
+          while ((paramMatch = paramDefRegex.exec(paramsContent)) !== null) {
+            const paramName = paramMatch[1];
+            const paramDefContent = paramMatch[2];
+            
+            // Extract type, default, required, description from the parameter definition
+            const typeMatch = paramDefContent.match(/type\s*:\s*['"]([^'"]+)['"]/);
+            const defaultMatch = paramDefContent.match(/default\s*:\s*([^,}]+)/);
+            const requiredMatch = paramDefContent.match(/required\s*:\s*(true|false)/);
+            const descriptionMatch = paramDefContent.match(/description\s*:\s*['"]([^'"]+)['"]/);
+            
+            const paramInfo: any = {
+              type: typeMatch ? typeMatch[1] : 'any',
+              required: requiredMatch ? requiredMatch[1] === 'true' : false
+            };
+            
+            if (defaultMatch) {
+              let defaultValue = defaultMatch[1].trim();
+              // Parse the default value
+              if (defaultValue.startsWith("'") && defaultValue.endsWith("'")) {
+                paramInfo.default = defaultValue.slice(1, -1);
+              } else if (defaultValue.startsWith('"') && defaultValue.endsWith('"')) {
+                paramInfo.default = defaultValue.slice(1, -1);
+              } else if (defaultValue === 'true') {
+                paramInfo.default = true;
+              } else if (defaultValue === 'false') {
+                paramInfo.default = false;
+              } else if (defaultValue === '[]') {
+                paramInfo.default = [];
+              } else if (defaultValue === '{}') {
+                paramInfo.default = {};
+              } else if (!isNaN(Number(defaultValue))) {
+                paramInfo.default = Number(defaultValue);
+              } else {
+                paramInfo.default = defaultValue;
+              }
+            }
+            
+            if (descriptionMatch) {
+              paramInfo.description = descriptionMatch[1];
+            }
+            
+            parameters[paramName] = paramInfo;
+          }
+        } catch (error) {
+          logger.warn('Failed to parse explicit parameters object', { error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      
+      // Look for destructuring patterns in the execute function
+      // Pattern 1: const { param1 = 'default', param2, param3 = 123 } = params;
+      // Pattern 2: const { param1, param2, param3 } = params;
+      // Pattern 3: Multi-line destructuring with complex defaults
+      const destructuringRegex = /const\s*\{([\s\S]*?)\}\s*=\s*params;?/g;
+      let destructuringMatch;
+      
+      while ((destructuringMatch = destructuringRegex.exec(code)) !== null) {
+        if (destructuringMatch && destructuringMatch[1]) {
+          const paramString = destructuringMatch[1];
+          
+          // Parse parameters with smart comma splitting to handle complex defaults
+          const paramParts = this.smartSplitParameters(paramString);
+          
+          for (const part of paramParts) {
+            if (!part) continue; // Skip empty parts
+            
+            // Handle different parameter formats:
+            // 1. param = 'default' (with default value)
+            // 2. param (without default)
+            // 3. param = 123 (numeric default)
+            // 4. param = true/false (boolean default)
+            // 5. param = { key: value } (object default)
+            // 6. param = [] (array default)
+            // 7. param = `template` (template literal default)
+            
+            const defaultValueMatch = part.match(/^([a-zA-Z_$][a-zA-Z0-9_$]*)\s*=\s*([\s\S]+)$/);
+            if (defaultValueMatch && defaultValueMatch.length >= 3) {
+              const paramName = defaultValueMatch[1];
+              const defaultValue = defaultValueMatch[2].trim();
+              
+              // Skip if already defined in explicit parameters
+              if (parameters[paramName]) continue;
+              
+              // Parse the default value using enhanced logic
+              const { parsedDefault, inferredType } = this.parseDefaultValue(defaultValue);
+              
+              parameters[paramName] = {
+                type: inferredType,
+                default: parsedDefault,
+                required: false
+              };
+            } else {
+              // Parameter without default value - check if it's a valid parameter name
+              const paramName = part.trim();
+              if (paramName && /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(paramName)) {
+                // Skip if already defined in explicit parameters
+                if (parameters[paramName]) continue;
+                
+                // Look for default assignments later in the code to infer type
+                // Pattern: paramName: paramName || 'default' or paramName || 'default'
+                // Also handle template literals: paramName || `template_${var}`
+                const defaultAssignmentRegex = new RegExp(`${paramName}\\s*:\\s*${paramName}\\s*\\|\\|\\s*([^;,\\n}]+)[;,\\n}]|${paramName}\\s*\\|\\|\\s*([^;,\\n}]+)[;,\\n}]`, 'g');
+                const assignmentMatch = defaultAssignmentRegex.exec(code);
+                
+                if (assignmentMatch && (assignmentMatch[1] || assignmentMatch[2])) {
+                  // Get the default value from either capture group
+                  const defaultValue = (assignmentMatch[1] || assignmentMatch[2]).trim();
+                  let parsedDefault: any;
+                  
+                  if (defaultValue.startsWith("'") && defaultValue.endsWith("'")) {
+                    parsedDefault = defaultValue.slice(1, -1);
+                  } else if (defaultValue.startsWith('"') && defaultValue.endsWith('"')) {
+                    parsedDefault = defaultValue.slice(1, -1);
+                  } else if (defaultValue.startsWith('`') && defaultValue.endsWith('`')) {
+                    parsedDefault = defaultValue; // Keep template literal as-is
+                  } else if (defaultValue === 'true') {
+                    parsedDefault = true;
+                  } else if (defaultValue === 'false') {
+                    parsedDefault = false;
+                  } else if (defaultValue === 'null') {
+                    parsedDefault = null;
+                  } else if (!isNaN(Number(defaultValue))) {
+                    parsedDefault = Number(defaultValue);
+                  } else {
+                    parsedDefault = defaultValue;
+                  }
+                  
+                  parameters[paramName] = {
+                    type: typeof parsedDefault,
+                    default: parsedDefault,
+                    required: false
+                  };
+                } else {
+                  // No default found, mark as required
+                  parameters[paramName] = {
+                    type: 'any',
+                    required: true
+                  };
+                }
+              }
+            }
+          }
+        }
+      }
+      
+      // Also look for individual parameter usage patterns
+      // Pattern: params.paramName or params['paramName']
+      const paramUsageRegex = /params\.([a-zA-Z_$][a-zA-Z0-9_$]*)|params\['([^']+)'\]/g;
+      let usageMatch;
+      
+      while ((usageMatch = paramUsageRegex.exec(code)) !== null) {
+        const paramName = usageMatch[1] || usageMatch[2];
+        if (paramName && !parameters[paramName]) {
+          parameters[paramName] = {
+            type: 'any',
+            required: false
+          };
+        }
+      }
+      
+      logger.info('Extracted parameters from agent code', {
+        parameterCount: Object.keys(parameters).length,
+        parameters: Object.keys(parameters)
+      });
+      
+      return parameters;
+    } catch (error) {
+      logger.warn('Failed to extract parameters from agent code', { error: error instanceof Error ? error.message : String(error) });
+      return {};
+    }
+  }
+
+  /**
+   * Smart parameter splitting that handles complex default values
+   * Properly splits parameters while respecting nested objects, arrays, and template literals
+   */
+  private smartSplitParameters(paramString: string): string[] {
+    const params: string[] = [];
+    let current = '';
+    let depth = 0;
+    let inString = false;
+    let stringChar = '';
+    let inTemplate = false;
+    let templateDepth = 0;
+    
+    for (let i = 0; i < paramString.length; i++) {
+      const char = paramString[i];
+      const nextChar = paramString[i + 1];
+      
+      // Handle template literals
+      if (char === '`' && !inString) {
+        inTemplate = !inTemplate;
+        current += char;
+        continue;
+      }
+      
+      // Handle template literal expressions ${...}
+      if (inTemplate && char === '$' && nextChar === '{') {
+        templateDepth++;
+        current += char;
+        continue;
+      }
+      
+      if (inTemplate && char === '}' && templateDepth > 0) {
+        templateDepth--;
+        current += char;
+        continue;
+      }
+      
+      // Handle string literals
+      if ((char === '"' || char === "'") && !inTemplate) {
+        if (!inString) {
+          inString = true;
+          stringChar = char;
+        } else if (char === stringChar && paramString[i - 1] !== '\\') {
+          inString = false;
+          stringChar = '';
+        }
+        current += char;
+        continue;
+      }
+      
+      // Skip processing if we're inside a string or template literal
+      if (inString || inTemplate) {
+        current += char;
+        continue;
+      }
+      
+      // Handle nested objects and arrays
+      if (char === '{' || char === '[') {
+        depth++;
+        current += char;
+        continue;
+      }
+      
+      if (char === '}' || char === ']') {
+        depth--;
+        current += char;
+        continue;
+      }
+      
+      // Split on comma only if we're at the top level
+      if (char === ',' && depth === 0) {
+        const trimmed = current.trim();
+        if (trimmed) {
+          params.push(trimmed);
+        }
+        current = '';
+        continue;
+      }
+      
+      current += char;
+    }
+    
+    // Add the last parameter
+    const trimmed = current.trim();
+    if (trimmed) {
+      params.push(trimmed);
+    }
+    
+    return params;
+  }
+
+  /**
+   * Parse default values with enhanced type inference
+   * Handles complex objects, arrays, template literals, and primitive types
+   */
+  private parseDefaultValue(defaultValue: string): { parsedDefault: any; inferredType: string } {
+    const trimmed = defaultValue.trim();
+    
+    try {
+      // Handle string literals
+      if ((trimmed.startsWith("'") && trimmed.endsWith("'")) ||
+          (trimmed.startsWith('"') && trimmed.endsWith('"'))) {
+        return {
+          parsedDefault: trimmed.slice(1, -1),
+          inferredType: 'string'
+        };
+      }
+      
+      // Handle template literals
+      if (trimmed.startsWith('`') && trimmed.endsWith('`')) {
+        return {
+          parsedDefault: trimmed, // Keep template literal as-is for display
+          inferredType: 'string'
+        };
+      }
+      
+      // Handle boolean literals
+      if (trimmed === 'true') {
+        return { parsedDefault: true, inferredType: 'boolean' };
+      }
+      if (trimmed === 'false') {
+        return { parsedDefault: false, inferredType: 'boolean' };
+      }
+      
+      // Handle null
+      if (trimmed === 'null') {
+        return { parsedDefault: null, inferredType: 'object' };
+      }
+      
+      // Handle undefined
+      if (trimmed === 'undefined') {
+        return { parsedDefault: undefined, inferredType: 'undefined' };
+      }
+      
+      // Handle numbers
+      if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+        const num = Number(trimmed);
+        if (!isNaN(num)) {
+          return { parsedDefault: num, inferredType: 'number' };
+        }
+      }
+      
+      // Handle arrays
+      if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          return { parsedDefault: parsed, inferredType: 'array' };
+        } catch {
+          // If JSON parsing fails, treat as complex array
+          return { parsedDefault: trimmed, inferredType: 'array' };
+        }
+      }
+      
+      // Handle objects
+      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          return { parsedDefault: parsed, inferredType: 'object' };
+        } catch {
+          // If JSON parsing fails, treat as complex object
+          return { parsedDefault: trimmed, inferredType: 'object' };
+        }
+      }
+      
+      // Handle function calls or complex expressions
+      if (trimmed.includes('(') && trimmed.includes(')')) {
+        return { parsedDefault: trimmed, inferredType: 'any' };
+      }
+      
+      // Default: treat as string
+      return { parsedDefault: trimmed, inferredType: 'string' };
+      
+    } catch (error) {
+      // Fallback: treat as string if parsing fails
+      return { parsedDefault: trimmed, inferredType: 'string' };
+    }
+  }
+
+  /**
    * Validate and enhance parsed agent data
    */
   private validateAndEnhanceAgent(parsed: any): any {
@@ -1142,6 +1521,19 @@ export default {
     // Ensure arrays are properly formatted
     if (!Array.isArray(parsed.dependencies)) {
       parsed.dependencies = [];
+    }
+    
+    // Extract parameters from the agent code
+    if (parsed.code) {
+      const extractedParams = this.extractParametersFromCode(parsed.code);
+      parsed.parameters = extractedParams;
+      logger.info('Extracted parameters for agent', {
+        name: parsed.name,
+        parameterCount: Object.keys(extractedParams).length,
+        parameters: Object.keys(extractedParams)
+      });
+    } else {
+      parsed.parameters = {};
     }
     
     // Set defaults for missing fields

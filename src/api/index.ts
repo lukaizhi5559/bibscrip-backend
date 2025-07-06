@@ -14,6 +14,7 @@ import agentsRouter from './agents';
 import actionPlannerRouter from './actionPlanner';
 import usersRouter from './users';
 // Removed: visualAgentRouter, integrationRouter (moved to Electron client)
+import streamingRouter from './streaming';
 import analyticsRouter from './analytics';
 import automationAnalyticsRouter from './automationAnalytics';
 // Removed: uiIndexedAgentRouter, enhancedVisualAgentRouter (moved to Electron client)
@@ -238,6 +239,14 @@ router.get('/', (req, res) => {
           'POST /api/users/{userId}/enrich-prompt - Enrich prompt with user context'
         ]
       },
+      streaming: {
+        path: '/api/streaming',
+        description: 'Low-latency streaming responses with live progress updates',
+        endpoints: [
+          'POST /api/streaming/ask - Stream LLM responses with live progress',
+          'POST /api/streaming/quick - Ultra-fast cached responses for common queries'
+        ]
+      },
       'automation-analytics': {
         path: '/api/automation-analytics',
         description: 'Automation session logging and analytics',
@@ -281,6 +290,7 @@ router.use('/auth', authRouter);
 router.use('/bibliography', bibliographyRouter);
 router.use('/agents', agentsRouter);
 router.use('/users', usersRouter);
+router.use('/streaming', streamingRouter);
 // Removed: /visual-agent and /integration endpoints (moved to Electron client)
 router.use('/analytics', analyticsRouter);
 router.use('/automation-analytics', automationAnalyticsRouter);

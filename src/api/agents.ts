@@ -343,7 +343,7 @@ router.post('/generate', authenticate, async (req: Request, res: Response): Prom
     // Ensure the agent has all required properties for the Agent interface
     const completeAgent = {
       ...result.agent,
-      parameters: {}, // Default empty parameters
+      parameters: result.agent.parameters || {}, // Preserve extracted parameters
       version: '1.0.0', // Default version
       config: {}, // Default empty config
       secrets: {}, // Default empty secrets
@@ -470,7 +470,7 @@ router.post('/generate/batch', authenticate, async (req: Request, res: Response)
       try {
         const completeAgent = {
           ...result.agent,
-          parameters: {},
+          parameters: result.agent.parameters || {}, // Preserve extracted parameters
           version: '1.0.0',
           config: {},
           secrets: {},
