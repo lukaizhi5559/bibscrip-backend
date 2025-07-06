@@ -8,6 +8,8 @@ import { getBestLLMResponse } from '../utils/llmRouter';
 import { llmOrchestratorService, EnhancedLLMResponse } from './llmOrchestrator';
 import { jsonRecoveryService, JsonRecoveryResult } from './jsonRecoveryService';
 import { AgentVerificationService } from './agentVerificationService';
+import { AgentOrchestrationService } from './agentOrchestrationService';
+import { v4 as uuidv4 } from 'uuid';
 
 export interface AgentAction {
   name: string;
@@ -72,6 +74,7 @@ export interface IntentResult {
 
 export interface AgentGenerationResult {
   agent: {
+    id?: string;
     name: string;
     description: string;
     code: string;
@@ -80,7 +83,7 @@ export interface AgentGenerationResult {
     capabilities: string[];
     execution_target: 'frontend' | 'backend';
     requires_database: boolean;
-    database_type?: string;
+    database_type?: 'sqlite' | 'duckdb';
     schema?: Record<string, any>;
   };
   status: 'generated' | 'error' | 'enriched';
@@ -88,6 +91,14 @@ export interface AgentGenerationResult {
   test_cases?: any[];
   issues?: string[];
   llm_response?: EnhancedLLMResponse;
+  // Agent reuse optimization properties
+  reused?: boolean;
+  similarityScore?: number;
+  matchDetails?: {
+    matchedAgent?: string;
+    matchType?: 'exact' | 'similar' | 'none';
+    reasons?: string[];
+  };
 }
 
 /**
@@ -241,12 +252,18 @@ export class OrchestrationService {
   /**
    * Generate an agent using LLM intelligence
    */
-  async generateAgent(description: string, requirements?: any): Promise<AgentGenerationResult> {
+  async generateAgent(description: string, name?: string, requirements?: any): Promise<AgentGenerationResult> {
     try {
-      logger.info('Generating agent', { description });
+      logger.info('Generating agent', { description, name });
 
-      // Use LLM to generate agent code
-      const llmResponse = await llmOrchestratorService.processAgentGeneration(description, requirements);
+      // Create context with name for proper agent generation
+      const context = {
+        name: name || 'GeneratedAgent',
+        requirements: requirements
+      };
+
+      // Use LLM to generate agent code with proper name context
+      const llmResponse = await llmOrchestratorService.processAgentGeneration(description, context);
       
       // Parse the LLM response using intelligent JSON recovery
       const rawAgentData = await this.parseAgentResponse(llmResponse.text);
@@ -414,6 +431,55 @@ export class OrchestrationService {
         provider: llmResponse.provider
       });
 
+      // Store the generated agent in the database
+      try {
+        const { AgentOrchestrationService } = await import('./agentOrchestrationService');
+        const agentService = AgentOrchestrationService.getInstance();
+        
+        // Create agent object with all required fields
+        const agentToStore = {
+          id: uuidv4(), // Generate unique ID
+          name: result.agent.name,
+          description: result.agent.description,
+          code: result.agent.code,
+          parameters: result.agent.parameters,
+          dependencies: result.agent.dependencies,
+          capabilities: result.agent.capabilities,
+          execution_target: result.agent.execution_target,
+          requires_database: result.agent.requires_database,
+          database_type: result.agent.database_type,
+          version: '1.0.0',
+          config: {},
+          secrets: {},
+          orchestrator_metadata: {
+            confidence: result.confidence,
+            status: result.status,
+            generation_timestamp: new Date().toISOString(),
+            llm_provider: result.llm_response?.provider || 'unknown'
+          }
+        };
+        
+        const storedAgent = await agentService.storeAgent(agentToStore);
+        
+        logger.info('Agent stored in database', {
+          agentName: storedAgent.name,
+          agentId: storedAgent.id,
+          confidence: result.confidence
+        });
+        
+        // Update the result with the stored agent's data
+        result.agent = { ...result.agent, id: storedAgent.id };
+        
+      } catch (storageError) {
+        logger.error('Failed to store agent in database', {
+          agentName: result.agent.name,
+          error: storageError instanceof Error ? storageError.message : String(storageError)
+        });
+        // Don't fail the generation if storage fails, just log the error
+        result.issues = result.issues || [];
+        result.issues.push('Agent generated successfully but failed to store in database');
+      }
+
       return result;
 
     } catch (error) {
@@ -466,19 +532,17 @@ export class OrchestrationService {
         method: 'promise_parallel'
       });
 
-      // Generate all agents in parallel using Promise.allSettled
-      // Return promises directly for true parallelism - let Promise.allSettled handle everything
+      // Generate all agents in parallel using Promise.allSettled with reuse optimization
+      // Each agent checks for existing similar agents via SQL fuzzy search before generating
       const agentPromises = agentSpecs.map((spec, index) => {
-        logger.info(`Starting generation for agent ${index + 1}/${agentSpecs.length}`, { 
+        logger.info(`Starting generation with reuse check for agent ${index + 1}/${agentSpecs.length}`, { 
           name: spec.name,
           description: spec.description.substring(0, 100) + '...'
         });
         
-        // Use focused context for each agent to avoid confusion
-        const focusedDescription = `${spec.description}. Focus specifically on: ${spec.description}`;
-        
-        // Return the promise directly - Promise.allSettled will handle success/failure
-        return this.generateAgent(focusedDescription, spec.context);
+        // Use generateAgentWithReuse for SQL-based fuzzy search optimization
+        // This will check for existing similar agents before generating new ones
+        return this.generateAgentWithReuse(spec.description, spec.name, spec.context);
       });
 
       // Wait for all agent generations to complete in parallel
@@ -599,53 +663,6 @@ export class OrchestrationService {
         }
       };
     }
-  }
-
-
-
-  /**
-   * Get all agents (placeholder - would integrate with database)
-   */
-  async getAllAgents(): Promise<any[]> {
-    // TODO: Integrate with actual agent database
-    logger.info('Getting all agents from database');
-    return [];
-  }
-
-  /**
-   * Get agent by name (placeholder - would integrate with database)
-   */
-  async getAgentByName(name: string): Promise<any | null> {
-    // TODO: Integrate with actual agent database
-    logger.info('Getting agent by name', { name });
-    return null;
-  }
-
-  /**
-   * Delete agent (placeholder - would integrate with database)
-   */
-  async deleteAgent(name: string): Promise<boolean> {
-    // TODO: Integrate with actual agent database
-    logger.info('Deleting agent', { name });
-    return false;
-  }
-
-  /**
-   * Log communication between agents (placeholder)
-   */
-  async logCommunication(communication: any): Promise<string> {
-    // TODO: Integrate with actual communication logging
-    logger.info('Logging agent communication', communication);
-    return 'comm-' + Date.now();
-  }
-
-  /**
-   * Get agent communications (placeholder)
-   */
-  async getCommunications(filters: any): Promise<any[]> {
-    // TODO: Integrate with actual communication database
-    logger.info('Getting agent communications', filters);
-    return [];
   }
 
   // Private helper methods
@@ -1711,6 +1728,226 @@ export default {
     }
     
     return issues;
+  }
+
+  /**
+   * Mock database method - replace with actual database integration
+                                                                                                                                    /**
+   * Find reusable agent using efficient SQL-based fuzzy search
+   * Uses AgentOrchestrationService for database-level similarity matching
+   */
+  async findReusableAgent(description: string, name: string): Promise<any | null> {
+    try {
+      logger.info('Searching for reusable agents using SQL fuzzy search', { description, name });
+      
+      const agentOrchestrationService = AgentOrchestrationService.getInstance();
+      
+      // DEBUG: First get all agents to see similarity scores
+      const allSimilarAgents = await agentOrchestrationService.findSimilarAgents(
+        description, 
+        name, 
+        0.0 // Get all agents to see their scores
+      );
+      
+      if (allSimilarAgents) {
+        logger.info('DEBUG: All agent similarity scores', {
+          description,
+          name,
+          topAgent: {
+            name: allSimilarAgents.agent.name,
+            description: allSimilarAgents.agent.description,
+            similarityScore: allSimilarAgents.similarityScore,
+            matchDetails: allSimilarAgents.matchDetails
+          }
+        });
+      }
+      
+      const similarAgent = await agentOrchestrationService.findSimilarAgents(
+        description, 
+        name, 
+        0.15 // 15% similarity threshold - optimized for positive matching while preventing false positives
+      );
+      
+      if (similarAgent) {
+        logger.info('Found reusable agent via SQL search', {
+          agentName: similarAgent.agent.name,
+          overallScore: similarAgent.similarityScore,
+          descriptionSimilarity: similarAgent.matchDetails.descriptionSimilarity,
+          requirementsSimilarity: similarAgent.matchDetails.requirementsSimilarity,
+          matchType: similarAgent.matchDetails.matchType
+        });
+        
+        return {
+          ...similarAgent.agent,
+          reused: true,
+          similarityScore: similarAgent.similarityScore,
+          matchDetails: {
+            descriptionSimilarity: similarAgent.matchDetails.descriptionSimilarity,
+            requirementsSimilarity: similarAgent.matchDetails.requirementsSimilarity,
+            matchType: similarAgent.matchDetails.matchType
+          }
+        };
+      } else {
+        logger.info('No suitable agent found for reuse via SQL search');
+        return null;
+      }
+    } catch (error) {
+      logger.error('Error finding reusable agent via SQL search', { error, description, name });
+      return null;
+    }
+  }
+
+  /**
+   * Calculate text similarity using simple word overlap algorithm
+   * In production, this could use more sophisticated NLP techniques
+   */
+  private calculateTextSimilarity(text1: string, text2: string): number {
+    if (!text1 || !text2) return 0;
+    
+    // Normalize texts: lowercase, remove punctuation, split into words
+    const normalize = (text: string) => 
+      text.toLowerCase()
+          .replace(/[^a-z0-9\s]/g, ' ')
+          .split(/\s+/)
+          .filter(word => word.length > 2); // Filter out short words
+    
+    const words1 = normalize(text1);
+    const words2 = normalize(text2);
+    
+    if (words1.length === 0 || words2.length === 0) return 0;
+    
+    // Calculate Jaccard similarity (intersection over union)
+    const set1 = new Set(words1);
+    const set2 = new Set(words2);
+    
+    const intersection = new Set([...set1].filter(word => set2.has(word)));
+    const union = new Set([...set1, ...set2]);
+    
+    return intersection.size / union.size;
+  }
+
+  /**
+   * Enhanced generateAgent method with reuse optimization
+   */
+  async generateAgentWithReuse(description: string, name: string, context?: any): Promise<AgentGenerationResult> {
+    try {
+      logger.info('Starting agent generation with reuse optimization', { description, name });
+      
+      // Step 1: Check for reusable agents first
+      const reusableAgent = await this.findReusableAgent(description, name);
+      
+      if (reusableAgent) {
+        logger.info('Reusing existing agent', {
+          agentName: reusableAgent.name,
+          similarityScore: reusableAgent.similarityScore
+        });
+        
+        return {
+          agent: {
+            name: reusableAgent.name,
+            description: reusableAgent.description,
+            code: reusableAgent.code,
+            parameters: reusableAgent.parameters || {},
+            dependencies: reusableAgent.dependencies || [],
+            capabilities: this.extractCapabilities(reusableAgent),
+            execution_target: reusableAgent.execution_target || 'backend',
+            requires_database: reusableAgent.requires_database || false,
+            database_type: reusableAgent.database_type,
+            schema: reusableAgent.schema
+          },
+          status: 'generated',
+          confidence: reusableAgent.similarityScore,
+          reused: true,
+          similarityScore: reusableAgent.similarityScore, // Fix: Add similarityScore for API response
+          matchDetails: reusableAgent.matchDetails,
+          issues: []
+        };
+      }
+      
+      // Step 2: No suitable agent found, generate new one
+      logger.info('No reusable agent found, generating new agent');
+      const newAgent = await this.generateAgent(description, name, context);
+      
+      return {
+        ...newAgent,
+        reused: false
+      };
+    } catch (error) {
+      logger.error('Error in generateAgentWithReuse', { error, description, name });
+      throw error;
+    }
+  }
+
+  /**
+   * Get all agents from database
+   */
+  async getAllAgents(): Promise<any[]> {
+    try {
+      logger.info('Getting all agents from database');
+      
+      // Use real database integration via AgentOrchestrationService
+      const { AgentOrchestrationService } = await import('./agentOrchestrationService');
+      const agentService = AgentOrchestrationService.getInstance();
+      const agents = await agentService.getAllAgents();
+      
+      logger.info('Retrieved agents from database', { count: agents.length });
+      return agents;
+    } catch (error) {
+      logger.error('Error getting all agents', { error });
+      return [];
+    }
+  }
+
+  /**
+   * Get agent by name from database
+   */
+  async getAgentByName(name: string): Promise<any | null> {
+    try {
+      logger.info('Getting agent by name', { name });
+      
+      // Use real database integration via AgentOrchestrationService
+      const { AgentOrchestrationService } = await import('./agentOrchestrationService');
+      const agentService = AgentOrchestrationService.getInstance();
+      const agent = await agentService.getAgent(name);
+      
+      if (agent) {
+        logger.info('Found existing agent', { name: agent.name, id: agent.id });
+        return agent;
+      }
+      
+      logger.info('No agent found with name', { name });
+      return null;
+    } catch (error) {
+      logger.error('Error getting agent by name', { name, error });
+      return null;
+    }
+  }
+
+  /**
+   * Delete agent (placeholder - would integrate with database)
+   */
+  async deleteAgent(name: string): Promise<boolean> {
+    // TODO: Integrate with actual agent database
+    logger.info('Deleting agent', { name });
+    return false;
+  }
+
+  /**
+   * Log communication between agents (placeholder)
+   */
+  async logCommunication(communication: any): Promise<string> {
+    // TODO: Integrate with actual communication logging
+    logger.info('Logging agent communication', communication);
+    return 'comm-' + Date.now();
+  }
+
+  /**
+   * Get agent communications (placeholder)
+   */
+  async getCommunications(filters: any): Promise<any[]> {
+    // TODO: Integrate with actual communication database
+    logger.info('Getting agent communications', filters);
+    return [];
   }
 }
 

@@ -511,7 +511,7 @@ router.post('/generate-agent', authenticate, async (req: Request, res: Response)
       name 
     });
 
-    const agentResult = await orchestrationService.generateAgent(description, { name, context });
+    const agentResult = await orchestrationService.generateAgent(description, name, { context });
     
     res.json(agentResult);
 

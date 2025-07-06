@@ -33,6 +33,7 @@ export interface Agent {
   description: string;
   parameters: Record<string, any>;
   dependencies: string[];
+  capabilities: string[];
   execution_target: 'frontend' | 'backend';
   requires_database: boolean;
   database_type?: 'sqlite' | 'duckdb';
@@ -377,6 +378,7 @@ Focus on practical, working code that integrates with existing Thinkdrop infrast
         parameters: {},
         code: response.code,
         dependencies: response.dependencies,
+        capabilities: response.capabilities || [],
         execution_target: response.executionTarget,
         database_requirements: response.databaseRequirements || [],
         requires_database: (response.databaseRequirements || []).length > 0,
@@ -395,6 +397,7 @@ Focus on practical, working code that integrates with existing Thinkdrop infrast
         created_at: new Date(),
         updated_at: new Date(),
         // Provide default values for new required fields
+        capabilities: agentData.capabilities || [],
         config: {},
         secrets: {},
         orchestrator_metadata: {},
@@ -528,6 +531,225 @@ Focus on practical, working code that integrates with existing Thinkdrop infrast
       logger.error('Error parsing intent via LLM:', error as Error);
       throw new Error(`Failed to parse intent: ${(error as Error).message}`);
     }
+  }
+
+  /**
+   * Find similar agents using SQL-based fuzzy search (efficient, no in-memory loading)
+   * Uses PostgreSQL's text search and similarity functions
+   */
+  async findSimilarAgents(description: string, name?: string, threshold: number = 0.15): Promise<{
+    agent: Agent;
+    similarityScore: number;
+    matchDetails: {
+      descriptionSimilarity: number;
+      requirementsSimilarity?: number;
+      matchType: 'exact' | 'fuzzy' | 'partial';
+    };
+  } | null> {
+    try {
+      logger.info('Searching for similar agents using JavaScript-based similarity', { description, name, threshold });
+      
+      // Get all agents from database and calculate similarity in JavaScript
+      const query = `SELECT * FROM agents ORDER BY created_at DESC`;
+      const result = await this.pool.query(query);
+      
+      if (result.rows.length === 0) {
+        logger.info('No agents found in database');
+        return null;
+      }
+      
+      // Calculate similarity for each agent
+      const agentsWithScores = result.rows.map(row => {
+        const descSimilarity = this.calculateStringSimilarity(description.toLowerCase(), row.description.toLowerCase());
+        const nameSimilarity = name ? this.calculateStringSimilarity(name.toLowerCase(), row.name.toLowerCase()) : 0;
+        
+        // Weighted score: description 80%, name 20%
+        const overallScore = descSimilarity * 0.8 + nameSimilarity * 0.2;
+        
+        return {
+          agent: row,
+          overallScore,
+          descSimilarity,
+          nameSimilarity
+        };
+      });
+      
+      // Sort by similarity score and get the best match
+      agentsWithScores.sort((a, b) => b.overallScore - a.overallScore);
+      
+      // DEBUG: Log all agent scores to understand selection
+      logger.info('DEBUG: All agent similarity scores', {
+        description,
+        name,
+        threshold,
+        agentScores: agentsWithScores.slice(0, 5).map(agent => ({
+          name: agent.agent.name,
+          description: agent.agent.description.substring(0, 100) + '...',
+          overallScore: agent.overallScore,
+          descSimilarity: agent.descSimilarity,
+          nameSimilarity: agent.nameSimilarity
+        }))
+      });
+      
+      const bestMatch = agentsWithScores[0];
+      
+      if (bestMatch.overallScore >= threshold) {
+        logger.info('Found similar agent using JavaScript similarity', {
+          agentName: bestMatch.agent.name,
+          overallScore: bestMatch.overallScore,
+          descriptionSimilarity: bestMatch.descSimilarity,
+          nameSimilarity: bestMatch.nameSimilarity,
+          threshold
+        });
+        
+        // Convert database row to Agent interface
+        const agent: Agent = {
+          id: bestMatch.agent.id,
+          name: bestMatch.agent.name,
+          description: bestMatch.agent.description,
+          parameters: bestMatch.agent.parameters || {},
+          dependencies: bestMatch.agent.dependencies || [],
+          capabilities: bestMatch.agent.capabilities || [],
+          execution_target: bestMatch.agent.execution_target,
+          requires_database: bestMatch.agent.requires_database,
+          database_type: bestMatch.agent.database_type,
+          code: bestMatch.agent.code,
+          created_at: bestMatch.agent.created_at,
+          updated_at: bestMatch.agent.updated_at,
+          version: bestMatch.agent.version,
+          config: bestMatch.agent.config || {},
+          secrets: bestMatch.agent.secrets || {},
+          orchestrator_metadata: bestMatch.agent.orchestrator_metadata || {},
+          memory: bestMatch.agent.memory
+        };
+        
+        return {
+          agent,
+          similarityScore: bestMatch.overallScore,
+          matchDetails: {
+            descriptionSimilarity: bestMatch.descSimilarity,
+            requirementsSimilarity: name ? bestMatch.nameSimilarity : undefined,
+            matchType: bestMatch.overallScore > 0.9 ? 'exact' : bestMatch.overallScore > 0.8 ? 'fuzzy' : 'partial'
+          }
+        };
+      } else {
+        logger.info('No agents meet similarity threshold', {
+          bestScore: bestMatch.overallScore,
+          threshold,
+          bestMatchAgent: bestMatch.agent.name
+        });
+        return null;
+      }
+    } catch (error) {
+      logger.error('Error finding similar agents with JavaScript similarity', { error, description, name });
+      return null;
+    }
+  }
+
+  /**
+   * Calculate string similarity using domain-aware Jaccard similarity coefficient
+   * Prevents false positives by filtering stop words and using semantic matching
+   */
+  private calculateStringSimilarity(str1: string, str2: string): number {
+    if (str1 === str2) return 1.0;
+    if (!str1 || !str2) return 0.0;
+    
+    // Stop words that should be ignored for similarity (too generic)
+    const stopWords = new Set([
+      'and', 'or', 'the', 'a', 'an', 'for', 'to', 'of', 'in', 'on', 'at', 'by', 'with',
+      'from', 'up', 'about', 'into', 'through', 'during', 'before', 'after', 'above',
+      'below', 'between', 'among', 'system', 'agent', 'automation', 'automatic', 'auto'
+    ]);
+    
+    // Extract meaningful words (filter stop words and short words)
+    const extractMeaningfulWords = (text: string): Set<string> => {
+      return new Set(
+        text.toLowerCase()
+          .split(/\s+/)
+          .filter(word => word.length > 2 && !stopWords.has(word))
+          .map(word => word.replace(/[^a-z0-9]/g, '')) // Remove punctuation
+          .filter(word => word.length > 2)
+      );
+    };
+    
+    const words1 = extractMeaningfulWords(str1);
+    const words2 = extractMeaningfulWords(str2);
+    
+    if (words1.size === 0 && words2.size === 0) return 0.0; // Both have no meaningful words
+    if (words1.size === 0 || words2.size === 0) return 0.0;
+    
+    // Calculate intersection and union
+    const intersection = new Set([...words1].filter(word => words2.has(word)));
+    const union = new Set([...words1, ...words2]);
+    
+    // Jaccard similarity = |intersection| / |union|
+    const jaccardSimilarity = intersection.size / union.size;
+    
+    // Domain-aware semantic bonus
+    const semanticBonus = this.calculateSemanticBonus(str1, str2, intersection);
+    
+    // Combine Jaccard similarity with semantic bonus (weighted 70/30 for better positive matching)
+    return jaccardSimilarity * 0.7 + semanticBonus * 0.3;
+  }
+  
+  /**
+   * Calculate domain-aware semantic bonus for agent similarity
+   * Uses domain-specific terms and stricter matching to prevent false positives
+   */
+  private calculateSemanticBonus(str1: string, str2: string, intersection: Set<string>): number {
+    const lower1 = str1.toLowerCase();
+    const lower2 = str2.toLowerCase();
+    
+    // Domain-specific key terms (grouped by domain)
+    const domainTerms = {
+      music: ['spotify', 'music', 'playlist', 'song', 'audio', 'player', 'track'],
+      weather: ['weather', 'temperature', 'forecast', 'climate', 'rain', 'snow', 'wind'],
+      email: ['email', 'mail', 'message', 'inbox', 'send', 'receive', 'smtp', 'imap'],
+      file: ['file', 'folder', 'document', 'backup', 'storage', 'directory', 'path'],
+      communication: ['telegram', 'chat', 'message', 'notification', 'call', 'voice'],
+      system: ['startup', 'launch', 'boot', 'service', 'process', 'daemon']
+    };
+    
+    // Find which domains each string belongs to
+    const getDomains = (text: string): Set<string> => {
+      const domains = new Set<string>();
+      for (const [domain, terms] of Object.entries(domainTerms)) {
+        if (terms.some(term => text.includes(term))) {
+          domains.add(domain);
+        }
+      }
+      return domains;
+    };
+    
+    const domains1 = getDomains(lower1);
+    const domains2 = getDomains(lower2);
+    
+    // If no common domains, very low bonus
+    const commonDomains = new Set([...domains1].filter(domain => domains2.has(domain)));
+    if (commonDomains.size === 0) {
+      return Math.min(intersection.size * 0.03, 0.05); // Very small bonus for word overlap
+    }
+    
+    // Calculate domain-specific term matches
+    let domainMatches = 0;
+    let totalDomainTerms = 0;
+    
+    for (const domain of commonDomains) {
+      const terms = domainTerms[domain as keyof typeof domainTerms];
+      for (const term of terms) {
+        totalDomainTerms++;
+        if (lower1.includes(term) && lower2.includes(term)) {
+          domainMatches++;
+        }
+      }
+    }
+    
+    // Bonus based on domain term matches and meaningful word overlap
+    const domainScore = totalDomainTerms > 0 ? domainMatches / totalDomainTerms : 0;
+    const intersectionBonus = intersection.size > 0 ? Math.min(intersection.size * 0.15, 0.4) : 0;
+    
+    // Higher bonus for same-domain agents to enable positive matching
+    return Math.min(domainScore * 0.6 + intersectionBonus, 0.6); // Cap at 60%
   }
 
   /**

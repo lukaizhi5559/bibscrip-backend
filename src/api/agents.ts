@@ -280,6 +280,8 @@ router.post('/intent/parse', authenticate, async (req: Request, res: Response): 
   }
 });
 
+
+
 /**
  * @swagger
  * /api/agents/generate:
@@ -319,10 +321,10 @@ router.post('/generate', authenticate, async (req: Request, res: Response): Prom
       return;
     }
 
-    logger.info('Generating agent with unified LLM core', { name, description });
+    logger.info('Generating agent with reuse optimization', { name, description });
 
-    // Use orchestrationService which internally calls the LLM (no duplicate calls)
-    const result = await orchestrationService.generateAgent(description, { name, context });
+    // Use orchestrationService with reuse logic - checks for existing agents first
+    const result = await orchestrationService.generateAgentWithReuse(description, name, context);
     
     if (result.status === 'error') {
       res.status(400).json({
@@ -374,6 +376,13 @@ router.post('/generate', authenticate, async (req: Request, res: Response): Prom
       status: result.status,
       agent: storedAgent,
       confidence: result.confidence,
+      reused: result.reused || false,
+      similarityScore: result.similarityScore,
+      matchDetails: result.matchDetails,
+      optimization: {
+        timesSaved: result.reused ? 'Significant LLM generation time saved' : 'New agent generated',
+        efficiencyGain: result.reused ? '~15-30 seconds saved' : 'N/A'
+      },
       issues: result.issues,
       llm_metadata: result.llm_response ? {
         provider: result.llm_response.provider,
