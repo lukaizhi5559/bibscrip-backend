@@ -225,7 +225,7 @@ export class LLMRouter {
     }
     
     // Step 3: Try all LLM providers in fallback order
-    const allProviders = ['gemini', 'openai', 'claude', 'mistral', 'deepseek', 'lambda'];
+    const allProviders = ['mistral', 'gemini', 'openai', 'claude', 'deepseek', 'lambda'];
     console.log('🚀 Starting LLM provider fallback chain:', allProviders);
     
     for (const provider of allProviders) {

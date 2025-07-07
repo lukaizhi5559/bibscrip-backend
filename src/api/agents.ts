@@ -6,6 +6,8 @@ import { userMemoryService } from '../services/userMemoryService';
 import { authenticate } from '../middleware/auth';
 import { logger } from '../utils/logger';
 import { verifyAgent, enrichAgent, testAgent } from './agents/verify';
+import { ClarificationIntegrationService } from '../services/clarificationIntegrationService';
+import { ClientDetectionMiddleware, ClarificationRequest } from '../middleware/clientDetectionMiddleware';
 
 const router = Router();
 
@@ -58,7 +60,7 @@ const router = Router();
  *                 clarification_questions:
  *                   type: array
  */
-router.post('/orchestrate', authenticate, async (req: Request, res: Response): Promise<void> => {
+router.post('/orchestrate', authenticate, ClientDetectionMiddleware.detect(), async (req: ClarificationRequest, res: Response): Promise<void> => {
   try {
     const { request, userId, enrichWithUserContext = false } = req.body;
 
@@ -89,13 +91,63 @@ router.post('/orchestrate', authenticate, async (req: Request, res: Response): P
       }
     }
 
-    logger.info(`Orchestrating request: ${finalRequest}`);
+    logger.info(`Orchestrating request with conditional clarification: ${finalRequest}`);
 
-    const result = await orchestrationService.orchestrateRequest(finalRequest);
+    // Use conditional clarification system
+    const clarificationService = new ClarificationIntegrationService();
+    const clarificationOptions = req.clarificationOptions!;
+    
+    const orchestrationRequest = {
+      description: finalRequest,
+      requirements: req.body.requirements || [],
+      availableServices: req.body.availableServices || [],
+      context: userContext ? { userContext } : {}
+    };
 
-    // Include user context in response if available
+    const result = await clarificationService.orchestrateWithClarification(
+      orchestrationRequest,
+      clarificationOptions
+    );
+
+    // Handle clarification needed response
+    if (result.needsClarification) {
+      res.json({
+        status: 'clarification_needed',
+        needsClarification: true,
+        questions: result.clarificationResult?.questions || [],
+        clarificationId: result.clarificationResult?.clarificationId,
+        analysis: result.clarificationResult?.analysis,
+        processingTime: result.processingTime,
+        clientType: clarificationOptions.clientType,
+        mode: clarificationOptions.mode
+      });
+      return;
+    }
+
+    // Handle validation errors
+    if (!result.success) {
+      res.status(400).json({
+        status: 'validation_error',
+        error: result.error,
+        issues: result.clarificationResult?.issues || [],
+        processingTime: result.processingTime,
+        clientType: clarificationOptions.clientType,
+        mode: clarificationOptions.mode
+      });
+      return;
+    }
+
+    // Success response with orchestration result
     const response = {
-      ...result,
+      status: result.orchestrationResult?.status || 'success',
+      ...result.orchestrationResult,
+      clarification: {
+        mode: clarificationOptions.mode,
+        clientType: clarificationOptions.clientType,
+        confidence: result.clarificationResult?.confidence,
+        constraintsApplied: result.clarificationResult?.enhancedPromptConstraints?.length || 0
+      },
+      processingTime: result.processingTime,
       ...(userContext && { userContext })
     };
 
@@ -310,9 +362,9 @@ router.post('/intent/parse', authenticate, async (req: Request, res: Response): 
  *       200:
  *         description: Generated agent
  */
-router.post('/generate', authenticate, async (req: Request, res: Response): Promise<void> => {
+router.post('/generate', authenticate, ClientDetectionMiddleware.detect(), async (req: ClarificationRequest, res: Response): Promise<void> => {
   try {
-    const { name, description, context } = req.body;
+    const { name, description, context, requirements = [], agentType = 'automation' } = req.body;
 
     if (!name || !description) {
       res.status(400).json({
@@ -321,20 +373,58 @@ router.post('/generate', authenticate, async (req: Request, res: Response): Prom
       return;
     }
 
-    logger.info('Generating agent with reuse optimization', { name, description });
+    logger.info(`Generating agent with conditional clarification: ${name}`);
 
-    // Use orchestrationService with reuse logic - checks for existing agents first
-    const result = await orchestrationService.generateAgentWithReuse(description, name, context);
+    // Use conditional clarification system for agent generation
+    const clarificationService = new ClarificationIntegrationService();
+    const clarificationOptions = req.clarificationOptions!;
     
-    if (result.status === 'error') {
+    const agentRequest = {
+      agentName: name,
+      description,
+      requirements: Array.isArray(requirements) ? requirements : [],
+      availableServices: req.body.availableServices || [],
+      context: context || {},
+      agentType
+    };
+
+    const result = await clarificationService.generateAgentWithClarification(
+      agentRequest,
+      clarificationOptions
+    );
+
+    // Handle clarification needed response
+    if (result.needsClarification) {
+      res.json({
+        status: 'clarification_needed',
+        needsClarification: true,
+        questions: result.clarificationResult?.questions || [],
+        clarificationId: result.clarificationResult?.clarificationId,
+        analysis: result.clarificationResult?.analysis,
+        processingTime: result.processingTime,
+        clientType: clarificationOptions.clientType,
+        mode: clarificationOptions.mode
+      });
+      return;
+    }
+
+    // Handle validation errors
+    if (!result.success) {
       res.status(400).json({
-        error: 'Agent generation failed',
-        issues: result.issues,
-        llm_metadata: result.llm_response ? {
-          provider: result.llm_response.provider,
-          latencyMs: result.llm_response.latencyMs,
-          fromCache: result.llm_response.fromCache
-        } : undefined
+        status: 'validation_error',
+        error: result.error,
+        issues: result.clarificationResult?.issues || [],
+        processingTime: result.processingTime,
+        clientType: clarificationOptions.clientType,
+        mode: clarificationOptions.mode
+      });
+      return;
+    }
+
+    if (!result.agent) {
+      res.status(500).json({
+        error: 'Failed to generate agent - no agent returned',
+        processingTime: result.processingTime
       });
       return;
     }
@@ -372,23 +462,17 @@ router.post('/generate', authenticate, async (req: Request, res: Response): Prom
       storedAgent = completeAgent;
     }
 
+    // Success response with conditional clarification metadata
     res.json({
-      status: result.status,
+      status: 'success',
       agent: storedAgent,
-      confidence: result.confidence,
-      reused: result.reused || false,
-      similarityScore: result.similarityScore,
-      matchDetails: result.matchDetails,
-      optimization: {
-        timesSaved: result.reused ? 'Significant LLM generation time saved' : 'New agent generated',
-        efficiencyGain: result.reused ? '~15-30 seconds saved' : 'N/A'
+      clarification: {
+        mode: clarificationOptions.mode,
+        clientType: clarificationOptions.clientType,
+        confidence: result.clarificationResult?.confidence,
+        constraintsApplied: result.clarificationResult?.enhancedPromptConstraints?.length || 0
       },
-      issues: result.issues,
-      llm_metadata: result.llm_response ? {
-        provider: result.llm_response.provider,
-        latencyMs: result.llm_response.latencyMs,
-        fromCache: result.llm_response.fromCache
-      } : undefined
+      processingTime: result.processingTime
     });
     return;
   } catch (error) {
