@@ -110,7 +110,7 @@ Respond in this JSON format:
  * Agent Generation Prompt
  */
 function buildGenerateAgentPrompt(userQuery: string, context?: any): string {
-  const requirements = context?.requirements || [];
+  const requirements = Array.isArray(context?.requirements) ? context.requirements : (context?.requirements ? [context.requirements] : []);
   const name = context?.name || 'GeneratedAgent';
   
   return `You are an expert agent developer. Create a TypeScript agent based on these requirements.

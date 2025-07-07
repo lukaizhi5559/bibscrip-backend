@@ -18,6 +18,9 @@ import streamingRouter from './streaming';
 import analyticsRouter from './analytics';
 import automationAnalyticsRouter from './automationAnalytics';
 // Removed: uiIndexedAgentRouter, enhancedVisualAgentRouter (moved to Electron client)
+// Phase 1: Thinkdrop AI Drops Orchestration System
+import { createOrchestrationWorkflowRoutes } from './orchestrationWorkflows';
+import pool from '../config/postgres';
 // Import other route modules directly instead of using dynamic imports
 
 const router = Router();
@@ -103,13 +106,17 @@ router.get('/', (req, res) => {
         description: 'Agent orchestration and management for ThinkDrop AI',
         endpoints: [
           'POST /api/agents/orchestrate - Orchestrate user request and manage agents',
-          'GET /api/agents - Get all agents',
-          'GET /api/agents/{name} - Get specific agent by name',
-          'DELETE /api/agents/{name} - Delete agent by name',
-          'POST /api/agents/intent/parse - Parse user intent without executing',
           'POST /api/agents/generate - Generate new agent code',
-          'GET /api/agents/communications - Get agent communications log',
-          'POST /api/agents/communications - Log agent communication'
+          'POST /api/agents/generate/batch - Generate multiple agents in parallel',
+          'POST /api/agents/generate-with-reuse - Generate agent with reuse optimization',
+          'GET /api/agents - List all agents',
+          'GET /api/agents/{id} - Get agent by ID',
+          'PUT /api/agents/{id} - Update agent',
+          'DELETE /api/agents/{id} - Delete agent',
+          'POST /api/agents/{id}/execute - Execute specific agent',
+          'GET /api/agents/search - Search agents by criteria',
+          'POST /api/agents/intent/parse - Parse user intent for agent orchestration',
+          'GET /api/agents/health - Get agents service health status'
         ]
       },
       analytics: {
@@ -267,6 +274,22 @@ router.get('/', (req, res) => {
           'GET /api/enhanced-visual-agent/health - Get enhanced agent health status',
           'POST /api/enhanced-visual-agent/verify-app - Verify if specific app is focused'
         ]
+      },
+      orchestration: {
+        path: '/api/orchestration',
+        description: 'Thinkdrop AI Drops Orchestration System - Multi-agent workflow management',
+        endpoints: [
+          'GET /api/orchestration/health - Health check endpoint',
+          'POST /api/orchestration/workflows - Create new orchestration workflow',
+          'GET /api/orchestration/workflows - List user workflows with pagination',
+          'GET /api/orchestration/workflows/{id} - Get specific workflow by ID',
+          'PUT /api/orchestration/workflows/{id} - Update existing workflow',
+          'DELETE /api/orchestration/workflows/{id} - Delete workflow',
+          'GET /api/orchestration/workflows/{id}/logs - Get workflow execution logs',
+          'POST /api/orchestration/workflows/{id}/logs - Add execution log entry',
+          'POST /api/orchestration/workflows/{id}/execute - Execute workflow',
+          'POST /api/orchestration/templates - Create workflow template from existing workflow'
+        ]
       }
     },
     documentation: {
@@ -294,6 +317,8 @@ router.use('/streaming', streamingRouter);
 // Removed: /visual-agent and /integration endpoints (moved to Electron client)
 router.use('/analytics', analyticsRouter);
 router.use('/automation-analytics', automationAnalyticsRouter);
+// Phase 1: Thinkdrop AI Drops Orchestration System
+router.use('/orchestration', createOrchestrationWorkflowRoutes(pool));
 
 // All routers are explicitly imported and mounted above
 // No need for dynamic mounting as it can cause route conflicts
