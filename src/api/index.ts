@@ -20,6 +20,8 @@ import automationAnalyticsRouter from './automationAnalytics';
 // Removed: uiIndexedAgentRouter, enhancedVisualAgentRouter (moved to Electron client)
 // Phase 1: Thinkdrop AI Drops Orchestration System
 import { createOrchestrationWorkflowRoutes } from './orchestrationWorkflows';
+// Phase 2: DropRegistry - Agent Capability Catalog
+import dropRegistryRouter from './dropRegistry';
 import pool from '../config/postgres';
 // Import other route modules directly instead of using dynamic imports
 
@@ -290,6 +292,17 @@ router.get('/', (req, res) => {
           'POST /api/orchestration/workflows/{id}/execute - Execute workflow',
           'POST /api/orchestration/templates - Create workflow template from existing workflow'
         ]
+      },
+      drops: {
+        path: '/api/drops',
+        description: 'DropRegistry - Agent capability catalog and discovery system',
+        endpoints: [
+          'GET /api/drops/health - Health check for DropRegistry service',
+          'POST /api/drops/search - Search for Drops (Agents) based on criteria',
+          'POST /api/drops/find-best - Find the best Drop for a specific task',
+          'POST /api/drops/register - Register a new Drop with capability analysis',
+          'GET /api/drops/stats - Get Drop registry statistics'
+        ]
       }
     },
     documentation: {
@@ -319,6 +332,8 @@ router.use('/analytics', analyticsRouter);
 router.use('/automation-analytics', automationAnalyticsRouter);
 // Phase 1: Thinkdrop AI Drops Orchestration System
 router.use('/orchestration', createOrchestrationWorkflowRoutes(pool));
+// Phase 2: DropRegistry - Agent Capability Catalog
+router.use('/drops', dropRegistryRouter);
 
 // All routers are explicitly imported and mounted above
 // No need for dynamic mounting as it can cause route conflicts
