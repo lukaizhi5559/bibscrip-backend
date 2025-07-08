@@ -44,8 +44,8 @@ export interface LLMResponse {
 export class LLMRouter {
   // Updated provider order according to the fallback chain requirements
   // Note: Cache handling is done separately in the processPrompt method
-  // Order: 1. Premium APIs (OpenAI, Claude, Gemini) 2. Cache 3. Cost-effective APIs (Mistral, Lambda)
-  private providers: string[] = ['openai', 'claude', 'gemini', 'mistral', 'lambda'];
+  // Order: 1. Premium APIs (OpenAI, Claude, Gemini, Grok) 2. Cache 3. Cost-effective APIs (Mistral, Lambda)
+  // private providers: string[] = ['openai', 'claude', 'gemini', 'grok', 'mistral', 'lambda'];
   private useSimulatedResponses: boolean;
   
   constructor() {
@@ -225,7 +225,7 @@ export class LLMRouter {
     }
     
     // Step 3: Try all LLM providers in fallback order
-    const allProviders = ['mistral', 'gemini', 'openai', 'claude', 'deepseek', 'lambda'];
+    const allProviders = ['claude', 'openai', 'grok', 'gemini', 'mistral', 'deepseek', 'lambda'];
     console.log('🚀 Starting LLM provider fallback chain:', allProviders);
     
     for (const provider of allProviders) {
@@ -325,21 +325,27 @@ export class LLMRouter {
   private async callProvider(provider: string, prompt: string): Promise<LLMResponse> {
     const startTime = performance.now();
     
-    switch (provider) {
-      case 'deepseek':
-        return await this.callDeepSeek(prompt, startTime);
-      case 'openai':
-        return await this.callOpenAI(prompt, startTime);
-      case 'claude':
-        return await this.callClaude(prompt, startTime);
-      case 'gemini':
-        return await this.callGemini(prompt, startTime);
-      case 'lambda':
-        return await this.callLambdaAI(prompt, startTime);
-      case 'mistral':
-        return await this.callMistral(prompt, startTime);
-      default:
-        throw new Error(`Unknown provider: ${provider}`);
+    try {
+      switch (provider) {
+        case 'claude':
+          return await this.callClaude(prompt, startTime);
+        case 'openai':
+          return await this.callOpenAI(prompt, startTime);
+        case 'grok':
+          return await this.callGrok(prompt, startTime);
+        case 'mistral':
+          return await this.callMistral(prompt, startTime);
+        case 'gemini':
+          return await this.callGemini(prompt, startTime);
+        case 'deepseek':
+          return await this.callDeepSeek(prompt, startTime);
+        case 'lambda':
+          return await this.callLambdaAI(prompt, startTime);
+        default:
+          throw new Error(`Unknown provider: ${provider}`);
+      }
+    } catch (error) {
+      throw error;
     }
   }
   
@@ -718,6 +724,72 @@ export class LLMRouter {
   /**
    * Call Lambda.ai API with various model options
    */
+  /**
+   * Call Grok API (xAI)
+   */
+  private async callGrok(prompt: string, startTime: number): Promise<LLMResponse> {
+    const apiKey = process.env.GROK_API_KEY;
+    if (!apiKey) {
+      throw new Error('Grok API key not configured');
+    }
+    
+    // If using simulated responses, return the simulation
+    if (this.useSimulatedResponses) {
+      console.log('Using simulated Grok response');
+      const latencyMs = performance.now() - startTime;
+      return {
+        text: 'This is a simulated response from Grok (xAI).',
+        provider: 'grok-simulated',
+        tokenUsage: {
+          prompt: prompt.length / 4,
+          completion: 16,
+          total: prompt.length / 4 + 16
+        },
+        latencyMs
+      };
+    }
+    
+    try {
+      // Real Grok API call
+      console.log('Making real API call to Grok...');
+      
+      // Grok uses OpenAI-compatible API
+      const response = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
+        model: 'grok-1',
+        messages: [
+          { role: 'system', content: 'You are a helpful assistant specializing in Bible study and interpretation.' },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.7,
+        max_tokens: 4096  // Increased for complex orchestration responses
+      }, {
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      const latencyMs = performance.now() - startTime;
+      
+      // Extract the response content
+      const responseContent = response.data.choices[0]?.message?.content || 'No response from Grok';
+      
+      return {
+        text: responseContent,
+        provider: 'grok',
+        tokenUsage: {
+          prompt: response.data.usage?.prompt_tokens || 0,
+          completion: response.data.usage?.completion_tokens || 0,
+          total: response.data.usage?.total_tokens || 0
+        },
+        latencyMs
+      };
+    } catch (error) {
+      console.error('Grok API error:', error);
+      throw new Error('Grok limit hit or error');
+    }
+  }
+
   private async callLambdaAI(prompt: string, startTime: number): Promise<LLMResponse> {
     const apiKey = process.env.LAMBDA_AI;
     if (!apiKey) {
