@@ -4,11 +4,13 @@ import dotenv from 'dotenv';
 import morgan from 'morgan';
 import swaggerJSDoc from 'swagger-jsdoc';
 import swaggerUi from 'swagger-ui-express';
+import http from 'http';
 import router from './api';
 import automationAnalyticsRouter from './api/automationAnalytics';
 import { logger } from './utils/logger';
 import { vectorDbService } from './services/vectorDbService';
 import { fetchBibleIds } from './utils/bible';
+import { setupStreamingWebSocket } from './websocket';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -153,7 +155,35 @@ async function initializeServices() {
 // Start the server after initializing services
 const PORT = process.env.PORT || 4000;
 initializeServices().then(() => {
-  app.listen(PORT, () => {
+  // Create HTTP server
+  const server = http.createServer(app);
+  
+  // Setup WebSocket streaming server (non-disruptive to REST APIs)
+  const wsServer = setupStreamingWebSocket(server);
+  
+  // Start server
+  server.listen(PORT, () => {
     logger.info(`Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
+    logger.info(`WebSocket streaming server available at ws://localhost:${PORT}/ws/stream`);
+    logger.info(`REST APIs remain unchanged and fully functional`);
+  });
+  
+  // Graceful shutdown
+  process.on('SIGTERM', () => {
+    logger.info('Received SIGTERM, shutting down gracefully...');
+    wsServer.shutdown();
+    server.close(() => {
+      logger.info('Server closed');
+      process.exit(0);
+    });
+  });
+  
+  process.on('SIGINT', () => {
+    logger.info('Received SIGINT, shutting down gracefully...');
+    wsServer.shutdown();
+    server.close(() => {
+      logger.info('Server closed');
+      process.exit(0);
+    });
   });
 });
