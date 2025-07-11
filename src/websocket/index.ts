@@ -1,5 +1,5 @@
-                                               /**
- * WebSocket server for real-time streaming
+/**
+* WebSocket server for real-time streaming
  * Integrates with existing REST API architecture without disruption
  */
 
@@ -108,11 +108,30 @@ export class StreamingWebSocketServer {
       // Setup message handling
       ws.on('message', async (data: WebSocket.Data) => {
         try {
-          const message: StreamingMessage = JSON.parse(data.toString());
+          const rawMessage = data.toString();
+          logger.info(`📨 WebSocket Message Received [${connectionId}]:`, {
+            rawData: rawMessage,
+            size: rawMessage.length,
+            timestamp: new Date().toISOString()
+          });
+          
+          const message: StreamingMessage = JSON.parse(rawMessage);
+          logger.info(`🔍 Parsed WebSocket Message [${connectionId}]:`, {
+            type: message.type,
+            id: message.id,
+            hasPayload: !!message.payload,
+            payloadKeys: message.payload ? Object.keys(message.payload) : [],
+            metadata: message.metadata
+          });
+          
           await session.handler.handleMessage(message);
           session.lastHeartbeat = Date.now();
         } catch (error) {
-          logger.error('Error processing WebSocket message:', error as any);
+          logger.error('Error processing WebSocket message:', {
+            error: error as any,
+            rawData: data.toString(),
+            connectionId
+          });
           this.sendError(ws, 'Invalid message format');
         }
       });

@@ -91,13 +91,26 @@ export class StreamingHandler {
    */
   private async handleLLMRequest(
     requestId: string,
-    request: LLMStreamRequest,
+    request: any, // Accept any payload structure from WebSocket
     metadata?: StreamingMetadata
   ): Promise<void> {
     const abortController = new AbortController();
     this.activeRequests.set(requestId, abortController);
 
     try {
+      // Map WebSocket payload to LLMStreamRequest format
+      const llmRequest: LLMStreamRequest = {
+        prompt: request.message || request.prompt || '', // Support both 'message' and 'prompt' fields
+        provider: request.provider,
+        options: request.options || {}
+      };
+
+      // Validate that we have a prompt
+      if (!llmRequest.prompt) {
+        this.sendError(requestId, 'Missing message or prompt in request');
+        return;
+      }
+
       // Create streaming metadata
       const streamingMetadata: StreamingMetadata = {
         source: 'backend_llm',
@@ -109,7 +122,7 @@ export class StreamingHandler {
 
       // Process with streaming
       const result = await llmStreamingRouter.processPromptWithStreaming(
-        request,
+        llmRequest,
         (chunk: StreamingMessage) => {
           // Forward streaming chunks to client
           if (this.ws.readyState === WebSocket.OPEN) {
@@ -123,7 +136,7 @@ export class StreamingHandler {
       this.conversationContext.conversationHistory.push({
         id: requestId,
         role: 'user',
-        content: request.prompt,
+        content: llmRequest.prompt,
         timestamp: Date.now(),
         source: 'text'
       });

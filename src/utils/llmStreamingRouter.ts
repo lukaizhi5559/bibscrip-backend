@@ -13,6 +13,7 @@ import {
   StreamingError,
   StreamingMetadata
 } from '../types/streaming';
+import { buildPrompt } from '../services/promptBuilder';
 import { logger } from './logger';
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
@@ -32,7 +33,14 @@ export class LLMStreamingRouter extends LLMRouter {
     onChunk: (chunk: StreamingMessage) => void,
     metadata: StreamingMetadata
   ): Promise<LLMStreamResult> {
-    const { prompt, provider: preferredProvider, options = {} } = request;
+    const { prompt: userPrompt, provider: preferredProvider, options = {} } = request;
+    
+    // Build Thinkdrop AI branded prompt with proper context
+    const enhancedPrompt = buildPrompt('ask', {
+      userQuery: userPrompt,
+      context: {}
+    });
+    
     const streamId = `stream_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const startTime = performance.now();
     
@@ -46,7 +54,7 @@ export class LLMStreamingRouter extends LLMRouter {
         id: streamId,
         type: StreamingMessageType.LLM_STREAM_START,
         payload: {
-          prompt: prompt.substring(0, 100) + '...', // Truncated for logging
+          prompt: userPrompt.substring(0, 100) + '...', // Truncated for logging
           preferredProvider,
           options
         },
@@ -83,7 +91,7 @@ export class LLMStreamingRouter extends LLMRouter {
         try {
           streamResult = await this.callProviderWithStreaming(
             preferredProvider,
-            prompt,
+            enhancedPrompt,
             handleChunk,
             abortController.signal
           );
@@ -97,7 +105,18 @@ export class LLMStreamingRouter extends LLMRouter {
 
       // If no result yet, try fallback chain
       if (!streamResult) {
-        const allProviders = ['claude', 'openai', 'grok', 'gemini', 'mistral', 'deepseek', 'lambda'];
+
+        /* 
+        *   Claude has been removed for now They Stated:
+        *   I can see that the WebSocket test revealed an important issue: 
+        *   Claude is rejecting the Thinkdrop Al prompt due to the religious/political 
+        *   worldview language. The LLM is refusing to adopt the "Biblical worldview and 
+        *   traditional conservative values" persona, which means our Thinkdrop Al branding 
+        *   isn't working as intended.
+        *   Let me update the plan and then fix this issue by modifying the prompt to be more 
+        *   acceptable to LLM providers while still maintaining Thinkdrop Al branding.
+        */
+        const allProviders = ['openai', 'grok', 'gemini', 'mistral', 'deepseek', 'lambda'];
         
         for (const provider of allProviders) {
           if (provider === preferredProvider) continue; // Skip if already tried
@@ -107,7 +126,7 @@ export class LLMStreamingRouter extends LLMRouter {
             logger.info(`⚡ Attempting streaming with provider: ${provider}`);
             streamResult = await this.callProviderWithStreaming(
               provider,
-              prompt,
+              enhancedPrompt,
               handleChunk,
               abortController.signal
             );
