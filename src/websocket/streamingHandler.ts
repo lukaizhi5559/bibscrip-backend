@@ -5,6 +5,7 @@
 
 import WebSocket from 'ws';
 import { llmStreamingRouter } from '../utils/llmStreamingRouter';
+import { websocketIntentService, WebSocketIntentResult } from '../services/websocketIntentService';
 import {
   StreamingMessage,
   StreamingMessageType,
@@ -91,26 +92,13 @@ export class StreamingHandler {
    */
   private async handleLLMRequest(
     requestId: string,
-    request: any, // Accept any payload structure from WebSocket
+    request: LLMStreamRequest,
     metadata?: StreamingMetadata
   ): Promise<void> {
     const abortController = new AbortController();
     this.activeRequests.set(requestId, abortController);
 
     try {
-      // Map WebSocket payload to LLMStreamRequest format
-      const llmRequest: LLMStreamRequest = {
-        prompt: request.message || request.prompt || '', // Support both 'message' and 'prompt' fields
-        provider: request.provider,
-        options: request.options || {}
-      };
-
-      // Validate that we have a prompt
-      if (!llmRequest.prompt) {
-        this.sendError(requestId, 'Missing message or prompt in request');
-        return;
-      }
-
       // Create streaming metadata
       const streamingMetadata: StreamingMetadata = {
         source: 'backend_llm',
@@ -120,9 +108,15 @@ export class StreamingHandler {
         ...metadata
       };
 
+      // Start intent evaluation in parallel (non-blocking)
+      logger.info(`🎯 Starting parallel intent evaluation for request ${requestId}`);
+      const intentEvaluationPromise = this.evaluateIntentInParallel(requestId, request.prompt);
+      
+      // Continue immediately with LLM streaming for fast response
+
       // Process with streaming
       const result = await llmStreamingRouter.processPromptWithStreaming(
-        llmRequest,
+        request,
         (chunk: StreamingMessage) => {
           // Forward streaming chunks to client
           if (this.ws.readyState === WebSocket.OPEN) {
@@ -136,7 +130,7 @@ export class StreamingHandler {
       this.conversationContext.conversationHistory.push({
         id: requestId,
         role: 'user',
-        content: llmRequest.prompt,
+        content: request.prompt,
         timestamp: Date.now(),
         source: 'text'
       });
@@ -458,6 +452,54 @@ export class StreamingHandler {
         isLast: true
       }
     ];
+  }
+
+  /**
+   * Evaluate intent in parallel without blocking LLM streaming
+   */
+  private async evaluateIntentInParallel(requestId: string, prompt: string): Promise<void> {
+    try {
+      logger.info(`🔍 Starting parallel intent evaluation for: "${prompt.substring(0, 100)}..."`);
+      
+      const intentResult = await websocketIntentService.evaluateIntent(prompt);
+      
+      logger.info(`✅ Intent evaluation completed:`, {
+        primaryIntent: intentResult.primaryIntent,
+        totalIntents: intentResult.intents.length
+      });
+      
+      // Send intent classification results to client
+      this.send({
+        id: `${requestId}_intent`,
+        type: StreamingMessageType.INTENT_CLASSIFICATION,
+        payload: {
+          intents: intentResult.intents,
+          primaryIntent: intentResult.primaryIntent,
+          entities: intentResult.entities,
+          requiresMemoryAccess: intentResult.requiresMemoryAccess,
+          requiresExternalData: intentResult.requiresExternalData,
+          suggestedResponse: intentResult.suggestedResponse
+        },
+        timestamp: Date.now(),
+        metadata: {
+          source: 'intent_evaluation',
+          confidence: intentResult.intents[0]?.confidence || 0
+        }
+      });
+      
+      logger.info(`📤 Intent classification sent for request ${requestId}:`, {
+        primaryIntent: intentResult.primaryIntent,
+        totalIntents: intentResult.intents.length,
+        intents: intentResult.intents.map(i => `${i.intent}(${i.confidence})`)
+      });
+    } catch (intentError) {
+      logger.error(`❌ Parallel intent evaluation failed for request ${requestId}:`, {
+        error: intentError,
+        message: (intentError as any)?.message,
+        stack: (intentError as any)?.stack
+      });
+      // Intent evaluation failure doesn't affect LLM streaming
+    }
   }
 
   /**

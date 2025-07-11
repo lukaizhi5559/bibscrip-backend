@@ -13,12 +13,13 @@ export interface StreamingMessage {
 }
 
 export interface StreamingMetadata {
-  source: 'local_llm' | 'backend_llm' | 'voice_service' | 'orchestration';
+  source: 'local_llm' | 'backend_llm' | 'voice_service' | 'orchestration' | 'intent_evaluation';
   provider?: string; // Which LLM provider was used
   priority?: number; // 1-10, for message prioritization
   sessionId?: string;
   userId?: string;
   clientId?: string;
+  confidence?: number; // For intent classification confidence
 }
 
 export enum StreamingMessageType {
@@ -36,6 +37,9 @@ export enum StreamingMessageType {
   LLM_STREAM_CHUNK = 'llm_stream_chunk',
   LLM_STREAM_END = 'llm_stream_end',
   LLM_ERROR = 'llm_error',
+  
+  // Intent classification
+  INTENT_CLASSIFICATION = 'intent_classification',
   
   // Conversation flow
   CONVERSATION_START = 'conversation_start',

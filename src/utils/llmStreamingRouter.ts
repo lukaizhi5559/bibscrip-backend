@@ -116,7 +116,7 @@ export class LLMStreamingRouter extends LLMRouter {
         *   Let me update the plan and then fix this issue by modifying the prompt to be more 
         *   acceptable to LLM providers while still maintaining Thinkdrop Al branding.
         */
-        const allProviders = ['openai', 'grok', 'gemini', 'mistral', 'deepseek', 'lambda'];
+        const allProviders = ['claude', 'openai', 'grok', 'gemini', 'mistral', 'deepseek', 'lambda'];
         
         for (const provider of allProviders) {
           if (provider === preferredProvider) continue; // Skip if already tried
