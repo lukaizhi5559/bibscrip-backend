@@ -6,6 +6,8 @@
 import WebSocket from 'ws';
 import { llmStreamingRouter } from '../utils/llmStreamingRouter';
 import { websocketIntentService, WebSocketIntentResult } from '../services/websocketIntentService';
+import { aiMemoryService } from '../services/aiMemoryService';
+import { v4 as uuidv4 } from 'uuid';
 import {
   StreamingMessage,
   StreamingMessageType,
@@ -16,6 +18,7 @@ import {
   StreamingMetadata,
   StreamingError
 } from '../types/streaming';
+import { WebSocketMemoryPayload } from '../types/aiMemory';
 import { logger } from '../utils/logger';
 
 export class StreamingHandler {
@@ -487,6 +490,12 @@ export class StreamingHandler {
         }
       });
       
+      // Store intent classification in AI Memory (async, non-blocking)
+      this.storeIntentMemory(requestId, prompt, intentResult).catch((memoryError: any) => {
+        logger.error(`⚠️ Failed to store intent memory for ${requestId}:`, memoryError);
+        // Memory storage failure doesn't affect the main flow
+      });
+      
       logger.info(`📤 Intent classification sent for request ${requestId}:`, {
         primaryIntent: intentResult.primaryIntent,
         totalIntents: intentResult.intents.length,
@@ -503,10 +512,87 @@ export class StreamingHandler {
   }
 
   /**
+   * Store intent classification results in AI Memory
+   */
+  private async storeIntentMemory(
+    requestId: string,
+    prompt: string,
+    intentResult: WebSocketIntentResult
+  ): Promise<void> {
+    try {
+      // Extract user ID from connection metadata or generate a valid UUID for anonymous users
+      let userId = this.conversationContext.userId;
+      
+      // Check if userId is a valid UUID, if not generate one
+      // This handles cases where userId is undefined, 'anonymous', 'default-user', etc.
+      if (!userId || !this.isValidUUID(userId)) {
+        // Generate a consistent UUID based on sessionId for the same anonymous user
+        // This ensures the same anonymous user gets the same UUID in a session
+        userId = this.sessionId ? 
+          uuidv4({ random: Array.from(this.sessionId).map(c => c.charCodeAt(0)) }) : 
+          uuidv4(); // Fallback to completely random UUID
+        
+        logger.info(`🔄 Generated UUID for non-UUID userId: ${userId}`);
+      }
+      
+      // Prepare memory payload
+      const memoryPayload: WebSocketMemoryPayload = {
+        source_text: prompt,
+        primary_intent: intentResult.primaryIntent,
+        intents: intentResult.intents.map(intent => ({
+          intent: intent.intent,
+          confidence: intent.confidence,
+          reasoning: intent.reasoning
+        })),
+        entities: intentResult.entities || [],
+        requires_memory_access: intentResult.requiresMemoryAccess || false,
+        requires_external_data: intentResult.requiresExternalData || false,
+        suggested_response: intentResult.suggestedResponse,
+        session_metadata: {
+          request_id: requestId,
+          session_id: this.conversationContext.sessionId,
+          client_id: this.conversationContext.sessionId, // Using sessionId as clientId fallback
+          timestamp: new Date().toISOString(),
+          websocket_connection: true
+        }
+      };
+      
+      // Store in AI Memory
+      const storedMemory = await aiMemoryService.storeWebSocketMemory(userId, memoryPayload);
+      
+      logger.info(`🧠 AI memory stored successfully:`, {
+        memoryId: storedMemory.memory.id,
+        userId,
+        requestId,
+        primaryIntent: intentResult.primaryIntent,
+        intentsCount: intentResult.intents.length,
+        entitiesCount: intentResult.entities?.length || 0
+      });
+      
+    } catch (error) {
+      logger.error(`❌ Failed to store AI memory:`, {
+        requestId,
+        error,
+        message: (error as any)?.message
+      });
+      // Don't throw - memory storage failure shouldn't break the main flow
+    }
+  }
+
+  /**
    * Get conversation context
    */
   getConversationContext(): ConversationContext {
     return this.conversationContext;
+  }
+
+  /**
+   * Validate if a string is a valid UUID
+   */
+  private isValidUUID(uuid: string): boolean {
+    // Regular expression to check if string is a valid UUID
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    return uuidRegex.test(uuid);
   }
 
   /**

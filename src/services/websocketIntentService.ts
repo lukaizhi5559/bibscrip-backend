@@ -6,6 +6,7 @@
 import { buildPrompt } from './promptBuilder';
 import { llmStreamingRouter } from '../utils/llmStreamingRouter';
 import { logger } from '../utils/logger';
+import { v4 as uuidv4 } from 'uuid';
 
 export type WebSocketIntentType = 
   | 'memory_store'
@@ -95,7 +96,7 @@ export class WebSocketIntentService {
 You are Thinkdrop AI's intent classifier for WebSocket messages. Analyze the user's message and identify ALL applicable intents - messages can have multiple intents simultaneously.
 
 **Intent Categories:**
-- **memory_store**: User wants to save/store information, notes, or data
+- **memory_store**: User wants to save/store information OR is sharing personal information, facts, experiences, preferences, or data about themselves or their activities
 - **memory_retrieve**: User wants to recall/find previously stored information
 - **memory_update**: User wants to modify/edit existing stored information
 - **memory_delete**: User wants to remove/delete stored information
@@ -106,7 +107,14 @@ You are Thinkdrop AI's intent classifier for WebSocket messages. Analyze the use
 
 User Message: "${message}"${historyContext}
 
-**Example:** "Hello, I have appt. at 3pm next week that I need you to email to my wife" would have intents: ["greeting", "memory_store", "command"]
+**Examples:**
+- "Hello, I have appt. at 3pm next week that I need you to email to my wife" → intents: ["greeting", "memory_store", "command"]
+- "I ate salad and green beans for breakfast" → intents: ["memory_store"] (sharing personal dietary information)
+- "My favorite color is blue" → intents: ["memory_store"] (sharing personal preference)
+- "Open Spotify" → intents: ["command"] (pure command, no personal info to store)
+- "Play my workout playlist on Spotify" → intents: ["command", "memory_store"] (command + personal preference about playlists)
+- "Send an email to john@example.com" → intents: ["command"] (pure command)
+- "Email my mom about the dinner plans" → intents: ["command", "memory_store"] (command + personal relationship info)
 
 Analyze the message and respond in this exact JSON format:
 {
@@ -131,7 +139,8 @@ Analyze the message and respond in this exact JSON format:
   "entities": ["appointment", "3pm", "next week", "email", "wife"],
   "requiresMemoryAccess": true,
   "requiresExternalData": false,
-  "suggestedResponse": "Acknowledge greeting, confirm appointment storage, and execute email command"
+  "suggestedResponse": "Acknowledge greeting, confirm appointment storage, and execute email command",
+  "sourceText": "Hello, I have appt. at 3pm next week that I need you to email to my wife"
 }
 
 Identify ALL applicable intents with individual confidence scores. The primaryIntent should be the most important/actionable intent.
@@ -210,12 +219,29 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
       });
     }
 
-    // Check for memory store patterns
+    // Check for memory store patterns - both explicit and implicit
     if (/(remember|save|store|note|record|keep track)/.test(lowerMessage)) {
       detectedIntents.push({
         intent: 'memory_store',
         confidence: 0.8,
-        reasoning: 'Contains memory storage keywords'
+        reasoning: 'Contains explicit memory storage keywords'
+      });
+    }
+    
+    // Check for implicit personal information sharing patterns
+    const personalInfoPatterns = [
+      /\b(i|my|me|i'm|i am|i've|i have)\s+(ate|had|like|love|prefer|enjoy|did|went|saw|bought|made|feel|felt|think|believe|want|need)/i,
+      /\b(my|our)\s+(favorite|name|age|birthday|job|work|family|friend|pet|hobby|interest)/i,
+      /\b(i|we)\s+(live|work|study|go to|come from|was born)/i,
+      /\b(yesterday|today|this morning|last night|last week)\s+(i|we)\s+/i
+    ];
+    
+    if (personalInfoPatterns.some(pattern => pattern.test(lowerMessage)) && 
+        !detectedIntents.some(i => i.intent === 'memory_store')) {
+      detectedIntents.push({
+        intent: 'memory_store',
+        confidence: 0.75,
+        reasoning: 'User is sharing personal information or experiences'
       });
     }
 
