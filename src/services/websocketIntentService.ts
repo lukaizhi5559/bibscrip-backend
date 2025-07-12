@@ -28,6 +28,7 @@ export interface WebSocketIntentResult {
   requiresMemoryAccess?: boolean;
   requiresExternalData?: boolean;
   suggestedResponse?: string;
+  sourceText?: string;
   primaryIntent: WebSocketIntentType;
 }
 
@@ -195,7 +196,8 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
         entities: parsed.entities || [],
         requiresMemoryAccess: parsed.requiresMemoryAccess || false,
         requiresExternalData: parsed.requiresExternalData || false,
-        suggestedResponse: parsed.suggestedResponse || ''
+        suggestedResponse: parsed.suggestedResponse || '',
+        sourceText: parsed.sourceText || ''
       };
     } catch (error) {
       logger.warn('Failed to parse intent response, using fallback:', error as any);
@@ -302,7 +304,8 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
       requiresExternalData,
       suggestedResponse: detectedIntents.length > 1 
         ? 'Handle multiple intents: ' + detectedIntents.map(i => i.intent).join(', ')
-        : 'Handle ' + primaryIntent
+        : 'Handle ' + primaryIntent,
+      sourceText: message
     };
   }
 

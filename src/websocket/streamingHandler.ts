@@ -481,7 +481,8 @@ export class StreamingHandler {
           entities: intentResult.entities,
           requiresMemoryAccess: intentResult.requiresMemoryAccess,
           requiresExternalData: intentResult.requiresExternalData,
-          suggestedResponse: intentResult.suggestedResponse
+          suggestedResponse: intentResult.suggestedResponse,
+          sourceText: intentResult.sourceText
         },
         timestamp: Date.now(),
         metadata: {
