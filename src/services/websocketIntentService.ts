@@ -7,6 +7,7 @@ import { buildPrompt } from './promptBuilder';
 import { llmStreamingRouter } from '../utils/llmStreamingRouter';
 import { logger } from '../utils/logger';
 import { v4 as uuidv4 } from 'uuid';
+import { smartPromptBuilder } from './smartPromptBuilder';
 
 export type WebSocketIntentType = 
   | 'memory_store'
@@ -15,8 +16,7 @@ export type WebSocketIntentType =
   | 'memory_delete'
   | 'greeting'
   | 'question'
-  | 'command'
-  | 'external_data_required';
+  | 'command';
 
 export interface WebSocketIntentResult {
   intents: Array<{
@@ -30,6 +30,7 @@ export interface WebSocketIntentResult {
   suggestedResponse?: string;
   sourceText?: string;
   primaryIntent: WebSocketIntentType;
+  captureScreen?: boolean;
 }
 
 export interface WebSocketIntentOptions {
@@ -51,7 +52,7 @@ export class WebSocketIntentService {
     options: WebSocketIntentOptions = {}
   ): Promise<WebSocketIntentResult> {
     try {
-      const prompt = this.buildWebSocketIntentPrompt(message, options.context);
+      const prompt = await this.buildWebSocketIntentPrompt(message, options.context);
       
       // Use the streaming router for intent classification
       const result = await llmStreamingRouter.processPromptWithStreaming(
@@ -86,32 +87,81 @@ export class WebSocketIntentService {
 
   /**
    * Build prompt specifically for WebSocket intent classification
+   * Enhanced with SmartPromptBuilder contextual intelligence
    */
-  private buildWebSocketIntentPrompt(message: string, context?: Record<string, any>): string {
+  private async buildWebSocketIntentPrompt(message: string, context?: Record<string, any>): Promise<string> {
     const conversationHistory = context?.conversationHistory || [];
     const historyContext = conversationHistory.length > 0 
       ? `\n\nConversation History:\n${conversationHistory.map((h: any) => `${h.role}: ${h.content}`).join('\n')}`
       : '';
 
-    return `
-You are Thinkdrop AI's intent classifier for WebSocket messages. Analyze the user's message and identify ALL applicable intents - messages can have multiple intents simultaneously.
+    // Get SmartPromptBuilder contextual enhancements
+    let contextualEnhancements;
+    try {
+      const userId = context?.userPreferences?.userId;
+      if (userId) {
+        contextualEnhancements = await smartPromptBuilder.getContextualEnhancements(message, userId, context);
+        logger.info('SmartPromptBuilder enhancements loaded for WebSocket intent classification', {
+          userId,
+          memoryMatches: contextualEnhancements.memoryMatches.length,
+          ragContextSize: contextualEnhancements.ragContextArray.length,
+          complexity: contextualEnhancements.complexityAnalysis.level
+        });
+      }
+    } catch (error) {
+      logger.warn('Failed to load SmartPromptBuilder enhancements, using basic WebSocket prompt', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+
+    // Build enhanced prompt with contextual intelligence
+    let enhancedPrompt = `
+You are Thinkdrop AI's intent classifier for WebSocket messages. Analyze the user's message and identify ALL applicable intents - messages can have multiple intents simultaneously.`;
+
+    // Add contextual memory summary if available
+    if (contextualEnhancements?.contextualMemory) {
+      enhancedPrompt += `
+
+**User Context & Memory:**
+${contextualEnhancements.contextualMemory}`;
+    }
+
+    // Add message complexity analysis if available
+    if (contextualEnhancements?.complexityAnalysis) {
+      enhancedPrompt += `
+
+**Message Complexity:** ${contextualEnhancements.complexityAnalysis.level} (${contextualEnhancements.complexityAnalysis.score.toFixed(2)})`;
+    }
+
+    // Add relevant RAG context if available
+    if (contextualEnhancements?.ragContextArray && contextualEnhancements.ragContextArray.length > 0) {
+      const topRagContext = contextualEnhancements.ragContextArray.slice(0, 2);
+      enhancedPrompt += `
+
+**Relevant Context:**
+${topRagContext.map(ctx => `- ${ctx.text || ctx.content || ctx}`).join('\n')}`;
+    }
+
+    enhancedPrompt += `
 
 **Intent Categories:**
-- **memory_store**: User wants to save/store information OR is sharing personal information, facts, experiences, preferences, or data about themselves or their activities
+- **memory_store**: User wants to save/store information OR is sharing personal information, facts, experiences, preferences, plans, tasks, intentions, activities, or any data about themselves, their life, or their future actions (e.g., "I need to buy snacks", "I'm going to the gym", "My favorite color is blue")
 - **memory_retrieve**: User wants to recall/find previously stored information
 - **memory_update**: User wants to modify/edit existing stored information
 - **memory_delete**: User wants to remove/delete stored information
 - **greeting**: User is greeting, saying hello, or starting conversation
 - **question**: User is asking a question that requires an informative answer
 - **command**: User is giving a command or instruction to perform an action
-- **external_data_required**: User's request requires fetching external data/APIs
 
 User Message: "${message}"${historyContext}
 
 **Examples:**
 - "Hello, I have appt. at 3pm next week that I need you to email to my wife" → intents: ["greeting", "memory_store", "command"]
+- "I need to buy some snacks today" → intents: ["memory_store"] (personal plan/task to remember)
+- "I'm going to the gym after work" → intents: ["memory_store"] (personal activity plan)
 - "I ate salad and green beans for breakfast" → intents: ["memory_store"] (sharing personal dietary information)
 - "My favorite color is blue" → intents: ["memory_store"] (sharing personal preference)
+- "I have a meeting tomorrow at 2pm" → intents: ["memory_store"] (personal schedule information)
 - "Open Spotify" → intents: ["command"] (pure command, no personal info to store)
 - "Play my workout playlist on Spotify" → intents: ["command", "memory_store"] (command + personal preference about playlists)
 - "Send an email to john@example.com" → intents: ["command"] (pure command)
@@ -146,6 +196,8 @@ Analyze the message and respond in this exact JSON format:
 
 Identify ALL applicable intents with individual confidence scores. The primaryIntent should be the most important/actionable intent.
     `.trim();
+
+    return enhancedPrompt;
   }
 
   /**
@@ -164,7 +216,7 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
       // Validate the intent types
       const validIntents: WebSocketIntentType[] = [
         'memory_store', 'memory_retrieve', 'memory_update', 'memory_delete',
-        'greeting', 'question', 'command', 'external_data_required'
+        'greeting', 'question', 'command'
       ];
 
       // Validate intents array
@@ -293,7 +345,7 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
       ['memory_store', 'memory_retrieve', 'memory_update', 'memory_delete'].includes(i.intent)
     );
     const requiresExternalData = detectedIntents.some(i => 
-      i.intent === 'external_data_required'
+      i.intent === 'command' // Commands may require external data
     );
 
     return {

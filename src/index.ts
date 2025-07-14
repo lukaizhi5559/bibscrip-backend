@@ -8,6 +8,7 @@ import http from 'http';
 import router from './api';
 import automationAnalyticsRouter from './api/automationAnalytics';
 import aiMemoryRouter from './routes/aiMemory';
+import smartPromptRouter from './routes/smartPrompt';
 import { logger } from './utils/logger';
 import { vectorDbService } from './services/vectorDbService';
 import { fetchBibleIds } from './utils/bible';
@@ -112,6 +113,7 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
 app.use('/api', router);
 app.use('/api/automation-analytics', automationAnalyticsRouter);
 app.use('/api/memory', aiMemoryRouter);
+app.use('/api/smart-prompt', smartPromptRouter);
 
 // Health check endpoint
 app.get('/health', (req, res) => {

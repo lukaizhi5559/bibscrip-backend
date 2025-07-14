@@ -617,6 +617,124 @@ export class AIMemoryService {
   }
 
   /**
+   * Get memories for SmartPromptBuilder with enhanced interface
+   * Supports user memory types and filtering
+   */
+  async getMemories(
+    userId: string, 
+    options: { 
+      limit?: number; 
+      type?: 'user' | 'system' | 'agent';
+      includeMetadata?: boolean;
+    } = {}
+  ): Promise<Array<{
+    id: string;
+    content: string;
+    type: 'user' | 'system' | 'agent';
+    userId: string;
+    metadata?: Record<string, any>;
+    createdAt: Date;
+  }>> {
+    try {
+      let query = `
+        SELECT 
+          m.id,
+          m.source_text as content,
+          CASE 
+            WHEN m.metadata->>'memory_type' = 'user' THEN 'user'
+            WHEN m.metadata->>'memory_type' = 'agent' THEN 'agent'
+            ELSE 'system'
+          END as type,
+          m.user_id as "userId",
+          m.metadata,
+          m.created_at as "createdAt"
+        FROM memory m
+        WHERE m.user_id = $1
+      `;
+      
+      const params: any[] = [userId];
+      let paramIndex = 2;
+      
+      // Filter by memory type if specified
+      if (options.type) {
+        query += ` AND (m.metadata->>'memory_type' = $${paramIndex} OR (m.metadata->>'memory_type' IS NULL AND $${paramIndex} = 'system'))`;
+        params.push(options.type);
+        paramIndex++;
+      }
+      
+      query += ` ORDER BY m.created_at DESC`;
+      
+      // Apply limit
+      if (options.limit) {
+        query += ` LIMIT $${paramIndex}`;
+        params.push(options.limit);
+      }
+      
+      const result = await this.db.query(query, params);
+      
+      return result.rows.map(row => ({
+        id: row.id,
+        content: row.content || '',
+        type: row.type as 'user' | 'system' | 'agent',
+        userId: row.userId,
+        metadata: options.includeMetadata ? row.metadata : undefined,
+        createdAt: row.createdAt
+      }));
+      
+    } catch (error) {
+      logger.error('Failed to get memories for SmartPromptBuilder:', error as any);
+      return [];
+    }
+  }
+
+  /**
+   * Store user memory with enhanced type support for SmartPromptBuilder
+   */
+  async storeUserMemory(
+    userId: string,
+    content: string,
+    type: 'user' | 'system' | 'agent' = 'user',
+    metadata: Record<string, any> = {}
+  ): Promise<string> {
+    try {
+      const enhancedMetadata = {
+        ...metadata,
+        memory_type: type,
+        stored_via: 'smart_prompt_builder',
+        timestamp: new Date().toISOString()
+      };
+      
+      const result = await this.db.query(`
+        INSERT INTO memory (
+          user_id, type, source_text, metadata, primary_intent
+        ) VALUES ($1, $2, $3, $4, $5)
+        RETURNING id
+      `, [
+        userId,
+        'user_memory',
+        content,
+        JSON.stringify(enhancedMetadata),
+        'memory_store'
+      ]);
+      
+      const memoryId = result.rows[0].id;
+      
+      logger.info('User memory stored via SmartPromptBuilder', {
+        memoryId,
+        userId,
+        type,
+        contentLength: content.length
+      });
+      
+      return memoryId;
+      
+    } catch (error) {
+      logger.error('Failed to store user memory:', error as any);
+      throw error;
+    }
+  }
+
+  /**
    * Generate a summary of user's memory patterns
    */
   private generateMemorySummary(

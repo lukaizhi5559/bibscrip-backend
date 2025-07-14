@@ -371,6 +371,205 @@ export class VectorDbService {
   }
   
   /**
+   * Generate user-specific namespace for memory isolation
+   * @param userId User ID
+   * @param memoryType Type of memory (user, system, agent)
+   * @returns Compound namespace string
+   */
+  generateUserNamespace(userId: string, memoryType: 'user' | 'system' | 'agent' = 'user'): string {
+    return `user_${userId}_${memoryType}_memories`;
+  }
+
+  /**
+   * Search across multiple namespaces with merge-and-rank capability
+   * @param queryText The text to search for
+   * @param namespaces Array of namespaces to search
+   * @param topK Number of results to return per namespace
+   * @param minScore Minimum similarity score (0-1)
+   * @returns Merged and ranked search results
+   */
+  async searchMultipleNamespaces(
+    queryText: string,
+    namespaces: string[],
+    topK: number = 5,
+    minScore: number = 0.7
+  ): Promise<SearchResult[]> {
+    try {
+      const index = await this.getIndex();
+      
+      if (!index) {
+        logger.debug('Multi-namespace search not available (fallback mode)', { namespaces });
+        return [];
+      }
+
+      // Generate embedding for the query
+      const { embedding } = await generateEmbedding(queryText);
+      const normalizedVector = prepareVectorForPinecone(embedding);
+
+      // Search each namespace concurrently
+      const searchPromises = namespaces.map(async (namespace) => {
+        try {
+          const response = await (index as any).query({
+            vector: normalizedVector,
+            topK,
+            includeMetadata: true
+          }, { namespace });
+
+          // Define match type to avoid TypeScript errors
+          interface PineconeMatch {
+            id: string;
+            score?: number;
+            metadata?: Record<string, any>;
+          }
+
+          const matches: PineconeMatch[] = response.matches || [];
+          
+          return matches
+            .filter((match: PineconeMatch) => (match.score || 0) >= minScore)
+            .map((match: PineconeMatch): SearchResult => ({
+              id: match.id,
+              score: match.score || 0,
+              text: match.metadata?.text || '',
+              metadata: {
+                ...match.metadata,
+                namespace, // Add namespace info to metadata
+                searchQuery: queryText
+              }
+            }));
+        } catch (error) {
+          logger.warn(`Failed to search namespace ${namespace}`, { error });
+          return [];
+        }
+      });
+
+      // Wait for all searches to complete
+      const allResults = await Promise.all(searchPromises);
+      
+      // Flatten and merge results
+      const mergedResults = allResults.flat();
+      
+      // Sort by score (highest first) and limit to topK total results
+      const rankedResults = mergedResults
+        .sort((a, b) => b.score - a.score)
+        .slice(0, topK);
+
+      logger.debug(`Multi-namespace search completed`, {
+        query: queryText,
+        namespaces: namespaces.length,
+        totalResults: mergedResults.length,
+        rankedResults: rankedResults.length,
+        topScore: rankedResults[0]?.score || 0
+      });
+
+      return rankedResults;
+      
+    } catch (error) {
+      logger.error('Failed to search multiple namespaces', { error, namespaces });
+      return [];
+    }
+  }
+
+  /**
+   * Store user memory in user-specific namespace
+   * @param userId User ID
+   * @param content Memory content
+   * @param memoryType Type of memory
+   * @param metadata Additional metadata
+   * @returns ID of stored memory
+   */
+  async storeUserMemory(
+    userId: string,
+    content: string,
+    memoryType: 'user' | 'system' | 'agent' = 'user',
+    metadata: Record<string, any> = {}
+  ): Promise<string> {
+    const namespace = this.generateUserNamespace(userId, memoryType);
+    const enhancedMetadata = {
+      ...metadata,
+      userId,
+      memoryType,
+      storedAt: new Date().toISOString(),
+      text: content // Store text in metadata for retrieval
+    };
+
+    return this.storeDocument({
+      text: content,
+      metadata: enhancedMetadata
+    }, namespace);
+  }
+
+  /**
+   * Search user memories across memory types with dynamic weighting
+   * @param userId User ID
+   * @param queryText Search query
+   * @param weights Weights for different memory types
+   * @param topK Number of results to return
+   * @param minScore Minimum similarity score
+   * @returns Weighted and ranked search results
+   */
+  async searchUserMemories(
+    userId: string,
+    queryText: string,
+    weights: { user?: number; system?: number; agent?: number } = { user: 1.0, system: 0.5, agent: 0.3 },
+    topK: number = 10,
+    minScore: number = 0.6
+  ): Promise<SearchResult[]> {
+    // Generate namespaces for enabled memory types
+    const namespacesToSearch: string[] = [];
+    
+    if (weights.user && weights.user > 0) {
+      namespacesToSearch.push(this.generateUserNamespace(userId, 'user'));
+    }
+    if (weights.system && weights.system > 0) {
+      namespacesToSearch.push(this.generateUserNamespace(userId, 'system'));
+    }
+    if (weights.agent && weights.agent > 0) {
+      namespacesToSearch.push(this.generateUserNamespace(userId, 'agent'));
+    }
+
+    if (namespacesToSearch.length === 0) {
+      logger.debug('No namespaces to search for user memories', { userId, weights });
+      return [];
+    }
+
+    // Search across namespaces
+    const results = await this.searchMultipleNamespaces(queryText, namespacesToSearch, topK * 2, minScore);
+    
+    // Apply dynamic weighting based on memory type
+    const weightedResults = results.map(result => {
+      const memoryType = result.metadata?.memoryType as 'user' | 'system' | 'agent';
+      const weight = weights[memoryType] || 1.0;
+      
+      return {
+        ...result,
+        score: result.score * weight,
+        metadata: {
+          ...result.metadata,
+          originalScore: result.score,
+          appliedWeight: weight,
+          weightedScore: result.score * weight
+        }
+      };
+    });
+
+    // Re-sort by weighted score and limit to topK
+    const finalResults = weightedResults
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK);
+
+    logger.debug(`User memory search completed`, {
+      userId,
+      query: queryText,
+      namespacesSearched: namespacesToSearch.length,
+      rawResults: results.length,
+      weightedResults: finalResults.length,
+      weights
+    });
+
+    return finalResults;
+  }
+
+  /**
    * Check if vector database is available
    * @returns true if vector database is available, false if in fallback mode
    */
