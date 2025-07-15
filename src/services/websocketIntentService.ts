@@ -151,7 +151,28 @@ ${topRagContext.map(ctx => `- ${ctx.text || ctx.content || ctx}`).join('\n')}`;
 - **memory_delete**: User wants to remove/delete stored information
 - **greeting**: User is greeting, saying hello, or starting conversation
 - **question**: User is asking a question that requires an informative answer
-- **command**: User is giving a command or instruction to perform an action
+- **command**: User is giving a command or instruction to perform an action (e.g., "take a picture", "screenshot this", "capture my screen", "do something")
+
+**IMPORTANT**: You MUST only use these 7 intent types. Do NOT create new intent types like "general_query" or "other". Every message must be classified as one of these 7 types.
+
+**Screen Capture Detection:**
+Set "captureScreen": true if the user's message indicates they need visual context or want to capture/store the current page, such as:
+- "I need help understand this page"
+- "guide me through this"
+- "store/capture this page for later"
+- "what is this all about"
+- "explain what I'm looking at"
+- "save this screen"
+- "help me with this interface"
+- "take a picture of my screen"
+- "take a screenshot"
+- "screenshot this"
+- "capture my screen"
+- "snap a picture of what I'm seeing"
+- "picture of my display"
+- "what am I looking at here"
+- "help me understand what's on my screen"
+- Any request that would benefit from seeing the current screen/page or involves capturing visual content
 
 User Message: "${message}"${historyContext}
 
@@ -166,6 +187,8 @@ User Message: "${message}"${historyContext}
 - "Play my workout playlist on Spotify" → intents: ["command", "memory_store"] (command + personal preference about playlists)
 - "Send an email to john@example.com" → intents: ["command"] (pure command)
 - "Email my mom about the dinner plans" → intents: ["command", "memory_store"] (command + personal relationship info)
+- "Take a picture of my screen" → intents: ["command"], captureScreen: true (screen capture command)
+- "Help me understand this page" → intents: ["question"], captureScreen: true (question requiring visual context)
 
 Analyze the message and respond in this exact JSON format:
 {
@@ -190,6 +213,7 @@ Analyze the message and respond in this exact JSON format:
   "entities": ["appointment", "3pm", "next week", "email", "wife"],
   "requiresMemoryAccess": true,
   "requiresExternalData": false,
+  "captureScreen": false,
   "suggestedResponse": "Acknowledge greeting, confirm appointment storage, and execute email command",
   "sourceText": "Hello, I have appt. at 3pm next week that I need you to email to my wife"
 }
@@ -248,6 +272,7 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
         entities: parsed.entities || [],
         requiresMemoryAccess: parsed.requiresMemoryAccess || false,
         requiresExternalData: parsed.requiresExternalData || false,
+        captureScreen: parsed.captureScreen || false,
         suggestedResponse: parsed.suggestedResponse || '',
         sourceText: parsed.sourceText || ''
       };
@@ -318,11 +343,20 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
     }
 
     // Check for command patterns
-    if (/(please|can you|could you|would you|do|perform|execute|run|start|stop|email|send|call)/.test(lowerMessage)) {
+    if (/(please|can you|could you|would you|do|perform|execute|run|start|stop|email|send|call|take a picture|screenshot|capture|snap)/.test(lowerMessage)) {
       detectedIntents.push({
         intent: 'command',
         confidence: 0.7,
         reasoning: 'Contains command or request keywords'
+      });
+    }
+
+    // Check for screen capture patterns
+    if (/(take a picture of my screen|screenshot this|capture my screen|snap a picture of what I'm seeing|picture of my display|help me understand what's on my screen)/.test(lowerMessage)) {
+      detectedIntents.push({
+        intent: 'command',
+        confidence: 0.7,
+        reasoning: 'Contains screen capture keywords'
       });
     }
 
@@ -348,12 +382,32 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
       i.intent === 'command' // Commands may require external data
     );
 
+    // Determine if screen capture is needed
+    const captureScreen = lowerMessage.includes('this page') || 
+                       lowerMessage.includes('guide me through') ||
+                       lowerMessage.includes('what is this') ||
+                       lowerMessage.includes('explain what') ||
+                       lowerMessage.includes('help me with this') ||
+                       lowerMessage.includes('save this screen') ||
+                       lowerMessage.includes('capture this') ||
+                       lowerMessage.includes('store this page') ||
+                       lowerMessage.includes('what i\'m seeing') ||
+                       lowerMessage.includes('what am i seeing') ||
+                       lowerMessage.includes('take a picture') ||
+                       lowerMessage.includes('take a screenshot') ||
+                       lowerMessage.includes('screenshot') ||
+                       lowerMessage.includes('picture of my screen') ||
+                       lowerMessage.includes('capture my screen') ||
+                       lowerMessage.includes('snap a picture') ||
+                       lowerMessage.includes('take a snap');
+
     return {
       intents: detectedIntents,
       primaryIntent,
       entities: [message],
       requiresMemoryAccess,
       requiresExternalData,
+      captureScreen,
       suggestedResponse: detectedIntents.length > 1 
         ? 'Handle multiple intents: ' + detectedIntents.map(i => i.intent).join(', ')
         : 'Handle ' + primaryIntent,

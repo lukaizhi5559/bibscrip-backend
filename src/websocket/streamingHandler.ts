@@ -111,17 +111,47 @@ export class StreamingHandler {
         ...metadata
       };
 
-      // Start intent evaluation in parallel (non-blocking)
-      logger.info(`🎯 Starting parallel intent evaluation for request ${requestId}`);
-      const intentEvaluationPromise = this.evaluateIntentInParallel(requestId, request.prompt);
+      // Perform intent classification using WebSocketIntentService (single source of truth)
+      logger.info(`🎯 Starting intent classification for request ${requestId}`);
       
-      // Continue immediately with LLM streaming for fast response
+      // Run intent classification in parallel (don't await to avoid blocking LLM streaming)
+      this.evaluateIntentInParallel(requestId, request.prompt).catch((error: any) => {
+        logger.error(`Failed to evaluate intent for request ${requestId}:`, error);
+      });
+      
+      // Build Thinkdrop AI context-aware prompt
+      logger.info(`🔧 Building Thinkdrop AI context-aware prompt for request ${requestId}`);
+      const enhancedPrompt = await this.buildThinkdropAIPrompt(request.prompt, {
+        conversationHistory: this.conversationContext.conversationHistory || [],
+        userId: this.userId,
+        sessionId: this.sessionId
+      });
+      
+      logger.info(`📝 Enhanced prompt built for ${requestId}:`, {
+        originalLength: request.prompt.length,
+        enhancedLength: enhancedPrompt.length,
+        originalPrompt: request.prompt.substring(0, 100),
+        enhancedPromptPreview: enhancedPrompt.substring(0, 200)
+      });
+      
+      // Create enhanced request with Thinkdrop AI context
+      const enhancedRequest: LLMStreamRequest = {
+        ...request,
+        prompt: enhancedPrompt
+      };
 
-      // Process with streaming
+      // Process with streaming using context-enriched prompt
+      logger.info(`🚀 Starting LLM streaming for request ${requestId}`);
       const result = await llmStreamingRouter.processPromptWithStreaming(
-        request,
+        enhancedRequest,
         (chunk: StreamingMessage) => {
           // Forward streaming chunks to client
+          logger.info(`📦 Streaming chunk for ${requestId}:`, {
+            type: chunk.type,
+            hasPayload: !!chunk.payload,
+            payloadPreview: typeof chunk.payload === 'string' ? chunk.payload.substring(0, 100) : 'non-string'
+          });
+          
           if (this.ws.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify(chunk));
           }
@@ -481,6 +511,7 @@ export class StreamingHandler {
           entities: intentResult.entities,
           requiresMemoryAccess: intentResult.requiresMemoryAccess,
           requiresExternalData: intentResult.requiresExternalData,
+          captureScreen: intentResult.captureScreen, // Include screen capture flag
           suggestedResponse: intentResult.suggestedResponse,
           sourceText: intentResult.sourceText
         },
@@ -579,6 +610,78 @@ export class StreamingHandler {
       // Don't throw - memory storage failure shouldn't break the main flow
     }
   }
+
+  /**
+   * Build prompt specifically for Thinkdrop AI context awareness
+   * Makes the LLM aware of what Thinkdrop AI can do without complex intent classification
+   */
+  private async buildThinkdropAIPrompt(message: string, context?: Record<string, any>): Promise<string> {
+    const conversationHistory = context?.conversationHistory || [];
+    const historyContext = conversationHistory.length > 0 
+      ? `\n\nRecent Conversation History:\n${conversationHistory.slice(-5).map((h: any) => `${h.role}: ${h.content}`).join('\n')}`
+      : '';
+  
+    return `
+  You are **Thinkdrop AI**, a proactive, emotionally intelligent personal assistant.
+  
+  You *can directly perform* the following actions **without asking the user to create agents**:
+  - 📸 **Take screenshots** of the desktop, browser, or specific regions
+  - 🧠 **Read and update memory**: store, retrieve, delete, and update long-term user memories using local and online context
+  - 🌐 **Understand desktop & browser activity**: read screen content, monitor recent browser history and app usage
+  - 🎯 **Control the system**: simulate mouse/keyboard actions to automate user tasks
+  - ⏰ **Send proactive reminders**, notifications, or messages
+  - 📖 **Provide biblical guidance**, devotionals, and spiritual insights
+  - 💬 **Converse naturally** with emotional intelligence and adaptive reasoning
+  
+  You can also **recommend agents (Drops)** when:
+  - A task is ongoing, recurring, or spans multiple tools (e.g., “monitor email and auto-respond”)
+  - The user wants something scalable, repeatable, or requires complex workflow orchestration
+  
+ You are allowed and encouraged to use reasoning techniques like:
+
+  - **Chain of Thought (CoT)**  
+    *Think step-by-step to solve multi-part tasks*  
+    **Example:**  
+    User: “Remind me to call Mom every Sunday.”  
+    You: “Sure. Step 1: Create a recurring reminder for Sunday. Step 2: Add the label 'Call Mom'. Step 3: Confirm it in your reminders list. Done!”
+
+  - **Few-shot prompting**  
+    *Use a past example to clarify a current request*  
+    **Example:**  
+    User: “Schedule a devotion like last week.”  
+    You: “Got it! Last week you had a morning devotional at 7AM with Psalm 23. Shall I use the same time and theme?”
+
+  - **Self-consistency**  
+    *Try multiple thoughts, compare them, and choose the best*  
+    **Example:**  
+    User: “What’s the best time to schedule focus work?”  
+    You: “One thought: Mornings (most productive). Another: Late evenings (quiet time). Given your previous behavior, mornings may be ideal. Let’s set it for 9AM.”
+
+  - **Tree of Thought (ToT)**  
+    *Explore different paths when there are branches of reasoning*  
+    **Example:**  
+    User: “How can I stay spiritually balanced while working remote?”  
+    You:  
+    “Let’s explore:  
+    - Branch 1: Structured daily devotionals  
+    - Branch 2: AI reminders for prayer breaks  
+    - Branch 3: Weekly digital fellowship sessions  
+    I recommend starting with daily devotionals and adding reminders. Want help setting that up?”
+
+  User Message:
+  "${message}"${historyContext}
+  
+  Your response must:
+  - Be **natural, emotionally aware, and helpful**
+  - **Avoid disclaimers** when a direct action is possible
+  - **Act directly** when you can
+  - **Recommend the right Drop/Agent** when a custom workflow is needed
+  - Use CoT or ToT only when necessary for complex reasoning
+  
+  Respond like a confident, friendly assistant. Start with something warm and helpful like:  
+  "Sure thing!", "Got it 👌", or "Absolutely, here's what I’ll do…"
+  `.trim();
+  }  
 
   /**
    * Get conversation context

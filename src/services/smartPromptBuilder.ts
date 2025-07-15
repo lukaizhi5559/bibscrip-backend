@@ -156,13 +156,18 @@ export class SmartPromptBuilder {
       // Step 1: Analyze message complexity
       const complexityAnalysis = this.analyzeMessageComplexity(message);
       
-      // Step 2: Classify intent directly (avoiding circular dependency)
-      const intentResult = await this.classifyIntentDirect(message, config.userId);
+      // Step 2: Use provided intent type or basic fallback (WebSocketIntentService handles real classification)
+      const intentResult = {
+        primaryIntent: config.intentType || 'question',
+        intents: [{ intent: config.intentType || 'question', confidence: 0.8, reasoning: 'Fallback classification' }],
+        requiresMemoryAccess: config.intentType === 'memory_retrieve' || config.intentType === 'memory_store',
+        entities: [],
+        captureScreen: false
+      };
       
-      logger.info('Intent classification result', {
+      logger.info('SmartPromptBuilder using provided intent type', {
         primaryIntent: intentResult.primaryIntent,
-        allIntents: intentResult.intents.map(i => ({ intent: i.intent, confidence: i.confidence })),
-        requiresMemoryAccess: intentResult.requiresMemoryAccess
+        providedIntentType: config.intentType
       });
       
       // Step 3: Check semantic cache first
@@ -533,14 +538,16 @@ export class SmartPromptBuilder {
       const prompt = `
 You are Thinkdrop AI's intent classifier. Analyze the user's message and identify ALL applicable intents.
 
-**Intent Categories:**
+**Intent Categories (ONLY use these 7 types):**
 - **memory_store**: User wants to save/store information OR is sharing personal information, facts, experiences, preferences, plans, tasks, intentions, activities, or any data about themselves, their life, or their future actions (e.g., "I need to buy snacks", "I'm going to the gym", "My favorite color is blue")
 - **memory_retrieve**: User wants to recall/find previously stored information
 - **memory_update**: User wants to modify/edit existing stored information
 - **memory_delete**: User wants to remove/delete stored information
 - **greeting**: User is greeting, saying hello, or starting conversation
 - **question**: User is asking a question that requires an informative answer
-- **command**: User is giving a command or instruction to perform an action
+- **command**: User is giving a command or instruction to perform an action (e.g., "take a picture", "screenshot this", "capture my screen", "do something")
+
+**IMPORTANT**: You MUST only use these 7 intent types. Do NOT create new intent types like "general_query" or "other". Every message must be classified as one of these 7 types.
 
 **Screen Capture Detection:**
 Set "captureScreen": true if the user's message indicates they need visual context or want to capture/store the current page, such as:
@@ -551,7 +558,15 @@ Set "captureScreen": true if the user's message indicates they need visual conte
 - "explain what I'm looking at"
 - "save this screen"
 - "help me with this interface"
-- Any request that would benefit from seeing the current screen/page
+- "take a picture of my screen"
+- "take a screenshot"
+- "screenshot this"
+- "capture my screen"
+- "snap a picture of what I'm seeing"
+- "picture of my display"
+- "what am I looking at here"
+- "help me understand what's on my screen"
+- Any request that would benefit from seeing the current screen/page or involves capturing visual content
 
 User Message: "${message}"
 
@@ -570,7 +585,7 @@ Analyze the message and respond in this exact JSON format:
   "requiresExternalData": false,
   "suggestedResponse": "Hello! Nice to meet you.",
   "sourceText": "Hello, my name is John",
-  "captureScreen": false
+  "captureScreen": true
 }
 
 Identify ALL applicable intents with individual confidence scores. The primaryIntent should be the most important/actionable intent.
@@ -586,26 +601,14 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
         try {
           const parsed = JSON.parse(response.text);
           
-          // Explicit screen capture detection (don't rely solely on LLM)
-          const lowerMessage = message.toLowerCase();
-          const needsScreenCapture = lowerMessage.includes('this page') || 
-                                    lowerMessage.includes('guide me through') ||
-                                    lowerMessage.includes('what is this') ||
-                                    lowerMessage.includes('explain what') ||
-                                    lowerMessage.includes('help me with this') ||
-                                    lowerMessage.includes('save this screen') ||
-                                    lowerMessage.includes('capture this') ||
-                                    lowerMessage.includes('store this page') ||
-                                    lowerMessage.includes('what i\'m seeing') ||
-                                    lowerMessage.includes('what am i seeing');
-          
+          // Trust the LLM's captureScreen decision - it's more intelligent than keyword matching
           return {
             primaryIntent: parsed.primaryIntent || 'question',
             intents: parsed.intents || [{ intent: 'question', confidence: 0.5, reasoning: 'Default classification' }],
             requiresMemoryAccess: parsed.requiresMemoryAccess || false,
             entities: parsed.entities || [],
-            captureScreen: parsed.captureScreen || needsScreenCapture || false
-          };
+            captureScreen: parsed.captureScreen || false
+          };  
         } catch (parseError) {
           logger.warn('Failed to parse intent classification response', { parseError, response: response.text });
         }
@@ -642,7 +645,14 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
                               lowerMessage.includes('capture this') ||
                               lowerMessage.includes('store this page') ||
                               lowerMessage.includes('what i\'m seeing') ||
-                              lowerMessage.includes('what am i seeing');
+                              lowerMessage.includes('what am i seeing') ||
+                              lowerMessage.includes('take a picture') ||
+                              lowerMessage.includes('take a screenshot') ||
+                              lowerMessage.includes('screenshot') ||
+                              lowerMessage.includes('picture of my screen') ||
+                              lowerMessage.includes('capture my screen') ||
+                              lowerMessage.includes('snap a picture') ||
+                              lowerMessage.includes('take a snap');
     
     // Simple rule-based classification
     if (lowerMessage.includes('hello') || lowerMessage.includes('hi ') || lowerMessage.includes('hey')) {
