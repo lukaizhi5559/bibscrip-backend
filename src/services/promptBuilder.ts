@@ -17,6 +17,7 @@ export interface AgentFormat {
   execution_target: 'frontend' | 'backend';
   requires_database: boolean;
   database_type?: 'sqlite' | 'duckdb' | 'postgresql';
+  bootstrap: string;
   code: string;
 }
 
@@ -34,19 +35,16 @@ export const AGENT_FORMAT_TEMPLATE: AgentFormat = {
   execution_target: 'frontend',
   requires_database: false,
   database_type: undefined,
+  bootstrap: `async bootstrap(config, context) {
+    // Handle own DB setup, no more main.cjs DB code
+    this.db = await this.initializeDuckDB(config.dbPath);
+  }
+  `.trim(),
   code: `
-export default {
-  name: 'AgentName',
-  description: 'Description of task',
-  schema: { /* input params schema */ },
-  dependencies: ["npm-module"],
-  execution_target: "frontend",
-  requires_database: false,
-  async execute(params, context) {
+  async execute(input: any, context: any) {
     // Agent implementation
     return { success: true, result: 'Task completed' };
   }
-}
   `.trim()
 };
 

@@ -49,18 +49,34 @@ export class WebSocketIntentService {
    */
   async evaluateIntent(
     message: string, 
-    options: WebSocketIntentOptions = {}
+    options: {
+      provider?: string;
+      context?: Record<string, any>;
+    } = {}
   ): Promise<WebSocketIntentResult> {
+    logger.info('🔍 Starting intent evaluation', {
+      message,
+      provider: options.provider || 'openai',
+      hasContext: !!options.context,
+      contextKeys: options.context ? Object.keys(options.context) : []
+    });
+
     try {
       const prompt = await this.buildWebSocketIntentPrompt(message, options.context);
       
-      // Use the streaming router for intent classification
+      logger.info('📝 Built LLM prompt', {
+        promptLength: prompt.length,
+        message
+      });
+      
       const result = await llmStreamingRouter.processPromptWithStreaming(
         {
           prompt,
           provider: options.provider || 'openai',
-          options: { 
-            maxTokens: 500 // Keep response concise for intent classification
+          options: {
+            temperature: 0.1,
+            maxTokens: 500,
+            stream: false
           }
         },
         () => {}, // No streaming needed for intent classification
@@ -71,17 +87,84 @@ export class WebSocketIntentService {
         }
       );
 
-      if (!result.fullText) {
-        throw new Error('Failed to get LLM response for intent evaluation');
-      }
+      logger.info('🤖 LLM response received', {
+        provider: result.provider,
+        hasFullText: !!result.fullText,
+        textLength: result.fullText?.length || 0,
+        processingTime: result.processingTime,
+        message
+      });
 
-      logger.info('Intent classification result:', { fullText: result.fullText });
-      return this.parseIntentResponse(result.fullText, message);
+      if (result.fullText) {
+        try {
+          logger.info('🔄 Attempting to parse LLM response', {
+            fullText: result.fullText,
+            message
+          });
+          
+          const parsed = JSON.parse(result.fullText);
+          
+          logger.info('✅ Successfully parsed LLM intent result', {
+            primaryIntent: parsed.primaryIntent,
+            intentsCount: parsed.intents?.length || 0,
+            intents: parsed.intents?.map((i: any) => `${i.intent}(${i.confidence})`) || [],
+            requiresMemoryAccess: parsed.requiresMemoryAccess,
+            message
+          });
+          
+          return parsed as WebSocketIntentResult;
+        } catch (parseError) {
+          logger.warn('❌ Failed to parse LLM intent response, using fallback', {
+            error: parseError instanceof Error ? parseError.message : String(parseError),
+            fullText: result.fullText,
+            message
+          });
+          
+          const fallbackResult = this.fallbackIntentClassification(message);
+          
+          logger.info('🔄 Fallback classification result', {
+            primaryIntent: fallbackResult.primaryIntent,
+            intentsCount: fallbackResult.intents?.length || 0,
+            intents: fallbackResult.intents?.map((i: any) => `${i.intent}(${i.confidence})`) || [],
+            message
+          });
+          
+          return fallbackResult;
+        }
+      } else {
+        logger.warn('❌ LLM intent classification failed (no fullText), using fallback', {
+          provider: result.provider,
+          processingTime: result.processingTime,
+          message
+        });
+        
+        const fallbackResult = this.fallbackIntentClassification(message);
+        
+        logger.info('🔄 Fallback classification result', {
+          primaryIntent: fallbackResult.primaryIntent,
+          intentsCount: fallbackResult.intents?.length || 0,
+          intents: fallbackResult.intents?.map((i: any) => `${i.intent}(${i.confidence})`) || [],
+          message
+        });
+        
+        return fallbackResult;
+      }
     } catch (error) {
-      logger.info('LLM intent classification failed, using fallback:', { error: (error as Error).message });
+      logger.error('💥 Error in intent evaluation, using fallback', {
+        error: error instanceof Error ? error.message : String(error),
+        message
+      });
       
-      // Fallback to rule-based classification
-      return this.fallbackIntentClassification(message);
+      const fallbackResult = this.fallbackIntentClassification(message);
+      
+      logger.info('🔄 Fallback classification result', {
+        primaryIntent: fallbackResult.primaryIntent,
+        intentsCount: fallbackResult.intents?.length || 0,
+        intents: fallbackResult.intents?.map((i: any) => `${i.intent}(${i.confidence})`) || [],
+        message
+      });
+      
+      return fallbackResult;
     }
   }
 
@@ -144,19 +227,85 @@ ${topRagContext.map(ctx => `- ${ctx.text || ctx.content || ctx}`).join('\n')}`;
 
     enhancedPrompt += `
 
-**Intent Categories:**
-- **memory_store**: User wants to save/store information OR is sharing personal information, facts, experiences, preferences, plans, tasks, intentions, activities, or any data about themselves, their life, or their future actions (e.g., "I need to buy snacks", "I'm going to the gym", "My favorite color is blue")
+**Intent Classification Framework:**
+
+You are an expert intent classifier. Use the following systematic approach:
+
+**Step 1: Analyze the Message Structure**
+- What is the user doing? (sharing, asking, commanding, greeting)
+- What information is being communicated?
+- What is the user's underlying need or goal?
+
+**Step 2: Apply Intent Categories**
+**IMPORTANT**: You MUST only use these 7 intent types. Do NOT create new intent types like "general_query" or "other". Every message must be classified as one or more of these 7 types.
+- **memory_store**: User is sharing personal information, experiences, plans, tasks, needs, problems, or any data about themselves that should be remembered for future reference
 - **memory_retrieve**: User wants to recall/find previously stored information
-- **memory_update**: User wants to modify/edit existing stored information
+- **memory_update**: User wants to modify/edit existing stored information  
 - **memory_delete**: User wants to remove/delete stored information
 - **greeting**: User is greeting, saying hello, or starting conversation
-- **question**: User is asking a question that requires an informative answer
+- **question**: User is asking for information, guidance, or explanations (seeking knowledge)
 - **command**: User is giving a command or instruction to perform an action (e.g., "take a picture", "screenshot this", "capture my screen", "do something")
 
-**IMPORTANT**: You MUST only use these 7 intent types. Do NOT create new intent types like "general_query" or "other". Every message must be classified as one of these 7 types.
+**Step 3: Chain-of-Thought Analysis**
+For each message, think through:
+1. "What is the user telling me about themselves or their situation?"
+2. "Should this information be remembered for future conversations?"
+3. "Is the user asking me to do something, or just sharing information?"
+
+**CRITICAL DISTINCTION - Memory Store vs Question:**
+- **memory_store**: "I need a new car title" (sharing a personal need/task)
+- **question**: "How do I get a new car title?" (asking for information)
+- **memory_store**: "I lost my car keys" (sharing a personal problem)
+- **question**: "What should I do if I lose my car keys?" (asking for advice)
+
+**Few-Shot Examples with Chain-of-Thought:**
+
+**Example 1: "I need a new title for my car. Lost mine"**
+Step 1 Analysis: User is sharing a personal problem/need
+Step 2 Reasoning: This is personal information about their situation that should be remembered
+Step 3 CoT: (1) User is telling me they have a car title problem (2) Yes, this should be remembered for future help (3) They're sharing, not asking how to solve it
+Classification: memory_store (confidence: 0.9)
+
+**Example 2: "How do I get a new car title?"**
+Step 1 Analysis: User is asking for information/guidance
+Step 2 Reasoning: This is seeking knowledge, not sharing personal info
+Step 3 CoT: (1) User wants to know the process (2) No personal info to remember (3) They're asking for instructions
+Classification: question (confidence: 0.9)
+
+**Example 3: "I lost my wallet yesterday"**
+Step 1 Analysis: User is sharing a personal incident
+Step 2 Reasoning: Personal experience that should be remembered
+Step 3 CoT: (1) User experienced a loss (2) Yes, important personal event (3) Sharing information, not requesting action
+Classification: memory_store (confidence: 0.85)
+
+**Example 4: "What should I do if I lose my wallet?"**
+Step 1 Analysis: User is asking for advice/guidance
+Step 2 Reasoning: Hypothetical question seeking information
+Step 3 CoT: (1) User wants advice for a scenario (2) No personal info shared (3) Asking for guidance
+Classification: question (confidence: 0.9)
+
+**Example 5: "I have a dentist appointment at 3pm tomorrow"**
+Step 1 Analysis: User is sharing personal schedule information
+Step 2 Reasoning: Personal appointment that should be remembered
+Step 3 CoT: (1) User has a scheduled appointment (2) Yes, important personal schedule (3) Sharing information
+Classification: memory_store (confidence: 0.9)
+
+**Example 6: "Take a screenshot of this page"**
+Step 1 Analysis: User is giving a direct instruction
+Step 2 Reasoning: Command to perform an action
+Step 3 CoT: (1) User wants an action performed (2) No personal info to store (3) Direct command
+Classification: command (confidence: 0.95)
+
+**Self-Consistency Check:**
+Before finalizing, ask yourself:
+- "If I were having a conversation with this person next week, would knowing this information be helpful?"
+- "Is the user sharing something about themselves, or asking me to provide information?"
+- "Would a human friend remember this if the user told them?"
 
 **Screen Capture Detection:**
-Set "captureScreen": true if the user's message indicates they need visual context or want to capture/store the current page, such as:
+Set "captureScreen": true if the user's message indicates they need visual context or want to capture/store the current page. This includes:
+
+**Direct Screen References:**
 - "I need help understand this page"
 - "guide me through this"
 - "store/capture this page for later"
@@ -172,11 +321,40 @@ Set "captureScreen": true if the user's message indicates they need visual conte
 - "picture of my display"
 - "what am I looking at here"
 - "help me understand what's on my screen"
-- Any request that would benefit from seeing the current screen/page or involves capturing visual content
+
+**Content Analysis/Processing:**
+- "sum up this page"
+- "summarize this page"
+- "summarize what's on my screen"
+- "give me a summary of this"
+- "tell me about this page"
+- "analyze this page"
+- "review this page"
+- "break down this page"
+
+**Indirect/Contextual References (requiring visual context):**
+- "let's get this data in an email" (extracting visible data)
+- "clean up all these words" (processing visible text)
+- "organize this information" (structuring visible content)
+- "extract the key points" (analyzing visible content)
+- "turn this into a list" (reformatting visible content)
+- "make sense of this" (interpreting visible content)
+- "what should I do with this" (contextual advice about visible content)
+- "help me process this" (working with visible information)
+- "anything else to consider" (when context suggests visible content)
+- "what's missing here" (analyzing visible content gaps)
+- "how can I improve this" (evaluating visible content)
+- "what's the next step" (when context involves visible workflow/process)
+- "convert this to [format]" (transforming visible content)
+- "send this to [someone]" (sharing visible content)
+- "save this as [format]" (preserving visible content)
+
+**Key Principle:** If the request implies the AI needs to see what the user is currently viewing to provide a meaningful response, set captureScreen: true. This includes data extraction, content analysis, formatting requests, and contextual advice about visible information.
+
 
 User Message: "${message}"${historyContext}
 
-**Examples:**
+**Additional Examples:**
 - "Hello, I have appt. at 3pm next week that I need you to email to my wife" → intents: ["greeting", "memory_store", "command"]
 - "I need to buy some snacks today" → intents: ["memory_store"] (personal plan/task to remember)
 - "I'm going to the gym after work" → intents: ["memory_store"] (personal activity plan)
@@ -190,8 +368,21 @@ User Message: "${message}"${historyContext}
 - "Take a picture of my screen" → intents: ["command"], captureScreen: true (screen capture command)
 - "Help me understand this page" → intents: ["question"], captureScreen: true (question requiring visual context)
 
+**ANALYSIS INSTRUCTIONS:**
+
+1. **Apply the 3-Step Framework** to the user message
+2. **Use Chain-of-Thought reasoning** for each potential intent
+3. **Reference the Few-Shot examples** for similar patterns
+4. **Apply Self-Consistency checks** before finalizing
+5. **Include your reasoning** in the JSON response
+
 Analyze the message and respond in this exact JSON format:
 {
+  "chainOfThought": {
+    "step1_analysis": "What is the user doing and what information are they communicating?",
+    "step2_reasoning": "Which intent category best fits this message and why?",
+    "step3_consistency": "Self-consistency check: Would this information be valuable to remember?"
+  },
   "intents": [
     {
       "intent": "greeting",
@@ -199,7 +390,7 @@ Analyze the message and respond in this exact JSON format:
       "reasoning": "Message starts with greeting"
     },
     {
-      "intent": "memory_store", 
+      "intent": "memory_store",
       "confidence": 0.90,
       "reasoning": "User wants to store appointment information"
     },
@@ -383,6 +574,7 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
     );
 
     // Determine if screen capture is needed
+    // Direct screen references
     const captureScreen = lowerMessage.includes('this page') || 
                        lowerMessage.includes('guide me through') ||
                        lowerMessage.includes('what is this') ||
@@ -399,7 +591,37 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
                        lowerMessage.includes('picture of my screen') ||
                        lowerMessage.includes('capture my screen') ||
                        lowerMessage.includes('snap a picture') ||
-                       lowerMessage.includes('take a snap');
+                       lowerMessage.includes('take a snap') ||
+                       // Content analysis/processing
+                       lowerMessage.includes('sum up this page') ||
+                       lowerMessage.includes('summarize this page') ||
+                       lowerMessage.includes('summarize what') ||
+                       lowerMessage.includes('give me a summary') ||
+                       lowerMessage.includes('tell me about this page') ||
+                       lowerMessage.includes('analyze this page') ||
+                       lowerMessage.includes('review this page') ||
+                       lowerMessage.includes('break down this page') ||
+                       // Indirect/contextual references (data processing)
+                       lowerMessage.includes('get this data') ||
+                       lowerMessage.includes('clean up all these') ||
+                       lowerMessage.includes('organize this information') ||
+                       lowerMessage.includes('extract the key points') ||
+                       lowerMessage.includes('turn this into') ||
+                       lowerMessage.includes('make sense of this') ||
+                       lowerMessage.includes('what should i do with this') ||
+                       lowerMessage.includes('help me process this') ||
+                       lowerMessage.includes('anything else to consider') ||
+                       lowerMessage.includes('what\'s missing here') ||
+                       lowerMessage.includes('how can i improve this') ||
+                       lowerMessage.includes('what\'s the next step') ||
+                       lowerMessage.includes('convert this to') ||
+                       lowerMessage.includes('send this to') ||
+                       lowerMessage.includes('save this as') ||
+                       // Contextual processing patterns
+                       (lowerMessage.includes('this') && (lowerMessage.includes('email') || lowerMessage.includes('format') || lowerMessage.includes('list') || lowerMessage.includes('organize'))) ||
+                       // Questions about visible content
+                       (lowerMessage.includes('what') && lowerMessage.includes('here')) ||
+                       (lowerMessage.includes('how') && lowerMessage.includes('this'));
 
     return {
       intents: detectedIntents,

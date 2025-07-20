@@ -36,6 +36,22 @@ export class AIMemoryService {
     try {
       await client.query('BEGIN');
 
+      // Ensure user exists before storing memory
+      const userCheck = await client.query('SELECT id FROM users WHERE id = $1', [userId]);
+      if (userCheck.rows.length === 0) {
+        // Create anonymous user record
+        await client.query(`
+          INSERT INTO users (id, name, email, created_at, updated_at) 
+          VALUES ($1, $2, $3, NOW(), NOW())
+          ON CONFLICT (id) DO NOTHING
+        `, [userId, 'Anonymous User', `anonymous-${userId}@thinkdrop.ai`]);
+        
+        logger.info(`👤 Created anonymous user record for memory storage`, {
+          userId,
+          source: 'websocket_intent_classification'
+        });
+      }
+
       // Insert main memory record
       const memoryResult = await client.query(`
         INSERT INTO memory (
