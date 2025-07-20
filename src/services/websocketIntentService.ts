@@ -376,6 +376,11 @@ User Message: "${message}"${historyContext}
 4. **Apply Self-Consistency checks** before finalizing
 5. **Include your reasoning** in the JSON response
 
+**CRITICAL REQUIREMENT:** You MUST always include both \`suggestedResponse\` and \`sourceText\` fields in your response. These are REQUIRED fields, not optional.
+
+- \`suggestedResponse\`: A brief, actionable response that describes what should be done based on the detected intents
+- \`sourceText\`: The exact original user message (for reference and context)
+
 Analyze the message and respond in this exact JSON format:
 {
   "chainOfThought": {
@@ -462,24 +467,31 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
 
       logger.info(`Intent classification completed: ${parsed.primaryIntent} with ${parsed.intents.length} total intents`);
 
-      return {
-        intents: parsed.intents.map((intentObj: any) => ({
-          intent: intentObj.intent,
-          confidence: intentObj.confidence || 0.8,
-          reasoning: intentObj.reasoning || ''
-        })),
-        primaryIntent: parsed.primaryIntent,
-        entities: parsed.entities || [],
-        requiresMemoryAccess: parsed.requiresMemoryAccess || false,
-        requiresExternalData: parsed.requiresExternalData || false,
-        captureScreen: parsed.captureScreen || false,
-        suggestedResponse: parsed.suggestedResponse || '',
-        sourceText: parsed.sourceText || ''
-      };
-    } catch (error) {
-      logger.warn('Failed to parse intent response, using fallback:', error as any);
-      return this.fallbackIntentClassification(originalMessage);
-    }
+    // Generate default suggestedResponse if not provided by LLM
+    const defaultSuggestedResponse = parsed.suggestedResponse || 
+      `Handle ${parsed.primaryIntent}${parsed.intents.length > 1 ? ` and ${parsed.intents.length - 1} other intent(s)` : ''}: ${parsed.intents.map((i: any) => i.intent).join(', ')}`;
+
+    // Ensure sourceText is always the original message
+    const sourceText = parsed.sourceText || originalMessage;
+
+    return {
+      intents: parsed.intents.map((intentObj: any) => ({
+        intent: intentObj.intent,
+        confidence: intentObj.confidence || 0.8,
+        reasoning: intentObj.reasoning || ''
+      })),
+      primaryIntent: parsed.primaryIntent,
+      entities: parsed.entities || [],
+      requiresMemoryAccess: parsed.requiresMemoryAccess || false,
+      requiresExternalData: parsed.requiresExternalData || false,
+      captureScreen: parsed.captureScreen || false,
+      suggestedResponse: defaultSuggestedResponse,
+      sourceText: sourceText
+    };
+  } catch (error) {
+    logger.warn('Failed to parse intent response, using fallback:', error as any);
+    return this.fallbackIntentClassification(originalMessage);
+  }
   }
 
   /**
