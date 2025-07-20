@@ -41,8 +41,8 @@ export class AIMemoryService {
       if (userCheck.rows.length === 0) {
         // Create anonymous user record
         await client.query(`
-          INSERT INTO users (id, name, email, created_at, updated_at) 
-          VALUES ($1, $2, $3, NOW(), NOW())
+          INSERT INTO users (id, name, email, created_at) 
+          VALUES ($1, $2, $3, NOW())
           ON CONFLICT (id) DO NOTHING
         `, [userId, 'Anonymous User', `anonymous-${userId}@thinkdrop.ai`]);
         

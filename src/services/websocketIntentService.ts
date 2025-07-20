@@ -420,8 +420,17 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
    */
   private parseIntentResponse(response: string, originalMessage: string): WebSocketIntentResult {
     try {
-      // Try to extract JSON from the response
-      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      // Try to extract JSON from the response, handling markdown code blocks
+      let jsonText = response;
+      
+      // Remove markdown code blocks if present
+      const codeBlockMatch = jsonText.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+      if (codeBlockMatch) {
+        jsonText = codeBlockMatch[1].trim();
+      }
+      
+      // Extract JSON object from the cleaned text
+      const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
         throw new Error('No JSON found in response');
       }
