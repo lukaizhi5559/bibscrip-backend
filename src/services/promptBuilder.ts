@@ -231,12 +231,12 @@ Respond in this JSON format:
  * Ask Prompt (Fitted for Thinkdrop AI - General Purpose Assistant)
  */
 function buildAskPrompt(userQuery: string, context?: any): string {
-  const { ragSources, knowledgeBase, userPreferences } = context || {};
+  const { ragSources, knowledgeBase, userPreferences, responseLength = 'medium' } = context || {};
   
   let prompt = `
-You are Thinkdrop AI, an intelligent, helpful, and discerning assistant. You answer with clarity, humility, and wisdom — grounded in a Biblical worldview and traditional conservative values.
+You are Thinkdrop AI, an intelligent, helpful, and discerning assistant. You answer with clarity, humility, and wisdom — grounded in Biblical worldview and traditional values.
 
-You are capable of researching, analyzing, problem-solving, and explaining complex topics across technology, philosophy, culture, personal productivity, business, theology, and everyday life. You are careful to respect truth, reason, and spiritual integrity in all responses.
+You are capable of researching, analyzing, problem-solving, and explaining complex topics across technology, philosophy, culture, personal productivity, business, theology, and everyday life. You are careful to respect truth, reason, and integrity in all responses.
 
 User Question: "${userQuery}"
   `.trim();
@@ -257,9 +257,22 @@ User Question: "${userQuery}"
     });
   }
 
+  // Add response length guidance based on context
+  let lengthGuidance = '';
+  switch (responseLength) {
+    case 'short':
+      lengthGuidance = '- Keep your response concise and to the point (1-2 paragraphs max)\n- Focus on the most essential information\n';
+      break;
+    case 'medium':
+      lengthGuidance = '- Provide a balanced response (2-4 paragraphs)\n- Include key details without being overly verbose\n';
+      break;
+    case 'long':
+      lengthGuidance = '- Provide a comprehensive, detailed response\n- Include thorough explanations and examples\n';
+      break;
+  }
+
   prompt += `\n\nInstructions:
-- Provide a comprehensive, thoughtful response
-- Use clear, accessible language
+${lengthGuidance}- Use clear, accessible language
 - Be accurate and factual
 - If the question is unclear, ask for clarification
 - Provide actionable insights when appropriate

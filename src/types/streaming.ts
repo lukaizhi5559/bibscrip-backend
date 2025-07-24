@@ -107,6 +107,7 @@ export interface LLMStreamRequest {
     maxTokens?: number;
     stream?: boolean;
     taskType?: string;
+    responseLength?: 'short' | 'medium' | 'long'; // Control response length
   };
 }
 

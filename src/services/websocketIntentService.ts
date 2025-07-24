@@ -24,7 +24,11 @@ export interface WebSocketIntentResult {
     confidence: number;
     reasoning?: string;
   }>;
-  entities?: string[];
+  entities?: Array<{
+    value: string;
+    type: string;
+    normalized_value?: string | null;
+  }>;
   requiresMemoryAccess?: boolean;
   requiresExternalData?: boolean;
   suggestedResponse?: string;
@@ -381,6 +385,14 @@ User Message: "${message}"${historyContext}
 - \`suggestedResponse\`: A brief, actionable response that describes what should be done based on the detected intents
 - \`sourceText\`: The exact original user message (for reference and context)
 
+Analyze the following message and extract relevant entities. For each entity, return a JSON object with:
+- \`value\`: the original phrase in the text
+- \`type\`: the semantic category, such as: ["time", "date", "date_range", "event", "person", "channel", "location", "object", "task", "command"]
+- \`normalized_value\`: the standard format, if applicable:
+- For times: use 24-hour format like "15:00"
+- For dates or date ranges: use ISO format "YYYY-MM-DD"
+- For names, events, tasks, or other strings: use 'null'
+
 Analyze the message and respond in this exact JSON format:
 {
   "chainOfThought": {
@@ -406,7 +418,13 @@ Analyze the message and respond in this exact JSON format:
     }
   ],
   "primaryIntent": "command",
-  "entities": ["appointment", "3pm", "next week", "email", "wife"],
+  "entities": [
+    { "value": "appointment", "type": "event", "normalized_value": null },
+    { "value": "3pm", "type": "time", "normalized_value": "15:00" },
+    { "value": "next week", "type": "date_range", "normalized_value": "2025-07-28" },
+    { "value": "email", "type": "channel", "normalized_value": null },
+    { "value": "wife", "type": "person", "normalized_value": null }
+  ],
   "requiresMemoryAccess": true,
   "requiresExternalData": false,
   "captureScreen": false,
@@ -465,7 +483,24 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
         throw new Error(`Invalid primary intent type: ${parsed.primaryIntent}`);
       }
 
-      logger.info(`Intent classification completed: ${parsed.primaryIntent} with ${parsed.intents.length} total intents`);
+      // Validate and normalize entities
+      const normalizedEntities = (parsed.entities || []).map((entity: any) => {
+        // Handle both string entities and object entities with value/type/normalized_value
+        if (typeof entity === 'string') {
+          return { value: entity, type: 'unknown', normalized_value: null };
+        } else if (entity && typeof entity === 'object' && entity.value) {
+          return {
+            value: entity.value,
+            type: entity.type || 'unknown',
+            normalized_value: entity.normalized_value || null
+          };
+        } else {
+          logger.warn('Invalid entity format, skipping:', entity);
+          return null;
+        }
+      }).filter(Boolean); // Remove null entries
+
+      logger.info(`Intent classification completed: ${parsed.primaryIntent} with ${parsed.intents.length} total intents and ${normalizedEntities.length} entities`);
 
     // Generate default suggestedResponse if not provided by LLM
     const defaultSuggestedResponse = parsed.suggestedResponse || 
@@ -481,7 +516,7 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
         reasoning: intentObj.reasoning || ''
       })),
       primaryIntent: parsed.primaryIntent,
-      entities: parsed.entities || [],
+      entities: normalizedEntities,
       requiresMemoryAccess: parsed.requiresMemoryAccess || false,
       requiresExternalData: parsed.requiresExternalData || false,
       captureScreen: parsed.captureScreen || false,
@@ -647,7 +682,7 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
     return {
       intents: detectedIntents,
       primaryIntent,
-      entities: [message],
+      entities: [{ value: message, type: 'text', normalized_value: null }],
       requiresMemoryAccess,
       requiresExternalData,
       captureScreen,

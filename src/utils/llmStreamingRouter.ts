@@ -35,10 +35,12 @@ export class LLMStreamingRouter extends LLMRouter {
   ): Promise<LLMStreamResult> {
     const { prompt: userPrompt, provider: preferredProvider, options = {} } = request;
     
-    // Build Thinkdrop AI branded prompt with proper context
+    // Build Thinkdrop AI branded prompt with proper context and response length controls
     const enhancedPrompt = buildPrompt('ask', {
       userQuery: userPrompt,
-      context: {}
+      context: {
+        responseLength: options.responseLength || 'short' // Default to short for better UX
+      }
     });
     
     const streamId = `stream_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;

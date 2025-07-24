@@ -166,7 +166,11 @@ export interface WebSocketMemoryPayload {
     confidence: number;
     reasoning?: string;
   }>;
-  entities: string[];
+  entities: Array<{
+    value: string;
+    type: string;
+    normalized_value?: string | null;
+  }> | string[]; // Support both new entity objects and legacy string arrays
   requires_memory_access: boolean;
   requires_external_data: boolean;
   suggested_response?: string;

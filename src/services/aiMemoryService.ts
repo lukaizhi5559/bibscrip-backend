@@ -87,11 +87,29 @@ export class AIMemoryService {
       // Insert entities
       const entities: MemoryEntity[] = [];
       for (const entity of payload.entities) {
+        // Handle both string entities (legacy) and object entities with value/type/normalized_value
+        let entityValue: string;
+        let entityType: string;
+        let normalizedValue: string | null;
+        
+        if (typeof entity === 'string') {
+          entityValue = entity;
+          entityType = 'unknown';
+          normalizedValue = null;
+        } else if (entity && typeof entity === 'object' && entity.value) {
+          entityValue = entity.value;
+          entityType = entity.type || 'unknown';
+          normalizedValue = entity.normalized_value || null;
+        } else {
+          logger.warn('Invalid entity format in WebSocket payload, skipping:', entity);
+          continue;
+        }
+        
         const entityResult = await client.query(`
-          INSERT INTO memory_entities (memory_id, entity)
-          VALUES ($1, $2)
+          INSERT INTO memory_entities (memory_id, entity, entity_type, normalized_value)
+          VALUES ($1, $2, $3, $4)
           RETURNING *
-        `, [memory.id, entity]);
+        `, [memory.id, entityValue, entityType, normalizedValue]);
         
         entities.push(entityResult.rows[0]);
       }
