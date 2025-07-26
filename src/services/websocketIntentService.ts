@@ -385,12 +385,16 @@ User Message: "${message}"${historyContext}
 - \`suggestedResponse\`: A brief, actionable response that describes what should be done based on the detected intents
 - \`sourceText\`: The exact original user message (for reference and context)
 
+**CURRENT DATE CONTEXT:**
+Today is ${new Date().toISOString().split('T')[0]} (${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })})
+Current time: ${new Date().toLocaleTimeString('en-US', { hour12: false })}
+
 Analyze the following message and extract relevant entities. For each entity, return a JSON object with:
 - \`value\`: the original phrase in the text
 - \`type\`: the semantic category, such as: ["time", "date", "date_range", "event", "person", "channel", "location", "object", "task", "command"]
 - \`normalized_value\`: the standard format, if applicable:
 - For times: use 24-hour format like "15:00"
-- For dates or date ranges: use ISO format "YYYY-MM-DD"
+- For dates or date ranges: use ISO format "YYYY-MM-DD" (calculate relative to current date above)
 - For names, events, tasks, or other strings: use 'null'
 
 Analyze the message and respond in this exact JSON format:
