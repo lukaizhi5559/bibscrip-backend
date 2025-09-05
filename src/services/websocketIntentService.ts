@@ -18,6 +18,8 @@ export type WebSocketIntentType =
   | 'question'
   | 'command';
 
+export type QueryType = 'GENERAL' | 'MEMORY' | 'COMMAND';
+
 export interface WebSocketIntentResult {
   intents: Array<{
     intent: WebSocketIntentType;
@@ -35,6 +37,7 @@ export interface WebSocketIntentResult {
   sourceText?: string;
   primaryIntent: WebSocketIntentType;
   captureScreen?: boolean;
+  queryType: QueryType;
 }
 
 export interface WebSocketIntentOptions {
@@ -42,12 +45,83 @@ export interface WebSocketIntentOptions {
   timeout?: number;
   context?: {
     conversationHistory?: Array<{ role: string; content: string }>;
+    recentContext?: Array<{ role: string; content: string }>; // Frontend-provided recent context
     userPreferences?: Record<string, any>;
     sessionContext?: Record<string, any>;
   };
 }
 
 export class WebSocketIntentService {
+  /**
+   * Classify query type using fast keyword-based classification
+   */
+  private async classifyQueryType(message: string): Promise<QueryType> {
+    return this.classifyQueryTypeKeywords(message);
+  }
+
+  /**
+   * Fast keyword-based query type classification with improved accuracy
+   */
+  private classifyQueryTypeKeywords(message: string): QueryType {
+    const lowerMessage = message.toLowerCase().trim();
+    
+    // MEMORY patterns - more specific phrases to reduce false positives
+    const memoryPatterns = [
+      'have we talked', 'have we discussed', 'did we talk', 'did we discuss',
+      'we talked about', 'we discussed', 'remember when', 'you said',
+      'you mentioned', 'we covered', 'mentioned before', 'talked about',
+      'our conversation', 'last time we', 'previously discussed'
+    ];
+    
+    // COMMAND patterns - more specific action phrases
+    const commandPatterns = [
+      'create a', 'create an', 'make a', 'make an', 'build a', 'build an',
+      'generate a', 'send an', 'send a', 'email', 'call', 'open',
+      'close', 'start', 'stop', 'run', 'execute', 'launch',
+      'take screenshot', 'take a screenshot', 'capture', 'save',
+      'delete', 'remove', 'set up', 'schedule', 'remind me',
+      'notify', 'help me', 'can you', 'do this'
+    ];
+    
+    // Exclude patterns that are often conversational, not commands
+    const conversationalExclusions = [
+      'before we start', 'let me explain', 'let me tell', 'let me show',
+      'before we begin', 'first let me'
+    ];
+    
+    // Check if message contains conversational exclusions
+    for (const exclusion of conversationalExclusions) {
+      if (lowerMessage.includes(exclusion)) {
+        return 'GENERAL';
+      }
+    }
+    
+    // Check for MEMORY patterns first (more specific)
+    for (const pattern of memoryPatterns) {
+      if (lowerMessage.includes(pattern)) {
+        return 'MEMORY';
+      }
+    }
+    
+    // Check for COMMAND patterns
+    for (const pattern of commandPatterns) {
+      if (lowerMessage.includes(pattern)) {
+        return 'COMMAND';
+      }
+    }
+    
+    // Special case: avoid false positives for "before" in non-memory contexts
+    if (lowerMessage.includes('before') && 
+        (lowerMessage.includes('we discussed') || 
+         lowerMessage.includes('we talked') ||
+         lowerMessage.includes('last time'))) {
+      return 'MEMORY';
+    }
+    
+    // Default to GENERAL
+    return 'GENERAL';
+  }
+
   /**
    * Evaluate the intent of a WebSocket message
    */
@@ -66,6 +140,14 @@ export class WebSocketIntentService {
     });
 
     try {
+      // First classify the query type using LLM
+      const queryType = await this.classifyQueryType(message);
+      
+      logger.info('🔍 Query type classified', {
+        message: message.substring(0, 100),
+        queryType
+      });
+      
       const prompt = await this.buildWebSocketIntentPrompt(message, options.context);
       
       logger.info('📝 Built LLM prompt', {
@@ -73,7 +155,7 @@ export class WebSocketIntentService {
         message
       });
       
-      const result = await llmStreamingRouter.processPromptWithStreaming(
+      const llmResult = await llmStreamingRouter.processPromptWithStreaming(
         {
           prompt,
           provider: options.provider || 'openai',
@@ -92,21 +174,21 @@ export class WebSocketIntentService {
       );
 
       logger.info('🤖 LLM response received', {
-        provider: result.provider,
-        hasFullText: !!result.fullText,
-        textLength: result.fullText?.length || 0,
-        processingTime: result.processingTime,
+        provider: llmResult.provider,
+        hasFullText: !!llmResult.fullText,
+        textLength: llmResult.fullText?.length || 0,
+        processingTime: llmResult.processingTime,
         message
       });
 
-      if (result.fullText) {
+      if (llmResult.fullText) {
         try {
           logger.info('🔄 Attempting to parse LLM response', {
-            fullText: result.fullText,
+            fullText: llmResult.fullText,
             message
           });
           
-          const parsed = JSON.parse(result.fullText);
+          const parsed = JSON.parse(llmResult.fullText);
           
           logger.info('✅ Successfully parsed LLM intent result', {
             primaryIntent: parsed.primaryIntent,
@@ -116,20 +198,27 @@ export class WebSocketIntentService {
             message
           });
           
-          return parsed as WebSocketIntentResult;
+          // Add queryType to the parsed result
+          const intentResult = {
+            ...parsed,
+            queryType
+          } as WebSocketIntentResult;
+          
+          return intentResult;
         } catch (parseError) {
           logger.warn('❌ Failed to parse LLM intent response, using fallback', {
             error: parseError instanceof Error ? parseError.message : String(parseError),
-            fullText: result.fullText,
+            fullText: llmResult.fullText,
             message
           });
           
-          const fallbackResult = this.fallbackIntentClassification(message);
+          const fallbackResult = this.fallbackIntentClassification(message, queryType);
           
           logger.info('🔄 Fallback classification result', {
             primaryIntent: fallbackResult.primaryIntent,
             intentsCount: fallbackResult.intents?.length || 0,
             intents: fallbackResult.intents?.map((i: any) => `${i.intent}(${i.confidence})`) || [],
+            queryType: fallbackResult.queryType,
             message
           });
           
@@ -137,17 +226,18 @@ export class WebSocketIntentService {
         }
       } else {
         logger.warn('❌ LLM intent classification failed (no fullText), using fallback', {
-          provider: result.provider,
-          processingTime: result.processingTime,
+          provider: llmResult.provider,
+          processingTime: llmResult.processingTime,
           message
         });
         
-        const fallbackResult = this.fallbackIntentClassification(message);
+        const fallbackResult = this.fallbackIntentClassification(message, queryType);
         
         logger.info('🔄 Fallback classification result', {
           primaryIntent: fallbackResult.primaryIntent,
           intentsCount: fallbackResult.intents?.length || 0,
           intents: fallbackResult.intents?.map((i: any) => `${i.intent}(${i.confidence})`) || [],
+          queryType: fallbackResult.queryType,
           message
         });
         
@@ -159,12 +249,14 @@ export class WebSocketIntentService {
         message
       });
       
-      const fallbackResult = this.fallbackIntentClassification(message);
+      const queryType = await this.classifyQueryType(message);
+      const fallbackResult = this.fallbackIntentClassification(message, queryType);
       
       logger.info('🔄 Fallback classification result', {
         primaryIntent: fallbackResult.primaryIntent,
         intentsCount: fallbackResult.intents?.length || 0,
         intents: fallbackResult.intents?.map((i: any) => `${i.intent}(${i.confidence})`) || [],
+        queryType: fallbackResult.queryType,
         message
       });
       
@@ -178,8 +270,12 @@ export class WebSocketIntentService {
    */
   private async buildWebSocketIntentPrompt(message: string, context?: Record<string, any>): Promise<string> {
     const conversationHistory = context?.conversationHistory || [];
-    const historyContext = conversationHistory.length > 0 
-      ? `\n\nConversation History:\n${conversationHistory.map((h: any) => `${h.role}: ${h.content}`).join('\n')}`
+    const recentContext = context?.recentContext || [];
+    
+    // Combine recent context from frontend with conversation history
+    const allContext = [...recentContext, ...conversationHistory];
+    const historyContext = allContext.length > 0 
+      ? `\n\nConversation History:\n${allContext.map((h: any) => `${h.role}: ${h.content}`).join('\n')}`
       : '';
 
     // Get SmartPromptBuilder contextual enhancements
@@ -445,7 +541,7 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
   /**
    * Parse LLM response to extract intent classification
    */
-  private parseIntentResponse(response: string, originalMessage: string): WebSocketIntentResult {
+  private parseIntentResponse(response: string, originalMessage: string, queryType: QueryType): WebSocketIntentResult {
     try {
       // Try to extract JSON from the response, handling markdown code blocks
       let jsonText = response;
@@ -524,19 +620,20 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
       requiresMemoryAccess: parsed.requiresMemoryAccess || false,
       requiresExternalData: parsed.requiresExternalData || false,
       captureScreen: parsed.captureScreen || false,
+      queryType,
       suggestedResponse: defaultSuggestedResponse,
       sourceText: sourceText
     };
   } catch (error) {
     logger.warn('Failed to parse intent response, using fallback:', error as any);
-    return this.fallbackIntentClassification(originalMessage);
+    return this.fallbackIntentClassification(originalMessage, queryType);
   }
   }
 
   /**
    * Fallback rule-based intent classification when LLM fails
    */
-  private fallbackIntentClassification(message: string): WebSocketIntentResult {
+  private fallbackIntentClassification(message: string, queryType: QueryType): WebSocketIntentResult {
     const lowerMessage = message.toLowerCase().trim();
     const detectedIntents: Array<{ intent: WebSocketIntentType; confidence: number; reasoning: string }> = [];
     
@@ -690,6 +787,7 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
       requiresMemoryAccess,
       requiresExternalData,
       captureScreen,
+      queryType,
       suggestedResponse: detectedIntents.length > 1 
         ? 'Handle multiple intents: ' + detectedIntents.map(i => i.intent).join(', ')
         : 'Handle ' + primaryIntent,
@@ -701,7 +799,8 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
    * Quick intent classification without LLM (for performance)
    */
   async quickClassifyIntent(message: string): Promise<WebSocketIntentType> {
-    const result = this.fallbackIntentClassification(message);
+    const queryType = await this.classifyQueryType(message);
+    const result = this.fallbackIntentClassification(message, queryType);
     return result.primaryIntent;
   }
 }

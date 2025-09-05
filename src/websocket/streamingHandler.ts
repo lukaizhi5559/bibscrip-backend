@@ -159,6 +159,29 @@ export class StreamingHandler {
         streamingMetadata
       );
 
+      // Ensure llm_stream_end is always sent (backup mechanism)
+      logger.info(`✅ LLM streaming completed for ${requestId}, sending explicit end signal`);
+      if (this.ws.readyState === WebSocket.OPEN) {
+        this.send({
+          id: `${requestId}_stream_end`,
+          type: StreamingMessageType.LLM_STREAM_END,
+          payload: {
+            fullText: result.fullText,
+            provider: result.provider,
+            processingTime: result.processingTime,
+            tokenUsage: result.tokenUsage,
+            completed: true
+          },
+          timestamp: Date.now(),
+          parentId: requestId,
+          metadata: {
+            ...streamingMetadata,
+            provider: result.provider,
+            source: 'backend_llm'
+          }
+        });
+      }
+
       // Add to conversation history
       this.conversationContext.conversationHistory.push({
         id: requestId,
@@ -512,6 +535,7 @@ export class StreamingHandler {
           requiresMemoryAccess: intentResult.requiresMemoryAccess,
           requiresExternalData: intentResult.requiresExternalData,
           captureScreen: intentResult.captureScreen, // Include screen capture flag
+          queryType: intentResult.queryType, // Add queryType for frontend routing
           suggestedResponse: intentResult.suggestedResponse,
           sourceText: intentResult.sourceText
         },
@@ -620,9 +644,48 @@ export class StreamingHandler {
     const historyContext = conversationHistory.length > 0 
       ? `\n\nRecent Conversation History:\n${conversationHistory.slice(-5).map((h: any) => `${h.role}: ${h.content}`).join('\n')}`
       : '';
+
+    // Get queryType from intent classification to provide appropriate response guidance
+    let queryTypeGuidance = '';
+    try {
+      const intentResult = await websocketIntentService.evaluateIntent(message);
+      const queryType = intentResult.queryType;
+      
+      switch (queryType) {
+        case 'MEMORY':
+          queryTypeGuidance = `
+**MEMORY QUERY DETECTED**: The user is asking about past conversations or stored information.
+RESPOND EXACTLY LIKE THIS: "Sure thing! Let me check our memories to see if we've discussed [TOPIC] before. Just a moment while I look that up."
+- Keep it SHORT and CONCISE
+- NO additional explanations or follow-up questions
+- NEVER say "We haven't discussed that" or "I don't recall"`;
+          break;
+        case 'COMMAND':
+          queryTypeGuidance = `
+**COMMAND QUERY DETECTED**: The user wants you to perform an action or task.
+RESPOND EXACTLY LIKE THIS: "Got it! I'll take care of that right away."
+- Keep it SHORT and ACTION-ORIENTED
+- NO explanations or asking for permission
+- NEVER say "I can't do that"`;
+          break;
+        case 'GENERAL':
+        default:
+          queryTypeGuidance = `
+**GENERAL QUERY DETECTED**: The user is asking for information, advice, or casual conversation.
+- Provide helpful, informative responses
+- Be conversational and engaging`;
+          break;
+      }
+    } catch (error) {
+      logger.warn('Failed to get queryType for prompt guidance, using default', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
   
     return `
   You are **Thinkdrop AI**, a proactive, emotionally intelligent personal assistant.
+  
+  ${queryTypeGuidance}
   
   You *can directly perform* the following actions **without asking the user to create agents**:
   - 📸 **Take screenshots** of the desktop, browser, or specific regions
