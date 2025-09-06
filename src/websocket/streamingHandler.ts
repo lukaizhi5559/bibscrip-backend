@@ -111,13 +111,8 @@ export class StreamingHandler {
         ...metadata
       };
 
-      // Perform intent classification using WebSocketIntentService (single source of truth)
-      logger.info(`🎯 Starting intent classification for request ${requestId}`);
-      
-      // Run intent classification in parallel (don't await to avoid blocking LLM streaming)
-      this.evaluateIntentInParallel(requestId, request.prompt).catch((error: any) => {
-        logger.error(`Failed to evaluate intent for request ${requestId}:`, error);
-      });
+      // Start intent classification in parallel (don't await - let it run alongside streaming)
+      const intentPromise = this.evaluateIntentInBackground(requestId, request.prompt);
       
       // Build Thinkdrop AI context-aware prompt
       logger.info(`🔧 Building Thinkdrop AI context-aware prompt for request ${requestId}`);
@@ -179,6 +174,47 @@ export class StreamingHandler {
             provider: result.provider,
             source: 'backend_llm'
           }
+        });
+      }
+
+      // Wait for intent classification to complete and send results
+      logger.info(`🎯 Waiting for intent classification to complete for request ${requestId}`);
+      try {
+        const intentResult = await intentPromise;
+        
+        if (intentResult) {
+          // Send intent classification results to client after streaming completes
+          this.send({
+            id: `${requestId}_intent`,
+            type: StreamingMessageType.INTENT_CLASSIFICATION,
+            payload: {
+              intents: intentResult.intents,
+              primaryIntent: intentResult.primaryIntent,
+              entities: intentResult.entities,
+              requiresMemoryAccess: intentResult.requiresMemoryAccess,
+              requiresExternalData: intentResult.requiresExternalData,
+              captureScreen: intentResult.captureScreen,
+              queryType: intentResult.queryType,
+              suggestedResponse: intentResult.suggestedResponse,
+              sourceText: intentResult.sourceText
+            },
+            timestamp: Date.now(),
+            metadata: {
+              source: 'intent_evaluation',
+              confidence: intentResult.intents[0]?.confidence || 0
+            }
+          });
+          
+          logger.info(`📤 Intent classification sent after streaming for request ${requestId}:`, {
+            primaryIntent: intentResult.primaryIntent,
+            totalIntents: intentResult.intents.length,
+            intents: intentResult.intents.map(i => `${i.intent}(${i.confidence})`)
+          });
+        }
+      } catch (error) {
+        logger.error(`Failed to complete intent classification for request ${requestId}:`, {
+          error,
+          message: error instanceof Error ? error.message : String(error)
         });
       }
 
@@ -511,7 +547,39 @@ export class StreamingHandler {
   }
 
   /**
-   * Evaluate intent in parallel without blocking LLM streaming
+   * Evaluate intent in background while streaming runs in parallel
+   * Returns the intent result to be sent after streaming completes
+   */
+  private async evaluateIntentInBackground(requestId: string, prompt: string): Promise<WebSocketIntentResult | null> {
+    try {
+      logger.info(`🔍 Starting background intent evaluation for: "${prompt.substring(0, 100)}..."`);
+      
+      const intentResult = await websocketIntentService.evaluateIntent(prompt);
+      
+      logger.info(`✅ Intent evaluation completed in background:`, {
+        primaryIntent: intentResult.primaryIntent,
+        totalIntents: intentResult.intents.length
+      });
+      
+      // Store intent classification in AI Memory (async, non-blocking)
+      this.storeIntentMemory(requestId, prompt, intentResult).catch((memoryError: any) => {
+        logger.error(`⚠️ Failed to store intent memory for ${requestId}:`, memoryError);
+        // Memory storage failure doesn't affect the main flow
+      });
+      
+      return intentResult;
+    } catch (intentError) {
+      logger.error(`❌ Background intent evaluation failed for request ${requestId}:`, {
+        error: intentError,
+        message: (intentError as any)?.message,
+        stack: (intentError as any)?.stack
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Evaluate intent in parallel without blocking LLM streaming (deprecated - keeping for reference)
    */
   private async evaluateIntentInParallel(requestId: string, prompt: string): Promise<void> {
     try {
@@ -645,42 +713,13 @@ export class StreamingHandler {
       ? `\n\nRecent Conversation History:\n${conversationHistory.slice(-5).map((h: any) => `${h.role}: ${h.content}`).join('\n')}`
       : '';
 
-    // Get queryType from intent classification to provide appropriate response guidance
-    let queryTypeGuidance = '';
-    try {
-      const intentResult = await websocketIntentService.evaluateIntent(message);
-      const queryType = intentResult.queryType;
-      
-      switch (queryType) {
-        case 'MEMORY':
-          queryTypeGuidance = `
-**MEMORY QUERY DETECTED**: The user is asking about past conversations or stored information.
-RESPOND EXACTLY LIKE THIS: "Sure thing! Let me check our memories to see if we've discussed [TOPIC] before. Just a moment while I look that up."
-- Keep it SHORT and CONCISE
-- NO additional explanations or follow-up questions
-- NEVER say "We haven't discussed that" or "I don't recall"`;
-          break;
-        case 'COMMAND':
-          queryTypeGuidance = `
-**COMMAND QUERY DETECTED**: The user wants you to perform an action or task.
-RESPOND EXACTLY LIKE THIS: "Got it! I'll take care of that right away."
-- Keep it SHORT and ACTION-ORIENTED
-- NO explanations or asking for permission
-- NEVER say "I can't do that"`;
-          break;
-        case 'GENERAL':
-        default:
-          queryTypeGuidance = `
-**GENERAL QUERY DETECTED**: The user is asking for information, advice, or casual conversation.
-- Provide helpful, informative responses
-- Be conversational and engaging`;
-          break;
-      }
-    } catch (error) {
-      logger.warn('Failed to get queryType for prompt guidance, using default', {
-        error: error instanceof Error ? error.message : String(error)
-      });
-    }
+    // Use basic positive response guidance without pre-classifying intent
+    const queryTypeGuidance = `
+**IMMEDIATE RESPONSE GUIDANCE**: 
+RESPOND EXACTLY LIKE THIS: "I'm on it..." or "Let me help you with that..."
+- Keep it SHORT and POSITIVE
+- Start working immediately
+- NO explanations about what you're doing`;
   
     return `
   You are **Thinkdrop AI**, a proactive, emotionally intelligent personal assistant.
