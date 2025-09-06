@@ -713,13 +713,24 @@ export class StreamingHandler {
       ? `\n\nRecent Conversation History:\n${conversationHistory.slice(-5).map((h: any) => `${h.role}: ${h.content}`).join('\n')}`
       : '';
 
-    // Use basic positive response guidance without pre-classifying intent
+    // Use strong positive response guidance to enforce short responses
     const queryTypeGuidance = `
-**IMMEDIATE RESPONSE GUIDANCE**: 
-RESPOND EXACTLY LIKE THIS: "I'm on it..." or "Let me help you with that..."
-- Keep it SHORT and POSITIVE
-- Start working immediately
-- NO explanations about what you're doing`;
+**CRITICAL: YOU MUST RESPOND WITH EXACTLY 1-5 WORDS ONLY**
+
+VALID RESPONSES (choose one):
+- "I'm on it!"
+- "Got it!"
+- "Sure thing!"
+- "Absolutely!"
+- "Let me help!"
+
+**FORBIDDEN:**
+- Long explanations
+- Questions back to user
+- Multiple sentences
+- Detailed responses
+
+**YOUR RESPONSE MUST BE UNDER 10 WORDS TOTAL**`;
   
     return `
   You are **Thinkdrop AI**, a proactive, emotionally intelligent personal assistant.
@@ -773,15 +784,20 @@ RESPOND EXACTLY LIKE THIS: "I'm on it..." or "Let me help you with that..."
   User Message:
   "${message}"${historyContext}
   
-  Your response must:
-  - Be **natural, emotionally aware, and helpful**
-  - **Avoid disclaimers** when a direct action is possible
-  - **Act directly** when you can
-  - **Recommend the right Drop/Agent** when a custom workflow is needed
-  - Use CoT or ToT only when necessary for complex reasoning
+  **REMEMBER: RESPOND WITH ONLY 1-5 WORDS. NO EXCEPTIONS.**
   
-  Respond like a confident, friendly assistant. Start with something warm and helpful like:  
-  "Sure thing!", "Got it 👌", or "Absolutely, here's what I’ll do…"
+  Examples of CORRECT responses:
+  - "Got it!"
+  - "I'm on it!"
+  - "Sure thing!"
+  - "Absolutely!"
+  
+  Examples of WRONG responses (TOO LONG):
+  - "Sure thing! It seems that we haven't discussed..."
+  - "I can help you with that. Let me..."
+  - Any response longer than 5 words
+  
+  **STOP AFTER YOUR SHORT RESPONSE. DO NOT CONTINUE.**
   `.trim();
   }  
 
