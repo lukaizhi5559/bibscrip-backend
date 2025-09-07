@@ -111,6 +111,15 @@ export class StreamingHandler {
         ...metadata
       };
 
+      // Add current user message to conversation history BEFORE building prompt
+      this.conversationContext.conversationHistory.push({
+        id: requestId,
+        role: 'user',
+        content: request.prompt,
+        timestamp: Date.now(),
+        source: 'text'
+      });
+
       // Start intent classification in parallel (don't await - let it run alongside streaming)
       const intentPromise = this.evaluateIntentInBackground(requestId, request.prompt);
       
@@ -218,15 +227,7 @@ export class StreamingHandler {
         });
       }
 
-      // Add to conversation history
-      this.conversationContext.conversationHistory.push({
-        id: requestId,
-        role: 'user',
-        content: request.prompt,
-        timestamp: Date.now(),
-        source: 'text'
-      });
-
+      // Add assistant response to conversation history
       this.conversationContext.conversationHistory.push({
         id: `${requestId}_response`,
         role: 'assistant',
@@ -709,33 +710,53 @@ export class StreamingHandler {
    */
   private async buildThinkdropAIPrompt(message: string, context?: Record<string, any>): Promise<string> {
     const conversationHistory = context?.conversationHistory || [];
-    const historyContext = conversationHistory.length > 0 
-      ? `\n\nRecent Conversation History:\n${conversationHistory.slice(-5).map((h: any) => `${h.role}: ${h.content}`).join('\n')}`
+    const recentContext = context?.recentContext || [];
+    
+    // Combine recent context from frontend with conversation history
+    const allContext = [...recentContext, ...conversationHistory];
+    const historyContext = allContext.length > 0 
+      ? `\n\nRecent Conversation History:\n${allContext.slice(-8).map((h: any) => `${h.role}: ${h.content}`).join('\n')}`
       : '';
 
-    // Use strong positive response guidance to enforce short responses
-    const queryTypeGuidance = `
-**CRITICAL: YOU MUST RESPOND WITH EXACTLY 1-5 WORDS ONLY**
+    // Enhanced response style with recent context handling
+    const responseGuidance = `
+**RESPONSE INSTRUCTIONS:**
 
-VALID RESPONSES (choose one):
-- "I'm on it!"
-- "Got it!"
-- "Sure thing!"
-- "Absolutely!"
-- "Let me help!"
+STEP 1: Determine if this is asking about:
+- RECENT_CONTEXT: Questions about what was just said/discussed in this conversation (e.g., "what language we just chatted about", "what did I just say", "that thing we mentioned")
+- MEMORY: Past conversations from different sessions, stored preferences, long-term user data
+- ACTION: Commands to do something, create/make/send/schedule/remind/automate
+- GENERAL: Questions about facts, information, explanations, how-to, definitions
 
-**FORBIDDEN:**
-- Long explanations
-- Questions back to user
-- Multiple sentences
-- Detailed responses
+STEP 2: Respond based on type:
 
-**YOUR RESPONSE MUST BE UNDER 10 WORDS TOTAL**`;
+**RECENT_CONTEXT queries** → Answer directly from conversation history:
+CRITICAL: Look at the Recent Conversation History above and provide the EXACT specific details from what was discussed. Quote or reference the specific content, don't give generic responses. NO short responses.
+If the recent conversation doesn't contain relevant information, respond with: "I'll check older memories" or "Let me check the broader context" and then search for related information.
+
+**MEMORY queries** → Short acknowledgment (1-5 words) + retrieve stored info:
+"Checking now!" then provide what was stored from long-term memory
+
+**ACTION queries** → Short confirmation (1-5 words) + do the task:
+"I'm on it!" then execute the action
+
+**GENERAL queries** → Full informational response immediately:
+Answer completely with facts, explanations, details. NO short responses for general questions.
+
+Examples:
+- "What did I just ask?" = RECENT_CONTEXT → "You just asked 'What are the biggest species of ants?' and I provided information about Dinoponera and Camponotus gigas species."
+- "What language we just chatted about?" = RECENT_CONTEXT → Look at conversation history and provide specific details
+- "What did we discuss about frogs?" = RECENT_CONTEXT → If not in recent history: "I'll check older memories" then search broader context
+- "What's my favorite color?" = MEMORY → "Checking now!" + retrieve from stored preferences  
+- "Who's the oldest person?" = GENERAL → Full answer about current oldest person
+- "Remind me about birthdays" = ACTION → "Will do!" + set up reminder
+
+**CRITICAL FOR RECENT_CONTEXT:** Always reference the specific content from the conversation history. Don't say "You asked about X" - say "You asked 'exact question' and I explained [specific details]".`;
   
     return `
   You are **Thinkdrop AI**, a proactive, emotionally intelligent personal assistant.
   
-  ${queryTypeGuidance}
+  ${responseGuidance}
   
   You *can directly perform* the following actions **without asking the user to create agents**:
   - 📸 **Take screenshots** of the desktop, browser, or specific regions
@@ -784,20 +805,11 @@ VALID RESPONSES (choose one):
   User Message:
   "${message}"${historyContext}
   
-  **REMEMBER: RESPOND WITH ONLY 1-5 WORDS. NO EXCEPTIONS.**
-  
-  Examples of CORRECT responses:
-  - "Got it!"
-  - "I'm on it!"
-  - "Sure thing!"
-  - "Absolutely!"
-  
-  Examples of WRONG responses (TOO LONG):
-  - "Sure thing! It seems that we haven't discussed..."
-  - "I can help you with that. Let me..."
-  - Any response longer than 5 words
-  
-  **STOP AFTER YOUR SHORT RESPONSE. DO NOT CONTINUE.**
+  **RESPONSE LENGTH RULES:**
+  - **RECENT_CONTEXT**: Provide full detailed response with specific conversation details
+  - **GENERAL**: Provide full informational response  
+  - **MEMORY**: Short acknowledgment (1-5 words) + then provide retrieved info
+  - **ACTION**: Short confirmation (1-5 words) + then execute the action
   `.trim();
   }  
 

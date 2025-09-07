@@ -18,7 +18,7 @@ export type WebSocketIntentType =
   | 'question'
   | 'command';
 
-export type QueryType = 'GENERAL' | 'MEMORY' | 'COMMAND';
+export type QueryType = 'GENERAL' | 'MEMORY' | 'COMMAND' | 'RECENT_CONTEXT';
 
 export interface WebSocketIntentResult {
   intents: Array<{
@@ -413,10 +413,32 @@ You are an expert intent classifier. Use the following systematic approach:
 - **command**: User is giving a command or instruction to perform an action (e.g., "take a picture", "screenshot this", "capture my screen", "do something")
 
 **Step 3: Determine Query Type**
-Classify the overall query into one of these 3 categories:
-- **MEMORY**: User is asking about past conversations, personal preferences, or stored information
-- **COMMAND**: User wants you to perform an action, task, or execute something  
-- **GENERAL**: User is asking for information, advice, or having casual conversation
+Classify the overall query into one of these 4 categories:
+
+**RECENT_CONTEXT** - Questions about THIS current conversation:
+- "what did I just say/ask/mention"
+- "what were we just talking/chatting about" 
+- "what language/topic we just discussed"
+- "that thing we mentioned/said"
+- "what was my last question"
+- "what did you just tell me about"
+- "go back to what we were discussing"
+- "can you give examples" (when following recent discussion)
+- "tell me more about that"
+- "expand on that"
+- "give me more details"
+
+**MEMORY** - Questions about stored data or past sessions:
+- "what's my favorite color/food/preference"
+- "what did we discuss last week/yesterday"
+- "do you remember when I told you"
+- "what's stored in my profile"
+
+**COMMAND** - Action requests:
+- "take a screenshot", "send an email", "create a reminder"
+
+**GENERAL** - Factual questions or new topics:
+- "what's the weather", "how do I...", "tell me about..."
 
 **Step 4: Chain-of-Thought Analysis**
 For each message, think through:
@@ -424,7 +446,17 @@ For each message, think through:
 2. "Should this information be remembered for future conversations?"
 3. "Is the user asking me to do something, or just sharing information?"
 
-**CRITICAL DISTINCTION - Memory Store vs Question:**
+**CRITICAL DISTINCTION - Recent Context vs Memory vs Question:**
+- **RECENT_CONTEXT**: "what did I just say" → queryType: RECENT_CONTEXT (asking about current conversation)
+- **RECENT_CONTEXT**: "what were we just talking about" → queryType: RECENT_CONTEXT (asking about recent discussion)
+- **RECENT_CONTEXT**: "what language we just chatted about" → queryType: RECENT_CONTEXT (referring to recent discussion)
+- **RECENT_CONTEXT**: "that thing we mentioned" → queryType: RECENT_CONTEXT (referencing recent conversation)
+- **RECENT_CONTEXT**: "what did I just ask" → queryType: RECENT_CONTEXT (asking about recent question)
+- **memory_retrieve**: "what's my favorite color" → queryType: MEMORY (asking for stored preference)
+- **memory_retrieve**: "what did we discuss last week" → queryType: MEMORY (asking about past session)
+- **question**: "what's the weather like" → queryType: GENERAL (asking for information)
+
+**Memory Store vs Question:**
 - **memory_store**: "I need a new car title" (sharing a personal need/task)
 - **question**: "How do I get a new car title?" (asking for information)
 - **memory_store**: "I lost my car keys" (sharing a personal problem)
@@ -467,6 +499,12 @@ Step 1 Analysis: User is giving a direct instruction
 Step 2 Reasoning: Command to perform an action
 Step 3 CoT: (1) User wants an action performed (2) No personal info to store (3) Direct command
 Classification: command (confidence: 0.95)
+
+**Example 7: "what were we just talking about"**
+Step 1 Analysis: User is asking about recent conversation content
+Step 2 Reasoning: This refers to the current conversation context, not stored memory
+Step 3 CoT: (1) User wants to recall recent discussion (2) Information is in current conversation (3) Not asking for stored data
+Classification: question (confidence: 0.9), queryType: RECENT_CONTEXT
 
 **Self-Consistency Check:**
 Before finalizing, ask yourself:
