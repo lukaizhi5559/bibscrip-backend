@@ -121,12 +121,20 @@ export class StreamingHandler {
       });
 
       // Start intent classification in parallel (don't await - let it run alongside streaming)
-      const intentPromise = this.evaluateIntentInBackground(requestId, request.prompt);
+      const intentPromise = this.evaluateIntentInBackground(requestId, request.prompt, request.context);
       
       // Build Thinkdrop AI context-aware prompt
       logger.info(`🔧 Building Thinkdrop AI context-aware prompt for request ${requestId}`);
+      logger.info(`📋 Context debug for ${requestId}:`, {
+        internalHistoryCount: this.conversationContext.conversationHistory?.length || 0,
+        frontendContextCount: request.context?.recentContext?.length || 0,
+        internalHistoryPreview: this.conversationContext.conversationHistory?.slice(-2).map(h => `${h.role}: ${h.content.substring(0, 50)}...`) || [],
+        frontendContextPreview: request.context?.recentContext?.slice(-2).map(h => `${h.role}: ${h.content.substring(0, 50)}...`) || []
+      });
+      
       const enhancedPrompt = await this.buildThinkdropAIPrompt(request.prompt, {
         conversationHistory: this.conversationContext.conversationHistory || [],
+        recentContext: request.context?.recentContext || [],
         userId: this.userId,
         sessionId: this.sessionId
       });
@@ -551,11 +559,11 @@ export class StreamingHandler {
    * Evaluate intent in background while streaming runs in parallel
    * Returns the intent result to be sent after streaming completes
    */
-  private async evaluateIntentInBackground(requestId: string, prompt: string): Promise<WebSocketIntentResult | null> {
+  private async evaluateIntentInBackground(requestId: string, prompt: string, context?: any): Promise<WebSocketIntentResult | null> {
     try {
       logger.info(`🔍 Starting background intent evaluation for: "${prompt.substring(0, 100)}..."`);
       
-      const intentResult = await websocketIntentService.evaluateIntent(prompt);
+      const intentResult = await websocketIntentService.evaluateIntent(prompt, { context });
       
       logger.info(`✅ Intent evaluation completed in background:`, {
         primaryIntent: intentResult.primaryIntent,
@@ -714,17 +722,29 @@ export class StreamingHandler {
     
     // Combine recent context from frontend with conversation history
     const allContext = [...recentContext, ...conversationHistory];
+    
+    logger.info(`🔍 [buildThinkdropAIPrompt] Context analysis:`, {
+      conversationHistoryCount: conversationHistory.length,
+      recentContextCount: recentContext.length,
+      allContextCount: allContext.length,
+      contextPreview: allContext.slice(-3).map((h: any) => `${h.role}: ${h.content?.substring(0, 100)}...`)
+    });
+    
     const historyContext = allContext.length > 0 
       ? `\n\nRecent Conversation History:\n${allContext.slice(-8).map((h: any) => `${h.role}: ${h.content}`).join('\n')}`
       : '';
+      
+    if (allContext.length === 0) {
+      logger.warn(`⚠️ [buildThinkdropAIPrompt] No conversation context available for message: ${message.substring(0, 50)}...`);
+    }
 
     // Enhanced response style with recent context handling
     const responseGuidance = `
 **RESPONSE INSTRUCTIONS:**
 
 STEP 1: Determine if this is asking about:
-- RECENT_CONTEXT: Questions about what was just said/discussed in this conversation (e.g., "what language we just chatted about", "what did I just say", "that thing we mentioned")
-- MEMORY: Past conversations from different sessions, stored preferences, long-term user data
+- RECENT_CONTEXT: Questions about what was just said/discussed in this conversation. CRITICAL: Check the Recent Conversation History above first - if the topic was mentioned there, classify as RECENT_CONTEXT
+- MEMORY: Past conversations from different sessions, stored preferences, long-term user data (only when NOT found in recent conversation)
 - ACTION: Commands to do something, create/make/send/schedule/remind/automate
 - GENERAL: Questions about facts, information, explanations, how-to, definitions
 
@@ -734,8 +754,8 @@ STEP 2: Respond based on type:
 CRITICAL: Look at the Recent Conversation History above and provide the EXACT specific details from what was discussed. Quote or reference the specific content, don't give generic responses. NO short responses.
 If the recent conversation doesn't contain relevant information, respond with: "I'll check older memories" or "Let me check the broader context" and then search for related information.
 
-**MEMORY queries** → Short acknowledgment (1-5 words) + retrieve stored info:
-"Checking now!" then provide what was stored from long-term memory
+**MEMORY queries** → ONLY short acknowledgment (1-5 words):
+"Checking now!" or "Looking that up!" - STOP HERE. Do not provide explanations about not having access or suggestions to set up systems.
 
 **ACTION queries** → Short confirmation (1-5 words) + do the task:
 "I'm on it!" then execute the action
@@ -747,9 +767,13 @@ Examples:
 - "What did I just ask?" = RECENT_CONTEXT → "You just asked 'What are the biggest species of ants?' and I provided information about Dinoponera and Camponotus gigas species."
 - "What language we just chatted about?" = RECENT_CONTEXT → Look at conversation history and provide specific details
 - "What did we discuss about frogs?" = RECENT_CONTEXT → If not in recent history: "I'll check older memories" then search broader context
-- "What's my favorite color?" = MEMORY → "Checking now!" + retrieve from stored preferences  
+- "What's my favorite color?" = Check Recent Conversation History first:
+  • If color mentioned recently → RECENT_CONTEXT → "You just mentioned you like blue" or reference specific conversation
+  • If NOT in recent conversation → MEMORY → "Checking now!" (STOP - no additional text)
 - "Who's the oldest person?" = GENERAL → Full answer about current oldest person
 - "Remind me about birthdays" = ACTION → "Will do!" + set up reminder
+
+**CRITICAL FOR MEMORY:** For MEMORY queries, respond with ONLY the acknowledgment phrase. Never explain why you don't have access or suggest alternatives. The system will handle memory retrieval separately.
 
 **CRITICAL FOR RECENT_CONTEXT:** Always reference the specific content from the conversation history. Don't say "You asked about X" - say "You asked 'exact question' and I explained [specific details]".`;
   

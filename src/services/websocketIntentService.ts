@@ -55,14 +55,14 @@ export class WebSocketIntentService {
   /**
    * Classify query type using advanced regex-based classification with 100% accuracy
    */
-  private async classifyQueryType(message: string): Promise<QueryType> {
-    return this.classifyQueryTypeKeywords(message);
+  private async classifyQueryType(message: string, context?: any): Promise<QueryType> {
+    return this.classifyQueryTypeKeywords(message, context);
   }
 
   /**
    * Advanced regex-based query type classification with weighted scoring for near 100% accuracy
    */
-  private classifyQueryTypeKeywords(message: string): QueryType {
+  private classifyQueryTypeKeywords(message: string, context?: any): QueryType {
     const text = message.trim();
     const lower = text.toLowerCase();
 
@@ -213,7 +213,7 @@ export class WebSocketIntentService {
 
     try {  
       // First classify the query type using LLM
-      const queryType = await this.classifyQueryType(message);
+      const queryType = await this.classifyQueryType(message, options.context);
       
       logger.info('🔍 Query type classified', {
         message: message.substring(0, 100),
@@ -315,7 +315,7 @@ export class WebSocketIntentService {
         message
       });
       
-      const queryType = await this.classifyQueryType(message);
+      const queryType = await this.classifyQueryType(message, options.context);
       const fallbackResult = this.fallbackIntentClassification(message, queryType);
       
       logger.info('🔄 Fallback classification result', {
@@ -427,9 +427,11 @@ Classify the overall query into one of these 4 categories:
 - "tell me more about that"
 - "expand on that"
 - "give me more details"
+- "what's my favorite X" (when X was recently mentioned in current conversation)
+- Follow-up questions about topics just discussed
 
 **MEMORY** - Questions about stored data or past sessions:
-- "what's my favorite color/food/preference"
+- "what's my favorite color/food/preference" (when NOT recently discussed)
 - "what did we discuss last week/yesterday"
 - "do you remember when I told you"
 - "what's stored in my profile"
@@ -452,7 +454,11 @@ For each message, think through:
 - **RECENT_CONTEXT**: "what language we just chatted about" → queryType: RECENT_CONTEXT (referring to recent discussion)
 - **RECENT_CONTEXT**: "that thing we mentioned" → queryType: RECENT_CONTEXT (referencing recent conversation)
 - **RECENT_CONTEXT**: "what did I just ask" → queryType: RECENT_CONTEXT (asking about recent question)
-- **memory_retrieve**: "what's my favorite color" → queryType: MEMORY (asking for stored preference)
+- **RECENT_CONTEXT**: "what's my favorite color" → queryType: RECENT_CONTEXT (when color was just mentioned in current conversation)
+- **memory_retrieve**: "what's my favorite color" → queryType: MEMORY (when color was NOT recently discussed, asking for stored preference)
+
+**CONTEXT-AWARE CLASSIFICATION RULE:**
+Before classifying "what's my X" questions as MEMORY, check if X was recently mentioned in the current conversation. If yes, classify as RECENT_CONTEXT instead.
 - **memory_retrieve**: "what did we discuss last week" → queryType: MEMORY (asking about past session)
 - **question**: "what's the weather like" → queryType: GENERAL (asking for information)
 
@@ -909,8 +915,8 @@ Identify ALL applicable intents with individual confidence scores. The primaryIn
   /**
    * Quick intent classification without LLM (for performance)
    */
-  async quickClassifyIntent(message: string): Promise<WebSocketIntentType> {
-    const queryType = await this.classifyQueryType(message);
+  async quickClassifyIntent(message: string, context?: any): Promise<WebSocketIntentType> {
+    const queryType = await this.classifyQueryType(message, context);
     const result = this.fallbackIntentClassification(message, queryType);
     return result.primaryIntent;
   }

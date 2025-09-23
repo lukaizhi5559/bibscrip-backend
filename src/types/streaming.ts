@@ -109,6 +109,12 @@ export interface LLMStreamRequest {
     taskType?: string;
     responseLength?: 'short' | 'medium' | 'long'; // Control response length
   };
+  context?: {
+    conversationHistory?: Array<{ role: string; content: string; timestamp?: number }>;
+    recentContext?: Array<{ role: string; content: string; timestamp?: number }>;
+    sessionId?: string;
+    userId?: string;
+  };
 }
 
 export interface LLMStreamChunk {
