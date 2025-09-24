@@ -62,7 +62,7 @@ export class LLMOrchestratorService {
       processingSteps.push('Input validation completed');
 
       // Build task-specific prompt
-      const prompt = buildPrompt(task, options);
+      const prompt = await buildPrompt(task, options);
       processingSteps.push(`Prompt built for task: ${task}`);
 
       // Get prompt metadata for logging

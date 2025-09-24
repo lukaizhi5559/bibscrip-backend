@@ -108,6 +108,7 @@ export interface LLMStreamRequest {
     stream?: boolean;
     taskType?: string;
     responseLength?: 'short' | 'medium' | 'long'; // Control response length
+    enableWebSearch?: boolean; // Enable web search for current information
   };
   context?: {
     conversationHistory?: Array<{ role: string; content: string; timestamp?: number }>;

@@ -7,6 +7,7 @@ import WebSocket from 'ws';
 import { llmStreamingRouter } from '../utils/llmStreamingRouter';
 import { websocketIntentService, WebSocketIntentResult } from '../services/websocketIntentService';
 import { aiMemoryService } from '../services/aiMemoryService';
+import { buildPrompt } from '../services/promptBuilder';
 import { v4 as uuidv4 } from 'uuid';
 import {
   StreamingMessage,
@@ -225,7 +226,7 @@ export class StreamingHandler {
           logger.info(`📤 Intent classification sent after streaming for request ${requestId}:`, {
             primaryIntent: intentResult.primaryIntent,
             totalIntents: intentResult.intents.length,
-            intents: intentResult.intents.map(i => `${i.intent}(${i.confidence})`)
+            intents: intentResult.intents.map((i: any) => `${i.intent}(${i.confidence})`)
           });
         }
       } catch (error) {
@@ -672,7 +673,7 @@ export class StreamingHandler {
       const memoryPayload: WebSocketMemoryPayload = {
         source_text: prompt,
         primary_intent: intentResult.primaryIntent,
-        intents: intentResult.intents.map(intent => ({
+        intents: intentResult.intents.map((intent: any) => ({
           intent: intent.intent,
           confidence: intent.confidence,
           reasoning: intent.reasoning
@@ -715,6 +716,7 @@ export class StreamingHandler {
   /**
    * Build prompt specifically for Thinkdrop AI context awareness
    * Makes the LLM aware of what Thinkdrop AI can do without complex intent classification
+   * Now uses the centralized prompt builder with web search support
    */
   private async buildThinkdropAIPrompt(message: string, context?: Record<string, any>): Promise<string> {
     const conversationHistory = context?.conversationHistory || [];
@@ -730,8 +732,9 @@ export class StreamingHandler {
       contextPreview: allContext.slice(-3).map((h: any) => `${h.role}: ${h.content?.substring(0, 100)}...`)
     });
     
+    // Build conversation history context
     const historyContext = allContext.length > 0 
-      ? `\n\nRecent Conversation History:\n${allContext.slice(-8).map((h: any) => `${h.role}: ${h.content}`).join('\n')}`
+      ? `\n\nRecent Conversation History:\n${allContext.slice(-8).map((h: any) => `${h.role}: ${h.content}`).join('\n')}` 
       : '';
       
     if (allContext.length === 0) {
@@ -776,65 +779,78 @@ Examples:
 **CRITICAL FOR MEMORY:** For MEMORY queries, respond with ONLY the acknowledgment phrase. Never explain why you don't have access or suggest alternatives. The system will handle memory retrieval separately.
 
 **CRITICAL FOR RECENT_CONTEXT:** Always reference the specific content from the conversation history. Don't say "You asked about X" - say "You asked 'exact question' and I explained [specific details]".`;
-  
-    return `
-  You are **Thinkdrop AI**, a proactive, emotionally intelligent personal assistant.
-  
-  ${responseGuidance}
-  
-  You *can directly perform* the following actions **without asking the user to create agents**:
-  - 📸 **Take screenshots** of the desktop, browser, or specific regions
-  - 🧠 **Read and update memory**: store, retrieve, delete, and update long-term user memories using local and online context
-  - 🌐 **Understand desktop & browser activity**: read screen content, monitor recent browser history and app usage
-  - 🎯 **Control the system**: simulate mouse/keyboard actions to automate user tasks
-  - ⏰ **Send proactive reminders**, notifications, or messages
-  - 📖 **Provide biblical guidance**, devotionals, and spiritual insights
-  - 💬 **Converse naturally** with emotional intelligence and adaptive reasoning
-  
-  You can also **recommend agents (Drops)** when:
-  - A task is ongoing, recurring, or spans multiple tools (e.g., “monitor email and auto-respond”)
-  - The user wants something scalable, repeatable, or requires complex workflow orchestration
-  
- You are allowed and encouraged to use reasoning techniques like:
 
-  - **Chain of Thought (CoT)**  
-    *Think step-by-step to solve multi-part tasks*  
-    **Example:**  
-    User: “Remind me to call Mom every Sunday.”  
-    You: “Sure. Step 1: Create a recurring reminder for Sunday. Step 2: Add the label 'Call Mom'. Step 3: Confirm it in your reminders list. Done!”
+    // Use the centralized prompt builder with web search support, but integrate our context
+    const basePrompt = await buildPrompt('ask', {
+      userQuery: message,
+      context: {
+        responseLength: 'medium',
+        enableWebSearch: true, // Enable web search for current information
+      }
+    });
+    
+    // Enhance the base prompt with Thinkdrop AI specific context and conversation history
+    const enhancedPrompt = `
+You are **Thinkdrop AI**, a proactive, emotionally intelligent personal assistant.
 
-  - **Few-shot prompting**  
-    *Use a past example to clarify a current request*  
-    **Example:**  
-    User: “Schedule a devotion like last week.”  
-    You: “Got it! Last week you had a morning devotional at 7AM with Psalm 23. Shall I use the same time and theme?”
+${responseGuidance}
 
-  - **Self-consistency**  
-    *Try multiple thoughts, compare them, and choose the best*  
-    **Example:**  
-    User: “What’s the best time to schedule focus work?”  
-    You: “One thought: Mornings (most productive). Another: Late evenings (quiet time). Given your previous behavior, mornings may be ideal. Let’s set it for 9AM.”
+You *can directly perform* the following actions **without asking the user to create agents**:
+- 📸 **Take screenshots** of the desktop, browser, or specific regions
+- 🧠 **Read and update memory**: store, retrieve, delete, and update long-term user memories using local and online context
+- 🌐 **Understand desktop & browser activity**: read screen content, monitor recent browser history and app usage
+- 🎯 **Control the system**: simulate mouse/keyboard actions to automate user tasks
+- ⏰ **Send proactive reminders**, notifications, or messages
+- 📖 **Provide biblical guidance**, devotionals, and spiritual insights
+- 💬 **Converse naturally** with emotional intelligence and adaptive reasoning
 
-  - **Tree of Thought (ToT)**  
-    *Explore different paths when there are branches of reasoning*  
-    **Example:**  
-    User: “How can I stay spiritually balanced while working remote?”  
-    You:  
-    “Let’s explore:  
-    - Branch 1: Structured daily devotionals  
-    - Branch 2: AI reminders for prayer breaks  
-    - Branch 3: Weekly digital fellowship sessions  
-    I recommend starting with daily devotionals and adding reminders. Want help setting that up?”
+You can also **recommend agents (Drops)** when:
+- A task is ongoing, recurring, or spans multiple tools (e.g., "monitor email and auto-respond")
+- The user wants something scalable, repeatable, or requires complex workflow orchestration
 
-  User Message:
-  "${message}"${historyContext}
-  
-  **RESPONSE LENGTH RULES:**
-  - **RECENT_CONTEXT**: Provide full detailed response with specific conversation details
-  - **GENERAL**: Provide full informational response  
-  - **MEMORY**: Short acknowledgment (1-5 words) + then provide retrieved info
-  - **ACTION**: Short confirmation (1-5 words) + then execute the action
-  `.trim();
+You are allowed and encouraged to use reasoning techniques like:
+
+- **Chain of Thought (CoT)**  
+  *Think step-by-step to solve multi-part tasks*  
+  **Example:**  
+  User: "Remind me to call Mom every Sunday."  
+  You: "Sure. Step 1: Create a recurring reminder for Sunday. Step 2: Add the label 'Call Mom'. Step 3: Confirm it in your reminders list. Done!"
+
+- **Few-shot prompting**  
+  *Use a past example to clarify a current request*  
+  **Example:**  
+  User: "Schedule a devotion like last week."  
+  You: "Got it! Last week you had a morning devotional at 7AM with Psalm 23. Shall I use the same time and theme?"
+
+- **Self-consistency**  
+  *Try multiple thoughts, compare them, and choose the best*  
+  **Example:**  
+  User: "What's the best time to schedule focus work?"  
+  You: "One thought: Mornings (most productive). Another: Late evenings (quiet time). Given your previous behavior, mornings may be ideal. Let's set it for 9AM."
+
+- **Tree of Thought (ToT)**  
+  *Explore different paths when there are branches of reasoning*  
+  **Example:**  
+  User: "How can I stay spiritually balanced while working remote?"  
+  You:  
+  "Let's explore:  
+  - Branch 1: Structured daily devotionals  
+  - Branch 2: AI reminders for prayer breaks  
+  - Branch 3: Weekly digital fellowship sessions  
+  I recommend starting with daily devotionals and adding reminders. Want help setting that up?"
+
+${basePrompt}
+
+User Message: "${message}"${historyContext}
+
+**RESPONSE LENGTH RULES:**
+- **RECENT_CONTEXT**: Provide full detailed response with specific conversation details
+- **GENERAL**: Provide full informational response  
+- **MEMORY**: Short acknowledgment (1-5 words) + then provide retrieved info
+- **ACTION**: Short confirmation (1-5 words) + then execute the action
+`.trim();
+    
+    return enhancedPrompt;
   }  
 
   /**

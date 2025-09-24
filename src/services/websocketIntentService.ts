@@ -234,7 +234,8 @@ export class WebSocketIntentService {
           options: {
             temperature: 0.1,
             maxTokens: 500,
-            stream: false
+            stream: false,
+            enableWebSearch: false // Disable web search for intent classification
           }
         },
         () => {}, // No streaming needed for intent classification

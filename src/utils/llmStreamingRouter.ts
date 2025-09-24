@@ -35,13 +35,23 @@ export class LLMStreamingRouter extends LLMRouter {
   ): Promise<LLMStreamResult> {
     const { prompt: userPrompt, provider: preferredProvider, options = {} } = request;
     
-    // Build Thinkdrop AI branded prompt with proper context and response length controls
-    const enhancedPrompt = buildPrompt('ask', {
-      userQuery: userPrompt,
-      context: {
-        responseLength: options.responseLength || 'short' // Default to short for better UX
-      }
-    });
+    // For intent classification or when web search is disabled, use the prompt as-is
+    // Otherwise, build enhanced Thinkdrop AI branded prompt with web search
+    let enhancedPrompt: string;
+    
+    if (options.enableWebSearch === false || metadata.source === 'backend_llm') {
+      // Use the original prompt without enhancement for intent classification
+      enhancedPrompt = userPrompt;
+    } else {
+      // Build Thinkdrop AI branded prompt with proper context and response length controls
+      enhancedPrompt = await buildPrompt('ask', {
+        userQuery: userPrompt,
+        context: {
+          responseLength: options.responseLength || 'short', // Default to short for better UX
+          enableWebSearch: options.enableWebSearch ?? true // Default to enabled
+        }
+      });
+    }
     
     const streamId = `stream_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const startTime = performance.now();

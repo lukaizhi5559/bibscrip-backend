@@ -3,6 +3,8 @@
  * Centralized prompt templates and builder logic for all LLM tasks
  */
 
+import { webSearchService, WebSearchService } from './webSearchService';
+
 export interface PromptOptions {
   userQuery: string;
   context?: any;
@@ -51,7 +53,7 @@ export const AGENT_FORMAT_TEMPLATE: AgentFormat = {
 /**
  * Build prompts for different LLM tasks
  */
-export function buildPrompt(task: 'intent' | 'generate_agent' | 'orchestrate' | 'ask', options: PromptOptions): string {
+export async function buildPrompt(task: 'intent' | 'generate_agent' | 'orchestrate' | 'ask', options: PromptOptions): Promise<string> {
   const { userQuery, context, metadata } = options;
 
   switch (task) {
@@ -65,7 +67,7 @@ export function buildPrompt(task: 'intent' | 'generate_agent' | 'orchestrate' | 
       return buildOrchestratePrompt(userQuery, context);
     
     case 'ask':
-      return buildAskPrompt(userQuery, context);
+      return await buildAskPrompt(userQuery, context);
     
     default:
       throw new Error(`Unknown prompt task: ${task}`);
@@ -230,16 +232,56 @@ Respond in this JSON format:
 /**
  * Ask Prompt (Fitted for Thinkdrop AI - General Purpose Assistant)
  */
-function buildAskPrompt(userQuery: string, context?: any): string {
-  const { ragSources, knowledgeBase, userPreferences, responseLength = 'medium' } = context || {};
+async function buildAskPrompt(userQuery: string, context?: any): Promise<string> {
+  const { ragSources, knowledgeBase, userPreferences, responseLength = 'medium', enableWebSearch = true } = context || {};
+  
+  // Get current date context
+  const currentDate = new Date();
+  const currentDateISO = currentDate.toISOString().split('T')[0];
+  const currentDateHuman = currentDate.toLocaleDateString('en-US', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric'
+  });
+  const currentTime = currentDate.toLocaleTimeString('en-US', {
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit'
+  });
   
   let prompt = `
 You are Thinkdrop AI, an intelligent, helpful, and discerning assistant. You answer with clarity, humility, and wisdom — grounded in Biblical worldview and traditional values.
 
 You are capable of researching, analyzing, problem-solving, and explaining complex topics across technology, philosophy, culture, personal productivity, business, theology, and everyday life. You are careful to respect truth, reason, and integrity in all responses.
 
+CURRENT DATE & TIME CONTEXT:
+- Current Date (ISO): ${currentDateISO}
+- Current Date (Human): ${currentDateHuman}
+- Current Time (24h): ${currentTime}
+
+When discussing dates, times, or scheduling, always calculate relative to the current date above.
+
 User Question: "${userQuery}"
   `.trim();
+
+  // Add web search results if the query needs current information
+  if (enableWebSearch && WebSearchService.needsWebSearch(userQuery)) {
+    try {
+      // Use ONLY the original user query for web search, not the full prompt
+      const searchResponse = await webSearchService.search(userQuery, {
+        maxResults: 3,
+        timeFilter: 'week'
+      });
+      
+      if (searchResponse.success && searchResponse.results.length > 0) {
+        prompt += WebSearchService.formatResultsForLLM(searchResponse);
+      }
+    } catch (error) {
+      // Web search failed, continue without it
+      console.warn('Web search failed:', error);
+    }
+  }
 
   // Add RAG context if available
   if (ragSources && ragSources.length > 0) {

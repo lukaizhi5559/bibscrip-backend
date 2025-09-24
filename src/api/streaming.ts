@@ -56,12 +56,13 @@ router.post('/ask', authenticateAPIKey, async (req: Request, res: Response) => {
     }
 
     // Build enriched prompt
-    const enrichedPrompt = buildPrompt('ask', {
+    const enrichedPrompt = await buildPrompt('ask', {
       userQuery: question,
       context: {
         ragSources: [],
         knowledgeBase: [],
-        userPreferences: userContext?.preferences || {}
+        userPreferences: userContext?.preferences || {},
+        enableWebSearch: true
       }
     });
 
