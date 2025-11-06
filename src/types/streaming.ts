@@ -111,8 +111,12 @@ export interface LLMStreamRequest {
     enableWebSearch?: boolean; // Enable web search for current information
   };
   context?: {
-    conversationHistory?: Array<{ role: string; content: string; timestamp?: number }>;
-    recentContext?: Array<{ role: string; content: string; timestamp?: number }>;
+    recentContext?: Array<{ role: string; content: string; timestamp?: string; messageId?: string }>;
+    sessionFacts?: Array<{ fact: string; confidence: number; timestamp?: string }>;
+    sessionEntities?: Array<{ entity: string; type: string; value?: any }>;
+    memories?: Array<{ content: string; relevance?: number; timestamp?: string }>;
+    webSearchResults?: Array<{ title: string; snippet: string; url: string }>;
+    systemInstructions?: string;
     sessionId?: string;
     userId?: string;
   };

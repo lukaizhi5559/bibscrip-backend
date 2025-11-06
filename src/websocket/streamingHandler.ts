@@ -5,8 +5,9 @@
 
 import WebSocket from 'ws';
 import { llmStreamingRouter } from '../utils/llmStreamingRouter';
-import { websocketIntentService, WebSocketIntentResult } from '../services/websocketIntentService';
-import { aiMemoryService } from '../services/aiMemoryService';
+// Intent classification is now handled on the frontend
+// import { websocketIntentService, WebSocketIntentResult } from '../services/websocketIntentService';
+// import { aiMemoryService } from '../services/aiMemoryService';
 import { buildPrompt } from '../services/promptBuilder';
 import { v4 as uuidv4 } from 'uuid';
 import {
@@ -19,7 +20,7 @@ import {
   StreamingMetadata,
   StreamingError
 } from '../types/streaming';
-import { WebSocketMemoryPayload } from '../types/aiMemory';
+// import { WebSocketMemoryPayload } from '../types/aiMemory';
 import { logger } from '../utils/logger';
 
 export class StreamingHandler {
@@ -120,25 +121,20 @@ export class StreamingHandler {
         timestamp: Date.now(),
         source: 'text'
       });
-
-      // Start intent classification in parallel (don't await - let it run alongside streaming)
-      const intentPromise = this.evaluateIntentInBackground(requestId, request.prompt, request.context);
       
-      // Build Thinkdrop AI context-aware prompt
+      // Build Thinkdrop AI context-aware prompt with frontend context
       logger.info(`🔧 Building Thinkdrop AI context-aware prompt for request ${requestId}`);
       logger.info(`📋 Context debug for ${requestId}:`, {
         internalHistoryCount: this.conversationContext.conversationHistory?.length || 0,
         frontendContextCount: request.context?.recentContext?.length || 0,
-        internalHistoryPreview: this.conversationContext.conversationHistory?.slice(-2).map(h => `${h.role}: ${h.content.substring(0, 50)}...`) || [],
-        frontendContextPreview: request.context?.recentContext?.slice(-2).map(h => `${h.role}: ${h.content.substring(0, 50)}...`) || []
+        sessionFactsCount: request.context?.sessionFacts?.length || 0,
+        sessionEntitiesCount: request.context?.sessionEntities?.length || 0,
+        memoriesCount: request.context?.memories?.length || 0,
+        webSearchResultsCount: request.context?.webSearchResults?.length || 0,
+        hasSystemInstructions: !!request.context?.systemInstructions
       });
       
-      const enhancedPrompt = await this.buildThinkdropAIPrompt(request.prompt, {
-        conversationHistory: this.conversationContext.conversationHistory || [],
-        recentContext: request.context?.recentContext || [],
-        userId: this.userId,
-        sessionId: this.sessionId
-      });
+      const enhancedPrompt = await this.buildThinkdropAIPrompt(request.prompt, request.context);
       
       logger.info(`📝 Enhanced prompt built for ${requestId}:`, {
         originalLength: request.prompt.length,
@@ -192,47 +188,6 @@ export class StreamingHandler {
             provider: result.provider,
             source: 'backend_llm'
           }
-        });
-      }
-
-      // Wait for intent classification to complete and send results
-      logger.info(`🎯 Waiting for intent classification to complete for request ${requestId}`);
-      try {
-        const intentResult = await intentPromise;
-        
-        if (intentResult) {
-          // Send intent classification results to client after streaming completes
-          this.send({
-            id: `${requestId}_intent`,
-            type: StreamingMessageType.INTENT_CLASSIFICATION,
-            payload: {
-              intents: intentResult.intents,
-              primaryIntent: intentResult.primaryIntent,
-              entities: intentResult.entities,
-              requiresMemoryAccess: intentResult.requiresMemoryAccess,
-              requiresExternalData: intentResult.requiresExternalData,
-              captureScreen: intentResult.captureScreen,
-              queryType: intentResult.queryType,
-              suggestedResponse: intentResult.suggestedResponse,
-              sourceText: intentResult.sourceText
-            },
-            timestamp: Date.now(),
-            metadata: {
-              source: 'intent_evaluation',
-              confidence: intentResult.intents[0]?.confidence || 0
-            }
-          });
-          
-          logger.info(`📤 Intent classification sent after streaming for request ${requestId}:`, {
-            primaryIntent: intentResult.primaryIntent,
-            totalIntents: intentResult.intents.length,
-            intents: intentResult.intents.map((i: any) => `${i.intent}(${i.confidence})`)
-          });
-        }
-      } catch (error) {
-        logger.error(`Failed to complete intent classification for request ${requestId}:`, {
-          error,
-          message: error instanceof Error ? error.message : String(error)
         });
       }
 
@@ -556,229 +511,69 @@ export class StreamingHandler {
     ];
   }
 
-  /**
-   * Evaluate intent in background while streaming runs in parallel
-   * Returns the intent result to be sent after streaming completes
-   */
-  private async evaluateIntentInBackground(requestId: string, prompt: string, context?: any): Promise<WebSocketIntentResult | null> {
-    try {
-      logger.info(`🔍 Starting background intent evaluation for: "${prompt.substring(0, 100)}..."`);
-      
-      const intentResult = await websocketIntentService.evaluateIntent(prompt, { context });
-      
-      logger.info(`✅ Intent evaluation completed in background:`, {
-        primaryIntent: intentResult.primaryIntent,
-        totalIntents: intentResult.intents.length
-      });
-      
-      // Store intent classification in AI Memory (async, non-blocking)
-      this.storeIntentMemory(requestId, prompt, intentResult).catch((memoryError: any) => {
-        logger.error(`⚠️ Failed to store intent memory for ${requestId}:`, memoryError);
-        // Memory storage failure doesn't affect the main flow
-      });
-      
-      return intentResult;
-    } catch (intentError) {
-      logger.error(`❌ Background intent evaluation failed for request ${requestId}:`, {
-        error: intentError,
-        message: (intentError as any)?.message,
-        stack: (intentError as any)?.stack
-      });
-      return null;
-    }
-  }
-
-  /**
-   * Evaluate intent in parallel without blocking LLM streaming (deprecated - keeping for reference)
-   */
-  private async evaluateIntentInParallel(requestId: string, prompt: string): Promise<void> {
-    try {
-      logger.info(`🔍 Starting parallel intent evaluation for: "${prompt.substring(0, 100)}..."`);
-      
-      const intentResult = await websocketIntentService.evaluateIntent(prompt);
-      
-      logger.info(`✅ Intent evaluation completed:`, {
-        primaryIntent: intentResult.primaryIntent,
-        totalIntents: intentResult.intents.length
-      });
-      
-      // Send intent classification results to client
-      this.send({
-        id: `${requestId}_intent`,
-        type: StreamingMessageType.INTENT_CLASSIFICATION,
-        payload: {
-          intents: intentResult.intents,
-          primaryIntent: intentResult.primaryIntent,
-          entities: intentResult.entities,
-          requiresMemoryAccess: intentResult.requiresMemoryAccess,
-          requiresExternalData: intentResult.requiresExternalData,
-          captureScreen: intentResult.captureScreen, // Include screen capture flag
-          queryType: intentResult.queryType, // Add queryType for frontend routing
-          suggestedResponse: intentResult.suggestedResponse,
-          sourceText: intentResult.sourceText
-        },
-        timestamp: Date.now(),
-        metadata: {
-          source: 'intent_evaluation',
-          confidence: intentResult.intents[0]?.confidence || 0
-        }
-      });
-      
-      // Store intent classification in AI Memory (async, non-blocking)
-      this.storeIntentMemory(requestId, prompt, intentResult).catch((memoryError: any) => {
-        logger.error(`⚠️ Failed to store intent memory for ${requestId}:`, memoryError);
-        // Memory storage failure doesn't affect the main flow
-      });
-      
-      logger.info(`📤 Intent classification sent for request ${requestId}:`, {
-        primaryIntent: intentResult.primaryIntent,
-        totalIntents: intentResult.intents.length,
-        intents: intentResult.intents.map(i => `${i.intent}(${i.confidence})`)
-      });
-    } catch (intentError) {
-      logger.error(`❌ Parallel intent evaluation failed for request ${requestId}:`, {
-        error: intentError,
-        message: (intentError as any)?.message,
-        stack: (intentError as any)?.stack
-      });
-      // Intent evaluation failure doesn't affect LLM streaming
-    }
-  }
-
-  /**
-   * Store intent classification results in AI Memory
-   */
-  private async storeIntentMemory(
-    requestId: string,
-    prompt: string,
-    intentResult: WebSocketIntentResult
-  ): Promise<void> {
-    try {
-      // Extract user ID from connection metadata or generate a valid UUID for anonymous users
-      let userId = this.conversationContext.userId;
-      
-      // Check if userId is a valid UUID, if not generate one
-      // This handles cases where userId is undefined, 'anonymous', 'default-user', etc.
-      if (!userId || !this.isValidUUID(userId)) {
-        // Generate a consistent UUID based on sessionId for the same anonymous user
-        // This ensures the same anonymous user gets the same UUID in a session
-        userId = this.sessionId ? 
-          uuidv4({ random: Array.from(this.sessionId).map(c => c.charCodeAt(0)) }) : 
-          uuidv4(); // Fallback to completely random UUID
-        
-        logger.info(`🔄 Generated UUID for non-UUID userId: ${userId}`);
-      }
-      
-      // Prepare memory payload
-      const memoryPayload: WebSocketMemoryPayload = {
-        source_text: prompt,
-        primary_intent: intentResult.primaryIntent,
-        intents: intentResult.intents.map((intent: any) => ({
-          intent: intent.intent,
-          confidence: intent.confidence,
-          reasoning: intent.reasoning
-        })),
-        entities: intentResult.entities || [],
-        requires_memory_access: intentResult.requiresMemoryAccess || false,
-        requires_external_data: intentResult.requiresExternalData || false,
-        suggested_response: intentResult.suggestedResponse,
-        session_metadata: {
-          request_id: requestId,
-          session_id: this.conversationContext.sessionId,
-          client_id: this.conversationContext.sessionId, // Using sessionId as clientId fallback
-          timestamp: new Date().toISOString(),
-          websocket_connection: true
-        }
-      };
-      
-      // Store in AI Memory
-      const storedMemory = await aiMemoryService.storeWebSocketMemory(userId, memoryPayload);
-      
-      logger.info(`🧠 AI memory stored successfully:`, {
-        memoryId: storedMemory.memory.id,
-        userId,
-        requestId,
-        primaryIntent: intentResult.primaryIntent,
-        intentsCount: intentResult.intents.length,
-        entitiesCount: intentResult.entities?.length || 0
-      });
-      
-    } catch (error) {
-      logger.error(`❌ Failed to store AI memory:`, {
-        requestId,
-        error,
-        message: (error as any)?.message
-      });
-      // Don't throw - memory storage failure shouldn't break the main flow
-    }
-  }
+  // Intent classification and memory storage are now handled on the frontend
+  // These methods have been removed: evaluateIntentInBackground, evaluateIntentInParallel, storeIntentMemory
 
   /**
    * Build prompt specifically for Thinkdrop AI context awareness
    * Makes the LLM aware of what Thinkdrop AI can do without complex intent classification
-   * Now uses the centralized prompt builder with web search support
+   * Now processes rich frontend context including facts, entities, memories, and web search results
    */
-  private async buildThinkdropAIPrompt(message: string, context?: Record<string, any>): Promise<string> {
-    const conversationHistory = context?.conversationHistory || [];
+  private async buildThinkdropAIPrompt(message: string, context?: any): Promise<string> {
+    // Extract all context components from frontend
     const recentContext = context?.recentContext || [];
-    
-    // Combine recent context from frontend with conversation history
-    const allContext = [...recentContext, ...conversationHistory];
+    const sessionFacts = context?.sessionFacts || [];
+    const sessionEntities = context?.sessionEntities || [];
+    const memories = context?.memories || [];
+    const webSearchResults = context?.webSearchResults || [];
+    const systemInstructions = context?.systemInstructions || '';
     
     logger.info(`🔍 [buildThinkdropAIPrompt] Context analysis:`, {
-      conversationHistoryCount: conversationHistory.length,
       recentContextCount: recentContext.length,
-      allContextCount: allContext.length,
-      contextPreview: allContext.slice(-3).map((h: any) => `${h.role}: ${h.content?.substring(0, 100)}...`)
+      sessionFactsCount: sessionFacts.length,
+      sessionEntitiesCount: sessionEntities.length,
+      memoriesCount: memories.length,
+      webSearchResultsCount: webSearchResults.length,
+      hasSystemInstructions: !!systemInstructions,
+      contextPreview: recentContext.slice(-3).map((h: any) => `${h.role}: ${h.content?.substring(0, 100)}...`)
     });
     
     // Build conversation history context
-    const historyContext = allContext.length > 0 
-      ? `\n\nRecent Conversation History:\n${allContext.slice(-8).map((h: any) => `${h.role}: ${h.content}`).join('\n')}` 
+    const historyContext = recentContext.length > 0 
+      ? `\n\nRecent Conversation History:\n${recentContext.slice(-8).map((h: any) => `${h.role}: ${h.content}`).join('\n')}` 
+      : '';
+    
+    // Build session facts context
+    const factsContext = sessionFacts.length > 0
+      ? `\n\nSession Facts (extracted from this conversation):\n${sessionFacts.map((f: any) => `- ${f.fact} (confidence: ${f.confidence})`).join('\n')}`
+      : '';
+    
+    // Build session entities context
+    const entitiesContext = sessionEntities.length > 0
+      ? `\n\nSession Entities (mentioned in this conversation):\n${sessionEntities.map((e: any) => `- ${e.entity} (${e.type})${e.value ? `: ${e.value}` : ''}`).join('\n')}`
+      : '';
+    
+    // Build memories context
+    const memoriesContext = memories.length > 0
+      ? `\n\nRelevant User Memories (from past conversations):\n${memories.map((m: any) => `- ${m.content}${m.relevance ? ` (relevance: ${m.relevance})` : ''}`).join('\n')}`
+      : '';
+    
+    // Build web search results context
+    const webSearchContext = webSearchResults.length > 0
+      ? `\n\nWeb Search Results (current information):\n${webSearchResults.map((r: any, i: number) => `${i + 1}. ${r.title}\n   ${r.snippet}\n   Source: ${r.url}`).join('\n\n')}`
+      : '';
+    
+    // Build system instructions context
+    const systemInstructionsContext = systemInstructions
+      ? `\n\nSystem Instructions:\n${systemInstructions}`
       : '';
       
-    if (allContext.length === 0) {
-      logger.warn(`⚠️ [buildThinkdropAIPrompt] No conversation context available for message: ${message.substring(0, 50)}...`);
+    if (recentContext.length === 0 && sessionFacts.length === 0 && memories.length === 0) {
+      logger.warn(`⚠️ [buildThinkdropAIPrompt] Minimal context available for message: ${message.substring(0, 50)}...`);
     }
 
-    // Enhanced response style with recent context handling
-    const responseGuidance = `
-**RESPONSE INSTRUCTIONS:**
-
-STEP 1: Determine if this is asking about:
-- RECENT_CONTEXT: Questions about what was just said/discussed in this conversation. CRITICAL: Check the Recent Conversation History above first - if the topic was mentioned there, classify as RECENT_CONTEXT
-- MEMORY: Past conversations from different sessions, stored preferences, long-term user data (only when NOT found in recent conversation)
-- ACTION: Commands to do something, create/make/send/schedule/remind/automate
-- GENERAL: Questions about facts, information, explanations, how-to, definitions
-
-STEP 2: Respond based on type:
-
-**RECENT_CONTEXT queries** → Answer directly from conversation history:
-CRITICAL: Look at the Recent Conversation History above and provide the EXACT specific details from what was discussed. Quote or reference the specific content, don't give generic responses. NO short responses.
-If the recent conversation doesn't contain relevant information, respond with: "I'll check older memories" or "Let me check the broader context" and then search for related information.
-
-**MEMORY queries** → ONLY short acknowledgment (1-5 words):
-"Checking now!" or "Looking that up!" - STOP HERE. Do not provide explanations about not having access or suggestions to set up systems.
-
-**ACTION queries** → Short confirmation (1-5 words) + do the task:
-"I'm on it!" then execute the action
-
-**GENERAL queries** → Full informational response immediately:
-Answer completely with facts, explanations, details. NO short responses for general questions.
-
-Examples:
-- "What did I just ask?" = RECENT_CONTEXT → "You just asked 'What are the biggest species of ants?' and I provided information about Dinoponera and Camponotus gigas species."
-- "What language we just chatted about?" = RECENT_CONTEXT → Look at conversation history and provide specific details
-- "What did we discuss about frogs?" = RECENT_CONTEXT → If not in recent history: "I'll check older memories" then search broader context
-- "What's my favorite color?" = Check Recent Conversation History first:
-  • If color mentioned recently → RECENT_CONTEXT → "You just mentioned you like blue" or reference specific conversation
-  • If NOT in recent conversation → MEMORY → "Checking now!" (STOP - no additional text)
-- "Who's the oldest person?" = GENERAL → Full answer about current oldest person
-- "Remind me about birthdays" = ACTION → "Will do!" + set up reminder
-
-**CRITICAL FOR MEMORY:** For MEMORY queries, respond with ONLY the acknowledgment phrase. Never explain why you don't have access or suggest alternatives. The system will handle memory retrieval separately.
-
-**CRITICAL FOR RECENT_CONTEXT:** Always reference the specific content from the conversation history. Don't say "You asked about X" - say "You asked 'exact question' and I explained [specific details]".`;
+    // Minimal response guidance - frontend systemInstructions already provide detailed guidance
+    const responseGuidance = '';
 
     // Use the centralized prompt builder with web search support, but integrate our context
     const basePrompt = await buildPrompt('ask', {
@@ -789,65 +584,28 @@ Examples:
       }
     });
     
-    // Enhance the base prompt with Thinkdrop AI specific context and conversation history
+    // Streamlined prompt - frontend systemInstructions already provide detailed guidance
     const enhancedPrompt = `
 You are **Thinkdrop AI**, a proactive, emotionally intelligent personal assistant.
 
-${responseGuidance}
+**Core Capabilities:**
+- 📸 Take screenshots and analyze screen content
+- 🧠 Access user memories and conversation history
+- 🌐 Monitor desktop & browser activity
+- 🎯 Automate system tasks (mouse/keyboard control)
+- ⏰ Send reminders and notifications
+- 📖 Provide biblical guidance and spiritual insights
+- 💬 Converse naturally with emotional intelligence
 
-You *can directly perform* the following actions **without asking the user to create agents**:
-- 📸 **Take screenshots** of the desktop, browser, or specific regions
-- 🧠 **Read and update memory**: store, retrieve, delete, and update long-term user memories using local and online context
-- 🌐 **Understand desktop & browser activity**: read screen content, monitor recent browser history and app usage
-- 🎯 **Control the system**: simulate mouse/keyboard actions to automate user tasks
-- ⏰ **Send proactive reminders**, notifications, or messages
-- 📖 **Provide biblical guidance**, devotionals, and spiritual insights
-- 💬 **Converse naturally** with emotional intelligence and adaptive reasoning
+**Agent Recommendations:**
+Suggest creating agents (Drops) for recurring, multi-tool, or complex workflow tasks.
 
-You can also **recommend agents (Drops)** when:
-- A task is ongoing, recurring, or spans multiple tools (e.g., "monitor email and auto-respond")
-- The user wants something scalable, repeatable, or requires complex workflow orchestration
-
-You are allowed and encouraged to use reasoning techniques like:
-
-- **Chain of Thought (CoT)**  
-  *Think step-by-step to solve multi-part tasks*  
-  **Example:**  
-  User: "Remind me to call Mom every Sunday."  
-  You: "Sure. Step 1: Create a recurring reminder for Sunday. Step 2: Add the label 'Call Mom'. Step 3: Confirm it in your reminders list. Done!"
-
-- **Few-shot prompting**  
-  *Use a past example to clarify a current request*  
-  **Example:**  
-  User: "Schedule a devotion like last week."  
-  You: "Got it! Last week you had a morning devotional at 7AM with Psalm 23. Shall I use the same time and theme?"
-
-- **Self-consistency**  
-  *Try multiple thoughts, compare them, and choose the best*  
-  **Example:**  
-  User: "What's the best time to schedule focus work?"  
-  You: "One thought: Mornings (most productive). Another: Late evenings (quiet time). Given your previous behavior, mornings may be ideal. Let's set it for 9AM."
-
-- **Tree of Thought (ToT)**  
-  *Explore different paths when there are branches of reasoning*  
-  **Example:**  
-  User: "How can I stay spiritually balanced while working remote?"  
-  You:  
-  "Let's explore:  
-  - Branch 1: Structured daily devotionals  
-  - Branch 2: AI reminders for prayer breaks  
-  - Branch 3: Weekly digital fellowship sessions  
-  I recommend starting with daily devotionals and adding reminders. Want help setting that up?"
+**Reasoning Techniques:**
+Use Chain of Thought, Few-shot prompting, Self-consistency, or Tree of Thought when helpful.
 
 ${basePrompt}
 
-User Message: "${message}"${historyContext}
-
-**RESPONSE LENGTH RULES:**
-- **RECENT_CONTEXT**: Provide full detailed response with specific conversation details
-- **GENERAL**: Provide full informational response  
-- **MEMORY**: Short acknowledgment (1-5 words) + then provide retrieved info
-- **ACTION**: Short confirmation (1-5 words) + then execute the action
+User Message: "${message}"${historyContext}${factsContext}${entitiesContext}${memoriesContext}${webSearchContext}${systemInstructionsContext}
 `.trim();
     
     return enhancedPrompt;
