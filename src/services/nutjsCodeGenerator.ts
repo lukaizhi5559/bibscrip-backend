@@ -56,13 +56,29 @@ export class NutjsCodeGenerator {
 1. Return ONLY executable Nut.js code - NO explanations, NO markdown, NO comments outside the code
 2. Use the official Nut.js v4.x API from https://nutjs.dev/
 3. **ABSOLUTELY MUST use CommonJS require() syntax - NEVER use ES6 import statements**
-4. First line MUST be: const { keyboard, Key } = require('@nut-tree-fork/nut-js');
-5. Code must be ready to run immediately with: node filename.js
-6. Handle errors gracefully with try-catch blocks
-7. Use async/await for all Nut.js operations
-8. Wrap execution in an async IIFE: (async () => { ... })();
-9. **IMPORTANT**: Always release keys immediately after pressing them before typing text
-10. **OS Detection**: Check process.platform to determine OS ('darwin' = macOS, 'win32' = Windows)
+4. First line MUST be: const { keyboard, Key, mouse, straightTo, Point, screen, Region, Button } = require('@nut-tree-fork/nut-js');
+5. **ALWAYS import vision service**: const { findAndClick } = require('../src/services/visionSpatialService');
+6. Code must be ready to run immediately with: node filename.js
+7. Handle errors gracefully with try-catch blocks
+8. Use async/await for all Nut.js operations
+9. Wrap execution in an async IIFE: (async () => { ... })();
+10. **IMPORTANT**: Always release keys immediately after pressing them before typing text
+11. **OS Detection**: Check process.platform to determine OS ('darwin' = macOS, 'win32' = Windows)
+
+**🎯 VISION-FIRST STRATEGY (CRITICAL):**
+**When to use VISION AI (findAndClick):**
+- ✅ **ALL web browser interactions** (Gmail, YouTube, Amazon, any website)
+- ✅ **ALL desktop GUI apps** (Slack, Outlook, Discord, Notion, VS Code, etc.)
+- ✅ **ANY clickable UI element** (buttons, links, input fields, menus)
+- ✅ **Reason**: UI layouts change, buttons move, different screen sizes, updates
+
+**When to use KEYBOARD SHORTCUTS:**
+- ✅ **OS-level operations** (open apps: Cmd+Space, switch windows: Cmd+Tab)
+- ✅ **File operations** (save: Cmd+S, open: Cmd+O, close: Cmd+W)
+- ✅ **Text operations** (copy: Cmd+C, paste: Cmd+V, select all: Cmd+A)
+- ✅ **Reason**: OS shortcuts are standardized and never change
+
+**NEVER use fixed coordinates** - they break on different screens and resolutions
 
 **CRITICAL: Operating System Differences**
 The code will receive context.os parameter ('darwin' for Mac, 'win32' for Windows). Use this to determine behavior:
@@ -94,8 +110,18 @@ When the command involves searching the web, shopping online, or visiting websit
 2. **Open the default browser directly** using system launcher
 3. **macOS**: Open "Safari" or "Chrome" or "Firefox" via Spotlight
 4. **Windows**: Open "Chrome" or "Edge" or "Firefox" via Windows Search
-5. **After browser opens**: Wait 1000ms, then Cmd+L (Mac) or Ctrl+L (Windows) to focus address bar
-6. **Type search query or URL**, then press Enter
+5. **After browser opens**: Wait 1000ms
+6. **ALWAYS open new tab FIRST** - Cmd+T (Mac) or Ctrl+T (Windows)
+7. **Wait 500ms for new tab to open**
+8. **Then navigate**: Cmd+L/Ctrl+L to focus address bar, type URL, press Enter
+9. **NEVER overwrite user's existing tabs** - always start with fresh new tab
+
+**CRITICAL: Multi-Site Browser Workflows**
+When visiting MULTIPLE websites in one command (e.g., "Go to YouTube then Gmail"):
+1. **First site**: Open browser → **Cmd+T (new tab!)** → navigate to first URL
+2. **Second site onwards**: **Cmd+T (new tab!)** → navigate to next URL
+3. **NEVER use Cmd+L without Cmd+T first** - always open new tab before navigating
+4. **Example**: YouTube → Gmail = Open browser → **Cmd+T** → YouTube → **Cmd+T** → Gmail
 
 **Examples of web/browser queries:**
 - "search for winter clothes on Amazon" → Open browser → search on Amazon
@@ -103,6 +129,7 @@ When the command involves searching the web, shopping online, or visiting websit
 - "go to youtube.com" → Open browser → navigate to URL
 - "search for JavaScript tutorials" → Open browser → Google search
 - "check my email" → Open browser → go to email provider
+- "go to YouTube then Gmail" → Open browser → YouTube → **Cmd+T (new tab!)** → Gmail
 
 **Multi-Step Workflows:**
 When a command requires multiple steps within an app (e.g., "open Slack, find user Chris, DM him hello"):
@@ -213,6 +240,105 @@ When a command requires multiple steps within an app (e.g., "open Slack, find us
 - **Refresh**:
   - macOS: Cmd+R
   - Windows: Ctrl+R or F5
+- **Copy URL**: Cmd+L (Mac) or Ctrl+L (Windows), then Cmd+C/Ctrl+C
+- **Switch tabs**: Cmd+Option+Right/Left (Mac) or Ctrl+Tab (Windows)
+
+**Gmail Web Interface Patterns - HYBRID APPROACH:**
+- **Import vision service**: const { findAndClick } = require('../src/services/visionSpatialService')
+- **Use vision AI for buttons** (Compose, Send) - they have clear labels
+- **Use Tab navigation for fields** (To, Subject, Body) - they have NO labels or unreliable labels
+
+**Gmail Compose Workflow:**
+1. **Open Compose dialog**:
+   - Wait 3000ms for Gmail to load
+   - Use vision: await findAndClick('Compose', 'button') with 60s timeout
+   - Wait 2000ms for compose dialog to render
+   
+2. **Fill "To" field**:
+   - IMPORTANT: Gmail's "To" field has NO label - it's an empty textbox
+   - After Compose opens, focus may be on dialog controls (minimize, close, etc.)
+   - Press Tab key 2-3 times to ensure we reach the To input field
+   - Alternative: Click in the upper area of compose dialog to focus To field
+   - Wait 500ms, then type recipient email
+   - Press Enter to confirm recipient (moves to next field)
+   - Wait 500ms after typing
+   
+3. **Fill "Subject" field**:
+   - Press Tab key to move to Subject field
+   - Wait 300ms, then type subject
+   - Wait 500ms after typing
+   
+4. **Fill message body**:
+   - Press Tab key to move to message body
+   - Wait 300ms, then type message content
+   - Wait 500ms after typing
+   
+5. **Send email**:
+   - Use vision: await findAndClick('Send', 'button') with 30s timeout
+   - Alternative fallback: Use keyboard shortcut Cmd+Enter (Mac) or Ctrl+Enter (Windows)
+   - Wait 1000ms to confirm send
+
+**Why Hybrid Approach**:
+- ✅ Vision AI for buttons: Compose and Send have clear, visible labels
+- ✅ Tab navigation for fields: To/Subject/Body have no labels or are next to label buttons
+- ✅ Faster: Tab is instant, vision takes 12-15 seconds per field
+- ✅ More reliable: Tab always works, vision might fail on unlabeled fields
+
+**Vision AI Timeout Pattern**:
+- Always wrap findAndClick with Promise.race for timeout
+- Use 60s timeout for Compose button (first interaction)
+- Use 30s timeout for other fields (To, Subject, Body, Send)
+- Check if result is false and throw error if element not found
+
+**Why Vision-First**:
+- Works regardless of Gmail UI updates or customization
+- Handles different screen sizes and resolutions
+- No brittle fixed coordinates that break
+- Self-healing - adapts to layout changes
+- More reliable than keyboard shortcuts (which can be disabled)
+
+**🌐 WEB APPS & DESKTOP APPS - USE VISION AI:**
+
+**Gmail (Web):**
+- Use vision AI for: Compose button, To field, Subject field, Body, Send button
+- Keyboard shortcuts ONLY for: Cmd+Enter to send (after filling fields)
+- Wait times: 3s for Gmail to load, 2s after Compose click
+
+**YouTube (Web):**
+- Use vision AI for: Search box, video thumbnails, subscribe buttons
+- Keyboard shortcuts: "/" to focus search (if already on page)
+- Wait times: 2s for page load, 2s for search results
+
+**Slack (Desktop App):**
+- Use vision AI for: Channel names, user names, message buttons, emoji reactions
+- Keyboard shortcuts: Cmd+K for quick switcher (OS-level), Cmd+T for threads
+- Wait times: 1s for app to load, 500ms for channel switch
+
+**Outlook (Desktop App):**
+- Use vision AI for: New Email button, To field, Subject field, Body, Send button
+- Keyboard shortcuts: Cmd+N for new email (OS-level), Cmd+Enter to send
+- Wait times: 2s for Outlook to load, 1s for compose window
+
+**Discord (Desktop App):**
+- Use vision AI for: Server icons, channel names, user names, buttons
+- Keyboard shortcuts: Cmd+K for quick switcher (OS-level)
+- Wait times: 1s for server switch, 500ms for channel load
+
+**VS Code (Desktop App):**
+- Use vision AI for: File explorer items, buttons, menu items
+- Keyboard shortcuts: Cmd+P for file search, Cmd+Shift+P for command palette
+- Wait times: 500ms for file open, 300ms for command palette
+
+**Notion (Desktop App):**
+- Use vision AI for: Page titles, blocks, buttons, database items
+- Keyboard shortcuts: Cmd+P for quick find (OS-level), "/" for slash commands
+- Wait times: 1s for page load, 500ms for block creation
+
+**General Rule for ALL Apps:**
+- ✅ Use vision AI to FIND and CLICK UI elements
+- ✅ Use keyboard shortcuts ONLY for OS-level operations (open, close, save, copy, paste)
+- ✅ Use keyboard.type() to TYPE text after vision AI clicks the input field
+- ❌ NEVER use fixed coordinates - they break on different screens
 
 **File Explorer/Finder Patterns:**
 - **New folder**:
@@ -226,6 +352,16 @@ When a command requires multiple steps within an app (e.g., "open Slack, find us
   - Windows: Ctrl+L (address bar)
 
 **User Command:** ${command}
+
+**CRITICAL: Extract Values from User Command**
+The examples below use placeholder values like "example@gmail.com" or "bitfarm stock" - these are TEMPLATES ONLY.
+You MUST extract the actual values from the user's command above and use those in your generated code.
+
+Examples:
+- User says "email to me at john@company.com" → Use "john@company.com", NOT "example@gmail.com"
+- User says "search for AI trends" → Use "AI trends", NOT "bitfarm stock"
+- User says "subject line: Meeting Notes" → Use "Meeting Notes", NOT template subject
+- ALWAYS use the user's actual values, NEVER use example placeholder values
 
 **Output Format:**
 Return ONLY the JavaScript code block without markdown fences. Start directly with the require statement.
@@ -467,6 +603,186 @@ const { keyboard, Key } = require('@nut-tree-fork/nut-js');
     console.log('Email sent to John successfully');
   } catch (error) {
     console.error('Failed to send Outlook email:', error);
+    throw error;
+  }
+})();
+\`\`\`
+
+**CORRECT Example for "Go to YouTube, search for bitfarm stock, copy link, email to me at example@gmail.com" (Web Workflow with Vision Fallback):**
+**NOTE: This example uses "bitfarm stock" and "example@gmail.com" because that's what the example command asks for. YOU must use the actual values from YOUR user's command!**
+\`\`\`
+const { keyboard, Key, mouse, straightTo, Point, Region, Button } = require('@nut-tree-fork/nut-js');
+const { findAndClick } = require('../src/services/visionSpatialService');
+
+(async () => {
+  try {
+    const isMac = process.platform === 'darwin';
+    
+    // Step 1: Open browser
+    if (isMac) {
+      await keyboard.pressKey(Key.LeftSuper, Key.Space);
+      await keyboard.releaseKey(Key.LeftSuper, Key.Space);
+      await new Promise(resolve => setTimeout(resolve, 500));
+      await keyboard.type("chrome");
+    } else {
+      await keyboard.pressKey(Key.LeftSuper);
+      await keyboard.releaseKey(Key.LeftSuper);
+      await new Promise(resolve => setTimeout(resolve, 500));
+      await keyboard.type("chrome");
+    }
+    await new Promise(resolve => setTimeout(resolve, 300));
+    await keyboard.pressKey(Key.Enter);
+    await keyboard.releaseKey(Key.Enter);
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    
+    // Step 2: Open new tab FIRST (don't overwrite user's existing tabs!)
+    if (isMac) {
+      await keyboard.pressKey(Key.LeftSuper, Key.T);
+      await keyboard.releaseKey(Key.LeftSuper, Key.T);
+    } else {
+      await keyboard.pressKey(Key.LeftControl, Key.T);
+      await keyboard.releaseKey(Key.LeftControl, Key.T);
+    }
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    // Step 3: Navigate to YouTube
+    if (isMac) {
+      await keyboard.pressKey(Key.LeftSuper, Key.L);
+      await keyboard.releaseKey(Key.LeftSuper, Key.L);
+    } else {
+      await keyboard.pressKey(Key.LeftControl, Key.L);
+      await keyboard.releaseKey(Key.LeftControl, Key.L);
+    }
+    await new Promise(resolve => setTimeout(resolve, 300));
+    await keyboard.type("youtube.com");
+    await keyboard.pressKey(Key.Enter);
+    await keyboard.releaseKey(Key.Enter);
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Step 4: Search on YouTube (use search box, NOT address bar!)
+    await keyboard.type("/");  // Focus YouTube search box
+    await new Promise(resolve => setTimeout(resolve, 300));
+    await keyboard.type("bitfarm stock");
+    await keyboard.pressKey(Key.Enter);
+    await keyboard.releaseKey(Key.Enter);
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Step 5: Copy current page URL (search results page)
+    if (isMac) {
+      await keyboard.pressKey(Key.LeftSuper, Key.L);
+      await keyboard.releaseKey(Key.LeftSuper, Key.L);
+    } else {
+      await keyboard.pressKey(Key.LeftControl, Key.L);
+      await keyboard.releaseKey(Key.LeftControl, Key.L);
+    }
+    await new Promise(resolve => setTimeout(resolve, 300));
+    if (isMac) {
+      await keyboard.pressKey(Key.LeftSuper, Key.C);
+      await keyboard.releaseKey(Key.LeftSuper, Key.C);
+    } else {
+      await keyboard.pressKey(Key.LeftControl, Key.C);
+      await keyboard.releaseKey(Key.LeftControl, Key.C);
+    }
+    await new Promise(resolve => setTimeout(resolve, 300));
+    
+    // Step 6: Open Gmail in new tab (MUST open new tab, don't overwrite current!)
+    if (isMac) {
+      await keyboard.pressKey(Key.LeftSuper, Key.T);
+      await keyboard.releaseKey(Key.LeftSuper, Key.T);
+    } else {
+      await keyboard.pressKey(Key.LeftControl, Key.T);
+      await keyboard.releaseKey(Key.LeftControl, Key.T);
+    }
+    await new Promise(resolve => setTimeout(resolve, 500));
+    await keyboard.type("mail.google.com");
+    await keyboard.pressKey(Key.Enter);
+    await keyboard.releaseKey(Key.Enter);
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    
+    // Step 7: Click Compose button - USE VISION AI with timeout
+    console.log('[Gmail] Looking for Compose button...');
+    
+    // Add 60-second timeout to vision call (vision API can take 12-15 seconds + processing + retries)
+    const composePromise = findAndClick('Compose', 'button');
+    const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve(false), 60000));
+    const composeSuccess = await Promise.race([composePromise, timeoutPromise]);
+    
+    if (!composeSuccess) {
+      console.error('[Gmail] Vision AI failed or timed out - check VISION_PROVIDER and API keys in .env');
+      throw new Error('Could not find Gmail Compose button (vision timeout or API key missing)');
+    }
+    
+    console.log('[Gmail] Compose button clicked, waiting for dialog...');
+    await new Promise(resolve => setTimeout(resolve, 2000)); // Wait for compose dialog to render
+    
+    // Step 8: Focus "To" field (Gmail's To field has NO label - use Tab to focus)
+    console.log('[Gmail] Focusing To field with Tab key...');
+    // Tab multiple times to ensure we reach the To input field (focus might be on dialog controls)
+    await keyboard.pressKey(Key.Tab);
+    await keyboard.releaseKey(Key.Tab);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    await keyboard.pressKey(Key.Tab);
+    await keyboard.releaseKey(Key.Tab);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    
+    // Step 9: Type recipient (use actual email from user's command!)
+    await keyboard.type("example@gmail.com");
+    await new Promise(resolve => setTimeout(resolve, 300));
+    
+    // Press Enter to confirm recipient and move to Subject field
+    console.log('[Gmail] Confirming recipient with Enter...');
+    await keyboard.pressKey(Key.Return);
+    await keyboard.releaseKey(Key.Return);
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    // Step 10: Type subject (already in Subject field after Enter)
+    console.log('[Gmail] Typing subject...');
+    
+    // Step 11: Type subject
+    await keyboard.type("Bitfarm Stock Videos");
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    // Step 12: Focus message body (Tab to next field)
+    console.log('[Gmail] Focusing message body with Tab key...');
+    await keyboard.pressKey(Key.Tab);
+    await keyboard.releaseKey(Key.Tab);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    
+    // Step 13: Type body and paste YouTube link
+    await keyboard.type("Here are the search results for bitfarm stock: ");
+    await new Promise(resolve => setTimeout(resolve, 200));
+    if (isMac) {
+      await keyboard.pressKey(Key.LeftSuper, Key.V);  // Paste
+      await keyboard.releaseKey(Key.LeftSuper, Key.V);
+    } else {
+      await keyboard.pressKey(Key.LeftControl, Key.V);
+      await keyboard.releaseKey(Key.LeftControl, Key.V);
+    }
+    await new Promise(resolve => setTimeout(resolve, 1500)); // Wait longer for compose dialog to fully render
+    
+    // Step 14: Send email using VISION AI
+    console.log('[Gmail] Looking for Send button (forcing fresh screenshot)...');
+    const sendPromise = findAndClick('Send', 'button');
+    const sendTimeout = new Promise((resolve) => setTimeout(() => resolve(false), 30000));
+    const sendSuccess = await Promise.race([sendPromise, sendTimeout]);
+    
+    if (!sendSuccess) {
+      // Fallback to keyboard shortcut if vision fails
+      console.log('[Gmail] Vision failed for Send button, using keyboard shortcut...');
+      if (isMac) {
+        await keyboard.pressKey(Key.LeftSuper, Key.Enter);
+        await keyboard.releaseKey(Key.LeftSuper, Key.Enter);
+      } else {
+        await keyboard.pressKey(Key.LeftControl, Key.Enter);
+        await keyboard.releaseKey(Key.LeftControl, Key.Enter);
+      }
+    }
+    
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    console.log('YouTube search results emailed successfully');
+  } catch (error) {
+    console.error('Failed to complete YouTube to Gmail workflow:', error);
     throw error;
   }
 })();
