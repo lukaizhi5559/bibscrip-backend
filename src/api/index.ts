@@ -22,6 +22,7 @@ import automationAnalyticsRouter from './automationAnalytics';
 import { createOrchestrationWorkflowRoutes } from './orchestrationWorkflows';
 // Phase 2: DropRegistry - Agent Capability Catalog
 import dropRegistryRouter from './dropRegistry';
+import nutjsRouter from './nutjs';
 import pool from '../config/postgres';
 // Import other route modules directly instead of using dynamic imports
 
@@ -303,6 +304,15 @@ router.get('/', (req, res) => {
           'POST /api/drops/register - Register a new Drop with capability analysis',
           'GET /api/drops/stats - Get Drop registry statistics'
         ]
+      },
+      nutjs: {
+        path: '/api/nutjs',
+        description: 'Nut.js code generation for desktop automation (Grok + Claude)',
+        endpoints: [
+          'POST /api/nutjs - Generate Nut.js code from natural language command',
+          'GET /api/nutjs/health - Health check for Nut.js code generation service',
+          'GET /api/nutjs/examples - Get example commands and patterns'
+        ]
       }
     },
     documentation: {
@@ -334,6 +344,8 @@ router.use('/automation-analytics', automationAnalyticsRouter);
 router.use('/orchestration', createOrchestrationWorkflowRoutes(pool));
 // Phase 2: DropRegistry - Agent Capability Catalog
 router.use('/drops', dropRegistryRouter);
+// Nut.js Code Generation - Specialized LLM for desktop automation
+router.use('/nutjs', nutjsRouter);
 
 // All routers are explicitly imported and mounted above
 // No need for dynamic mounting as it can cause route conflicts
