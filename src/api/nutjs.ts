@@ -107,6 +107,85 @@ router.post('/', authenticate, async (req: Request, res: Response): Promise<void
 });
 
 /**
+ * POST /api/nutjs/plan
+ * Generate structured automation plan from natural language command
+ * 
+ * Request body:
+ * {
+ *   "command": "send email from Gmail about AI trends"
+ * }
+ * 
+ * Response:
+ * {
+ *   "success": true,
+ *   "plan": {
+ *     "planId": "uuid",
+ *     "originalCommand": "send email from Gmail about AI trends",
+ *     "steps": [...],
+ *     "maxRetriesPerStep": 3,
+ *     "totalTimeout": 300000,
+ *     "targetOS": "darwin",
+ *     "targetApp": "gmail",
+ *     "metadata": {...}
+ *   },
+ *   "provider": "grok",
+ *   "latencyMs": 1234
+ * }
+ */
+router.post('/plan', authenticate, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { command } = req.body;
+
+    // Validate request
+    if (!command || typeof command !== 'string' || command.trim().length === 0) {
+      res.status(400).json({
+        success: false,
+        error: 'Missing or invalid "command" parameter. Please provide a natural language command.',
+        example: {
+          command: 'send email from Gmail about AI trends',
+        },
+      });
+      return;
+    }
+
+    logger.info('Automation plan generation request received', {
+      command,
+      userId: (req as any).user?.id,
+    });
+
+    // Generate structured automation plan
+    const result = await nutjsCodeGenerator.generatePlan(command);
+
+    // Success response
+    logger.info('Automation plan generated successfully', {
+      command,
+      provider: result.provider,
+      latencyMs: result.latencyMs,
+      stepCount: result.plan.steps.length,
+      planId: result.plan.planId,
+    });
+
+    res.status(200).json({
+      success: true,
+      plan: result.plan,
+      provider: result.provider,
+      latencyMs: result.latencyMs,
+    });
+  } catch (error: any) {
+    logger.error('Automation plan generation failed', {
+      error: error.message,
+      stack: error.stack,
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Failed to generate automation plan',
+      message: error.message,
+    });
+  }
+});
+
+/**
  * GET /api/nutjs/health
  * Health check endpoint for Nut.js code generation service
  */

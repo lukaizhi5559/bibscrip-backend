@@ -7,9 +7,18 @@
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { logger } from '../utils/logger';
+import { AutomationPlan, AutomationStep } from '../types/automationPlan';
+import { randomUUID } from 'crypto';
 
 export interface NutjsCodeResponse {
   code: string;
+  provider: 'grok' | 'claude';
+  latencyMs: number;
+  error?: string;
+}
+
+export interface AutomationPlanResponse {
+  plan: AutomationPlan;
   provider: 'grok' | 'claude';
   latencyMs: number;
   error?: string;
@@ -965,6 +974,431 @@ Now generate the code for: ${command}`;
     cleaned = cleaned.trim();
     
     return cleaned;
+  }
+
+  /**
+   * Build prompt for structured automation plan generation
+   */
+  private buildStructuredPlanPrompt(command: string): string {
+    const os = process.platform === 'darwin' ? 'darwin' : 'win32';
+    
+    return `You are an expert at creating structured automation plans for desktop tasks.
+
+**USER COMMAND:** "${command}"
+
+**YOUR TASK:** Generate a detailed, step-by-step automation plan as a JSON object.
+
+**CRITICAL RULES:**
+1. Return ONLY valid JSON - no markdown, no explanations, no code fences
+2. Each step must have executable Nut.js code
+3. Use CommonJS require() syntax: const { keyboard, Key } = require('@nut-tree-fork/nut-js');
+4. Import vision service: const { findAndClick } = require('../src/services/visionSpatialService');
+5. Use vision AI (findAndClick) for ALL GUI interactions (buttons, links, fields)
+6. Use keyboard shortcuts ONLY for OS-level operations (Cmd+Space, Cmd+Tab, etc.)
+7. Include verification strategy for each step
+8. Provide alternative strategies (different labels, keyboard shortcuts)
+9. Target OS: ${os} (darwin = macOS, win32 = Windows)
+10. **DESKTOP vs WEB APP DETECTION**:
+    - If user says "desktop app", "calendar app", "mail app", "native app" → Open native macOS/Windows app (Calendar, Mail, etc.)
+    - If user says "gmail", "google calendar", "web", "online", or mentions a website → Use browser workflow
+    - For macOS Calendar: Open Spotlight → Type "Calendar" → Press Return
+    - For macOS Mail: Open Spotlight → Type "Mail" → Press Return
+11. **MANDATORY BROWSER WORKFLOW**: For web-based tasks ONLY (Gmail, Amazon, Slack, Google Calendar web):
+    - Step 1: Open Spotlight (Cmd+Space on Mac, Win key on Windows)
+    - Step 2: Type "Chrome" or "Safari" to launch browser
+    - Step 3: Press Return to open browser
+    - Step 4: Wait 2000ms for browser to open
+    - Step 5: Open new tab (Cmd+T/Ctrl+T)
+    - Step 6: Navigate to URL (Cmd+L, type URL, press Return)
+    - NEVER skip these steps - ALWAYS open browser first before any web navigation
+
+**JSON STRUCTURE:**
+{
+  "steps": [
+    {
+      "id": 1,
+      "description": "Human-readable description",
+      "action": "click_button" | "fill_field" | "navigate_url" | "wait" | "press_key" | "open_app" | "focus_window",
+      "target": "Element label/text to find",
+      "role": "button" | "input" | "textbox" | "link" | "textarea",
+      "value": "Text to type (for fill_field)",
+      "url": "URL to navigate (for navigate_url)",
+      "code": "EXAMPLES:
+        - click_button: await findAndClick('Compose', 'button')
+        - fill_field: await findAndClick('Search', 'input'); await keyboard.type('search term here');
+        - press_key: await keyboard.pressKey(Key.Return); await keyboard.releaseKey(Key.Return);",
+      "verification": "compose_dialog_visible" | "element_visible" | "field_filled" | "button_enabled" | "none",
+      "alternativeLabel": "Alternative text to search for",
+      "alternativeRole": "Alternative role to try",
+      "keyboardShortcut": "await keyboard.type('c')",
+      "waitAfter": 2000,
+      "maxRetries": 3,
+      "verificationContext": {
+        "expectedText": "Text that should appear",
+        "shouldSeeElement": "Element that should be visible"
+      }
+    }
+  ],
+  "maxRetriesPerStep": 3,
+  "totalTimeout": 300000
+}
+
+**CRITICAL: For fill_field actions, ALWAYS include BOTH findAndClick() AND keyboard.type()!**
+
+**EXAMPLE FOR "Send email from Gmail about AI trends":**
+{
+  "steps": [
+    {
+      "id": 1,
+      "description": "Open Spotlight to launch browser",
+      "action": "press_key",
+      "code": "const isMac = process.platform === 'darwin'; if (isMac) { await keyboard.pressKey(Key.LeftSuper, Key.Space); await keyboard.releaseKey(Key.LeftSuper, Key.Space); } else { await keyboard.pressKey(Key.LeftWin); await keyboard.releaseKey(Key.LeftWin); }",
+      "verification": "none",
+      "waitAfter": 500,
+      "maxRetries": 1
+    },
+    {
+      "id": 2,
+      "description": "Type Chrome to open browser",
+      "action": "fill_field",
+      "value": "Chrome",
+      "code": "await keyboard.type('Chrome');",
+      "verification": "none",
+      "waitAfter": 500,
+      "maxRetries": 1
+    },
+    {
+      "id": 3,
+      "description": "Press Return to launch Chrome",
+      "action": "press_key",
+      "code": "await keyboard.pressKey(Key.Return); await keyboard.releaseKey(Key.Return);",
+      "verification": "none",
+      "waitAfter": 2000,
+      "maxRetries": 1
+    },
+    {
+      "id": 4,
+      "description": "Open new browser tab",
+      "action": "press_key",
+      "code": "const isMac = process.platform === 'darwin'; if (isMac) { await keyboard.pressKey(Key.LeftSuper, Key.T); await keyboard.releaseKey(Key.LeftSuper, Key.T); } else { await keyboard.pressKey(Key.LeftControl, Key.T); await keyboard.releaseKey(Key.LeftControl, Key.T); }",
+      "verification": "none",
+      "waitAfter": 1000,
+      "maxRetries": 1
+    },
+    {
+      "id": 5,
+      "description": "Navigate to Gmail",
+      "action": "navigate_url",
+      "url": "https://mail.google.com",
+      "code": "const isMac = process.platform === 'darwin'; if (isMac) { await keyboard.pressKey(Key.LeftSuper, Key.L); await keyboard.releaseKey(Key.LeftSuper, Key.L); } else { await keyboard.pressKey(Key.LeftControl, Key.L); await keyboard.releaseKey(Key.LeftControl, Key.L); } await new Promise(resolve => setTimeout(resolve, 500)); await keyboard.type('https://mail.google.com'); await keyboard.pressKey(Key.Return); await keyboard.releaseKey(Key.Return);",
+      "verification": "element_visible",
+      "verificationContext": {
+        "shouldSeeElement": "Compose"
+      },
+      "waitAfter": 3000,
+      "maxRetries": 2
+    },
+    {
+      "id": 6,
+      "description": "Click Compose button",
+      "action": "click_button",
+      "target": "Compose",
+      "role": "button",
+      "code": "const { findAndClick } = require('../src/services/visionSpatialService'); const composePromise = findAndClick('Compose', 'button'); const composeTimeout = new Promise((resolve) => setTimeout(() => resolve(false), 60000)); const composeSuccess = await Promise.race([composePromise, composeTimeout]); if (!composeSuccess) { const isMac = process.platform === 'darwin'; if (isMac) { await keyboard.type('g'); await new Promise(resolve => setTimeout(resolve, 200)); await keyboard.type('c'); } else { await keyboard.type('c'); } }",
+      "verification": "compose_dialog_visible",
+      "alternativeLabel": "New message",
+      "keyboardShortcut": "await keyboard.type('c')",
+      "waitAfter": 2000,
+      "maxRetries": 3
+    },
+    {
+      "id": 7,
+      "description": "Focus To field and enter recipient",
+      "action": "fill_field",
+      "target": "To",
+      "value": "EXTRACT_FROM_COMMAND",
+      "code": "await keyboard.pressKey(Key.Tab); await keyboard.releaseKey(Key.Tab); await new Promise(resolve => setTimeout(resolve, 300)); await keyboard.pressKey(Key.Tab); await keyboard.releaseKey(Key.Tab); await new Promise(resolve => setTimeout(resolve, 300)); await keyboard.type('recipient@example.com'); await keyboard.pressKey(Key.Return); await keyboard.releaseKey(Key.Return);",
+      "verification": "recipient_added",
+      "waitAfter": 500,
+      "maxRetries": 2
+    },
+    {
+      "id": 8,
+      "description": "Enter subject",
+      "action": "fill_field",
+      "target": "Subject",
+      "value": "EXTRACT_FROM_COMMAND",
+      "code": "await keyboard.type('Latest AI Trends'); await new Promise(resolve => setTimeout(resolve, 500));",
+      "verification": "field_filled",
+      "waitAfter": 500,
+      "maxRetries": 2
+    },
+    {
+      "id": 9,
+      "description": "Enter email body",
+      "action": "fill_field",
+      "target": "Body",
+      "value": "EXTRACT_FROM_COMMAND",
+      "code": "await keyboard.pressKey(Key.Tab); await keyboard.releaseKey(Key.Tab); await new Promise(resolve => setTimeout(resolve, 300)); await keyboard.type('Here are the latest trends in AI technology...'); await new Promise(resolve => setTimeout(resolve, 500));",
+      "verification": "field_filled",
+      "waitAfter": 500,
+      "maxRetries": 2
+    },
+    {
+      "id": 10,
+      "description": "Click Send button",
+      "action": "click_button",
+      "target": "Send",
+      "role": "button",
+      "code": "const sendPromise = findAndClick('Send', 'button'); const sendTimeout = new Promise((resolve) => setTimeout(() => resolve(false), 30000)); const sendSuccess = await Promise.race([sendPromise, sendTimeout]); if (!sendSuccess) { const isMac = process.platform === 'darwin'; if (isMac) { await keyboard.pressKey(Key.LeftSuper, Key.Return); await keyboard.releaseKey(Key.LeftSuper, Key.Return); } else { await keyboard.pressKey(Key.LeftControl, Key.Return); await keyboard.releaseKey(Key.LeftControl, Key.Return); } }",
+      "verification": "email_sent",
+      "keyboardShortcut": "const isMac = process.platform === 'darwin'; if (isMac) { await keyboard.pressKey(Key.LeftSuper, Key.Return); await keyboard.releaseKey(Key.LeftSuper, Key.Return); } else { await keyboard.pressKey(Key.LeftControl, Key.Return); await keyboard.releaseKey(Key.LeftControl, Key.Return); }",
+      "waitAfter": 1500,
+      "maxRetries": 2
+    }
+  ],
+  "maxRetriesPerStep": 3,
+  "totalTimeout": 300000
+}
+
+**IMPORTANT NOTES:**
+- **CRITICAL**: EVERY browser workflow MUST start with opening a new tab (Cmd+T/Ctrl+T) as Step 1
+- **NEVER** type URLs directly without opening a new tab first - this will type in the wrong field
+- **CRITICAL**: For fill_field actions, code MUST include BOTH:
+  1. await findAndClick('FieldName', 'input') - to focus the field
+  2. await keyboard.type('value to type') - to type the text
+  Example: await findAndClick('Search', 'input'); await keyboard.type('search term');
+- Extract actual values from user command (recipient email, subject, body content, search terms)
+- If user doesn't specify recipient, use placeholder and note in description
+- Use Tab navigation for Gmail fields (To, Subject, Body) - they have no labels
+- Use vision AI for buttons (Compose, Send) - they have clear labels
+- Include proper waits between steps (at least 1000ms after opening new tab)
+- Provide keyboard shortcuts as fallbacks for critical actions
+- **GOOGLE CALENDAR**: Use keyboard shortcut 'c' to create new event (more reliable than clicking Create button)
+- **GOOGLE CALENDAR**: After pressing 'c', wait 2000ms, then title field is auto-focused - just type title directly
+- **GOOGLE CALENDAR**: Date field shows current date (e.g., "Nov 12, 2025") - click this INPUT field to change date
+- **GOOGLE CALENDAR**: When clicking date, use findAndClick with the actual date text (e.g., "Nov 12, 2025", not "Date")
+- **GOOGLE CALENDAR**: After clicking date field, type the calculated date in format "12/4/2025" or "December 4, 2025"
+- **MACOS CALENDAR**: After Cmd+N, wait 1000ms, title field is auto-focused - just type title (no click needed)
+- **MACOS CALENDAR**: After typing title, press Tab to move to date/time fields
+- **DATE CALCULATION REQUIRED**: Parse natural language dates and calculate actual dates:
+  - "next month Wednesday" → Find first Wednesday of next month (e.g., today is Nov 12, 2025 → Dec 3, 2025 is first Wed)
+  - "next month on a wed" → Same as above
+  - "next week" → Add 7 days to current date
+  - Always output calculated date in MM/DD/YYYY format (e.g., "12/3/2025")
+- **CRITICAL**: NEVER put date/time info in the title - only put the event description (e.g., "Dentist Appointment")
+
+Now generate the JSON plan for the user's command. Return ONLY the JSON object, no other text.`;
+  }
+
+  /**
+   * Generate structured automation plan with automatic fallback
+   * Tries Grok first, falls back to Claude if Grok fails
+   */
+  async generatePlan(command: string): Promise<AutomationPlanResponse> {
+    const errors: string[] = [];
+
+    // Try Grok first
+    if (this.grokClient) {
+      try {
+        return await this.generatePlanWithGrok(command);
+      } catch (error: any) {
+        errors.push(`Grok: ${error.message}`);
+        logger.warn('Grok failed for plan generation, falling back to Claude', { error: error.message });
+      }
+    } else {
+      errors.push('Grok: Client not initialized (missing GROK_API_KEY)');
+    }
+
+    // Fallback to Claude
+    if (this.claudeClient) {
+      try {
+        return await this.generatePlanWithClaude(command);
+      } catch (error: any) {
+        errors.push(`Claude: ${error.message}`);
+        logger.error('All providers failed for plan generation', { errors });
+      }
+    } else {
+      errors.push('Claude: Client not initialized (missing ANTHROPIC_API_KEY)');
+    }
+
+    // All providers failed
+    throw new Error(`Failed to generate automation plan. Errors: ${errors.join('; ')}`);
+  }
+
+  /**
+   * Generate structured plan using Grok
+   */
+  private async generatePlanWithGrok(command: string): Promise<AutomationPlanResponse> {
+    if (!this.grokClient) {
+      throw new Error('Grok client not initialized');
+    }
+
+    const startTime = Date.now();
+    const model = this.useGrok4 ? 'grok-2-1212' : 'grok-2-latest';
+
+    try {
+      logger.info('Generating automation plan with Grok', { model, command });
+
+      const completion = await this.grokClient.chat.completions.create({
+        model,
+        messages: [
+          {
+            role: 'system',
+            content: 'You are an expert automation planner. Return only valid JSON, no markdown or explanations.',
+          },
+          {
+            role: 'user',
+            content: this.buildStructuredPlanPrompt(command),
+          },
+        ],
+        temperature: 0.3, // Lower temperature for more consistent JSON output
+      });
+
+      const latencyMs = Date.now() - startTime;
+      const rawResponse = completion.choices[0]?.message?.content || '';
+
+      // Parse JSON response
+      const planData = this.parseAndValidatePlan(rawResponse, command);
+      
+      // Update metadata with correct provider and generation time
+      planData.metadata.provider = 'grok';
+      planData.metadata.generationTime = latencyMs;
+
+      logger.info('Grok plan generation successful', { latencyMs, stepCount: planData.steps.length });
+
+      return {
+        plan: planData,
+        provider: 'grok',
+        latencyMs,
+      };
+    } catch (error: any) {
+      const latencyMs = Date.now() - startTime;
+      logger.error('Grok plan generation failed', {
+        error: error.message,
+        latencyMs,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Generate structured plan using Claude
+   */
+  private async generatePlanWithClaude(command: string): Promise<AutomationPlanResponse> {
+    if (!this.claudeClient) {
+      throw new Error('Claude client not initialized');
+    }
+
+    const startTime = Date.now();
+
+    try {
+      logger.info('Generating automation plan with Claude', { command });
+
+      const message = await this.claudeClient.messages.create({
+        model: 'claude-3-5-sonnet-20241022',
+        max_tokens: 8192,
+        temperature: 0.3,
+        messages: [
+          {
+            role: 'user',
+            content: this.buildStructuredPlanPrompt(command),
+          },
+        ],
+      });
+
+      const latencyMs = Date.now() - startTime;
+      const rawResponse = message.content[0]?.type === 'text' ? message.content[0].text : '';
+
+      // Parse JSON response
+      const planData = this.parseAndValidatePlan(rawResponse, command);
+      
+      // Update metadata with correct provider and generation time
+      planData.metadata.provider = 'claude';
+      planData.metadata.generationTime = latencyMs;
+
+      logger.info('Claude plan generation successful', { latencyMs, stepCount: planData.steps.length });
+
+      return {
+        plan: planData,
+        provider: 'claude',
+        latencyMs,
+      };
+    } catch (error: any) {
+      const latencyMs = Date.now() - startTime;
+      logger.error('Claude plan generation failed', {
+        error: error.message,
+        latencyMs,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Parse and validate automation plan JSON
+   */
+  private parseAndValidatePlan(rawResponse: string, originalCommand: string): AutomationPlan {
+    // Remove markdown code fences if present
+    let cleaned = rawResponse.replace(/```(?:json)?\n?/g, '').trim();
+
+    // Parse JSON
+    let planJson: any;
+    try {
+      planJson = JSON.parse(cleaned);
+    } catch (error) {
+      throw new Error(`Failed to parse plan JSON: ${error}`);
+    }
+
+    // Validate required fields
+    if (!planJson.steps || !Array.isArray(planJson.steps)) {
+      throw new Error('Plan must have a "steps" array');
+    }
+
+    if (planJson.steps.length === 0) {
+      throw new Error('Plan must have at least one step');
+    }
+
+    // Validate each step
+    for (const step of planJson.steps) {
+      if (!step.id || !step.description || !step.action || !step.code) {
+        throw new Error(`Invalid step: missing required fields (id, description, action, code)`);
+      }
+    }
+
+    // Build complete AutomationPlan object
+    const plan: AutomationPlan = {
+      planId: randomUUID(),
+      originalCommand,
+      steps: planJson.steps,
+      maxRetriesPerStep: planJson.maxRetriesPerStep || 3,
+      totalTimeout: planJson.totalTimeout || 300000,
+      targetOS: process.platform === 'darwin' ? 'darwin' : 'win32',
+      targetApp: this.detectTargetApp(originalCommand),
+      metadata: {
+        provider: 'grok', // Will be overwritten by caller
+        generationTime: 0, // Will be overwritten by caller
+        createdAt: new Date().toISOString(),
+      },
+    };
+
+    return plan;
+  }
+
+  /**
+   * Detect target application from command
+   */
+  private detectTargetApp(command: string): string | undefined {
+    const lowerCommand = command.toLowerCase();
+    
+    if (lowerCommand.includes('gmail')) return 'gmail';
+    if (lowerCommand.includes('outlook')) return 'outlook';
+    if (lowerCommand.includes('slack')) return 'slack';
+    if (lowerCommand.includes('youtube')) return 'youtube';
+    if (lowerCommand.includes('discord')) return 'discord';
+    if (lowerCommand.includes('notion')) return 'notion';
+    if (lowerCommand.includes('vs code') || lowerCommand.includes('vscode')) return 'vscode';
+    
+    return undefined;
   }
 
   /**
