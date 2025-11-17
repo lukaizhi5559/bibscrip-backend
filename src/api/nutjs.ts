@@ -7,6 +7,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import { nutjsCodeGenerator } from '../services/nutjsCodeGenerator';
 import { logger } from '../utils/logger';
 import { authenticate } from '../middleware/auth';
+import { GuideRequest } from '../types/automationGuide';
 
 const router = express.Router();
 
@@ -180,6 +181,62 @@ router.post('/plan', authenticate, async (req: Request, res: Response): Promise<
     res.status(500).json({
       success: false,
       error: 'Failed to generate automation plan',
+      message: error.message,
+    });
+  }
+});
+
+/**
+ * POST /api/nutjs/guide
+ * Generate interactive automation guide with step-by-step explanations
+ * Protected by API key authentication
+ * 
+ * Request body:
+ * {
+ *   "command": "How do I use AI plugins in Figma",
+ *   "context": {
+ *     "failedStep": 2,
+ *     "failureType": "app_not_found",
+ *     "error": "Figma not installed"
+ *   }
+ * }
+ */
+router.post('/guide', authenticate, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { command, context } = req.body as GuideRequest;
+
+    if (!command || typeof command !== 'string') {
+      res.status(400).json({
+        success: false,
+        error: 'Invalid request: command is required and must be a string',
+      });
+      return;
+    }
+
+    logger.info('Generating automation guide', { command, hasContext: !!context });
+
+    const request: GuideRequest = {
+      command,
+      context: context || {},
+    };
+
+    const result = await nutjsCodeGenerator.generateGuide(request);
+
+    res.json({
+      success: true,
+      guide: result.guide,
+      provider: result.provider,
+      latencyMs: result.latencyMs,
+    });
+  } catch (error: any) {
+    logger.error('Failed to generate automation guide', {
+      error: error.message,
+      stack: error.stack,
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Failed to generate automation guide',
       message: error.message,
     });
   }

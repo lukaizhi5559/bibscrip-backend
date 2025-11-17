@@ -8,6 +8,7 @@ import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { logger } from '../utils/logger';
 import { AutomationPlan, AutomationStep } from '../types/automationPlan';
+import { AutomationGuide, GuideRequest } from '../types/automationGuide';
 import { randomUUID } from 'crypto';
 
 export interface NutjsCodeResponse {
@@ -19,6 +20,13 @@ export interface NutjsCodeResponse {
 
 export interface AutomationPlanResponse {
   plan: AutomationPlan;
+  provider: 'grok' | 'claude';
+  latencyMs: number;
+  error?: string;
+}
+
+export interface AutomationGuideResponse {
+  guide: AutomationGuide;
   provider: 'grok' | 'claude';
   latencyMs: number;
   error?: string;
@@ -1397,8 +1405,206 @@ Now generate the JSON plan for the user's command. Return ONLY the JSON object, 
     if (lowerCommand.includes('discord')) return 'discord';
     if (lowerCommand.includes('notion')) return 'notion';
     if (lowerCommand.includes('vs code') || lowerCommand.includes('vscode')) return 'vscode';
+    if (lowerCommand.includes('figma')) return 'figma';
+    if (lowerCommand.includes('calendar')) return 'calendar';
     
     return undefined;
+  }
+
+  /**
+   * Build prompt for structured automation guide generation
+   */
+  private buildStructuredGuidePrompt(request: GuideRequest): string {
+    const os = process.platform === 'darwin' ? 'darwin' : 'win32';
+    const isRecovery = !!request.context?.failedStep;
+    
+    return `You are an expert at creating interactive automation guides that teach users while automating tasks.
+
+**USER COMMAND:** "${request.command}"
+${isRecovery ? `\n**RECOVERY MODE:** Step ${request.context?.failedStep} failed with error: ${request.context?.error}\n` : ''}
+
+**YOUR TASK:** Generate an educational automation guide as a JSON object with step-by-step explanations.
+
+**CRITICAL RULES:**
+1. Return ONLY valid JSON - no markdown, no explanations, no code fences
+2. Each step must have executable Nut.js code AND educational explanation
+3. Use CommonJS require() syntax: const { keyboard, Key } = require('@nut-tree-fork/nut-js');
+4. Import vision service: const { findAndClick } = require('../src/services/visionSpatialService');
+5. Include console.log() markers for frontend parsing: "[GUIDE SUMMARY]", "[GUIDE STEP 1]", etc.
+6. Target OS: ${os} (darwin = macOS, win32 = Windows)
+7. Detect guide keywords: "how do i", "show me how", "guide me", "teach me", "what's the way to"
+8. Provide educational context - explain WHY each step is needed, not just WHAT it does
+9. Include common failure recoveries (app not installed, permission denied, etc.)
+10. Use vision AI (findAndClick) for ALL GUI interactions
+11. Use keyboard shortcuts ONLY for OS-level operations
+
+**GUIDE STRUCTURE:**
+{
+  "intro": "Educational introduction explaining what the guide will teach and why it's useful",
+  "steps": [
+    {
+      "id": 1,
+      "title": "Short step title",
+      "explanation": "Detailed explanation of what this step does and why it's important",
+      "code": "const { keyboard, Key } = require('@nut-tree-fork/nut-js'); await keyboard.pressKey(Key.LeftSuper, Key.Space); await keyboard.releaseKey(Key.LeftSuper, Key.Space);",
+      "marker": "[GUIDE STEP 1]",
+      "canFail": true,
+      "expectedDuration": 2000,
+      "verification": {
+        "type": "element_visible",
+        "expectedElement": "Spotlight search"
+      },
+      "commonFailure": "app_not_found",
+      "waitAfter": 1000
+    }
+  ],
+  "commonRecoveries": [
+    {
+      "failureType": "app_not_found",
+      "title": "Install the application",
+      "explanation": "The application isn't installed on your system",
+      "manualInstructions": "Visit [app website] to download and install the application",
+      "helpLinks": [
+        {
+          "title": "Download Page",
+          "url": "https://example.com/download"
+        }
+      ]
+    }
+  ]
+}
+
+**MARKER FORMAT:**
+- Intro: console.log("[GUIDE SUMMARY] Your intro message here");
+- Steps: console.log("[GUIDE STEP 1] Your step explanation here");
+- Each step's code must include its marker at the beginning
+
+**FULL CODE GENERATION:**
+After defining the JSON structure, generate the complete executable code with all markers:
+- Start with: console.log("[GUIDE SUMMARY] ...");
+- For each step: console.log("[GUIDE STEP N] ..."); followed by the step's code
+- Include proper waits and error handling
+
+**COMMON FAILURE TYPES:**
+- "app_not_found": Application not installed
+- "permission_denied": Insufficient permissions
+- "timeout": Operation took too long
+- "verification_failed": Expected UI element not found
+- "execution_error": Code execution failed
+
+**EXAMPLE FOR "How do I setup SSH keys":**
+{
+  "intro": "SSH keys provide a secure way to authenticate with remote servers without using passwords. I'll guide you through generating and configuring SSH keys on your system.",
+  "steps": [
+    {
+      "id": 1,
+      "title": "Open Terminal",
+      "explanation": "To set up SSH keys, we first need to open the Terminal application. Terminal is a command-line interface where we'll run the commands to generate your SSH key pair. On macOS, Terminal is the built-in application for executing shell commands. You can find it manually by clicking on your Desktop/Finder → Go → Applications → Utilities → Terminal and double-clicking it, or simply press Cmd+Space and type 'Terminal' to open it via Spotlight.",
+      "code": "const { keyboard, Key } = require('@nut-tree-fork/nut-js'); const { findAndClick } = require('../src/services/visionSpatialService'); console.log('[GUIDE STEP 1] Opening Terminal application to begin SSH key setup...'); await keyboard.pressKey(Key.LeftSuper, Key.Space); await keyboard.releaseKey(Key.LeftSuper, Key.Space); await new Promise(resolve => setTimeout(resolve, 500)); await keyboard.type('Terminal'); await keyboard.pressKey(Key.Return); await keyboard.releaseKey(Key.Return); await new Promise(resolve => setTimeout(resolve, 2000));",
+      "marker": "[GUIDE STEP 1]",
+      "canFail": true,
+      "expectedDuration": 4000,
+      "verification": {
+        "type": "app_running",
+        "expectedAppName": "Terminal"
+      },
+      "commonFailure": "app_not_found",
+      "waitAfter": 1000
+    },
+    {
+      "id": 2,
+      "title": "Generate SSH Key",
+      "explanation": "Now we'll generate your SSH key pair using the ssh-keygen command. This creates two files: a private key (id_rsa) that stays on your computer, and a public key (id_rsa.pub) that you'll share with servers. We're using RSA encryption with 4096 bits for strong security. To do this manually, simply type 'ssh-keygen -t rsa -b 4096 -C \"your_email@example.com\"' in Terminal and press Enter. You'll be prompted to choose a location (press Enter for default) and set a passphrase (optional but recommended for extra security).",
+      "code": "console.log('[GUIDE STEP 2] Generating SSH key pair with RSA 4096-bit encryption...'); await keyboard.type('ssh-keygen -t rsa -b 4096 -C \"your_email@example.com\"'); await keyboard.pressKey(Key.Return); await keyboard.releaseKey(Key.Return); await new Promise(resolve => setTimeout(resolve, 2000));",
+      "marker": "[GUIDE STEP 2]",
+      "canFail": false,
+      "expectedDuration": 3000,
+      "verification": {
+        "type": "none"
+      },
+      "waitAfter": 2000
+    },
+    {
+      "id": 3,
+      "title": "Accept Default Location",
+      "explanation": "The system is asking where to save your SSH key. The default location (~/.ssh/id_rsa) is recommended because most tools look for keys there automatically. When you see the prompt 'Enter file in which to save the key', simply press Enter to accept the default. If you're doing this manually, you'll see this prompt in Terminal after running ssh-keygen.",
+      "code": "console.log('[GUIDE STEP 3] Accepting default SSH key location (~/.ssh/id_rsa)...'); await keyboard.pressKey(Key.Return); await keyboard.releaseKey(Key.Return); await new Promise(resolve => setTimeout(resolve, 1000));",
+      "marker": "[GUIDE STEP 3]",
+      "canFail": false,
+      "expectedDuration": 2000,
+      "verification": {
+        "type": "none"
+      },
+      "waitAfter": 1000
+    },
+    {
+      "id": 4,
+      "title": "Set Passphrase (Optional)",
+      "explanation": "You're now prompted to set a passphrase for your SSH key. A passphrase adds an extra layer of security - even if someone gets your private key file, they can't use it without the passphrase. You'll see two prompts: 'Enter passphrase' and 'Enter same passphrase again'. For this guide, we'll skip the passphrase by pressing Enter twice, but in production you should type a strong passphrase and press Enter, then type it again and press Enter.",
+      "code": "console.log('[GUIDE STEP 4] Skipping passphrase for demonstration (press Enter twice)...'); await keyboard.pressKey(Key.Return); await keyboard.releaseKey(Key.Return); await new Promise(resolve => setTimeout(resolve, 500)); await keyboard.pressKey(Key.Return); await keyboard.releaseKey(Key.Return); await new Promise(resolve => setTimeout(resolve, 1000));",
+      "marker": "[GUIDE STEP 4]",
+      "canFail": false,
+      "expectedDuration": 3000,
+      "verification": {
+        "type": "none"
+      },
+      "waitAfter": 1000
+    },
+    {
+      "id": 5,
+      "title": "View Public Key",
+      "explanation": "Your SSH key pair has been generated! Now we'll display your public key so you can copy it. The public key is what you'll add to GitHub, GitLab, or other services. To view it manually, type 'cat ~/.ssh/id_rsa.pub' in Terminal and press Enter. The 'cat' command displays file contents, and the tilde (~) represents your home directory. You'll see a long string starting with 'ssh-rsa' - that's your public key.",
+      "code": "console.log('[GUIDE STEP 5] Displaying your public SSH key...'); await keyboard.type('cat ~/.ssh/id_rsa.pub'); await keyboard.pressKey(Key.Return); await keyboard.releaseKey(Key.Return); await new Promise(resolve => setTimeout(resolve, 2000));",
+      "marker": "[GUIDE STEP 5]",
+      "canFail": false,
+      "expectedDuration": 3000,
+      "verification": {
+        "type": "none"
+      },
+      "waitAfter": 2000
+    }
+  ],
+  "commonRecoveries": [
+    {
+      "failureType": "app_not_found",
+      "title": "Install Figma",
+      "explanation": "Figma is not installed on your system. You'll need to download and install it first.",
+      "manualInstructions": "1. Visit figma.com/downloads\\n2. Download Figma for your operating system\\n3. Install the application\\n4. Create a free account or sign in\\n5. Try this guide again",
+      "helpLinks": [
+        {
+          "title": "Figma Downloads",
+          "url": "https://www.figma.com/downloads/"
+        },
+        {
+          "title": "Getting Started with Figma",
+          "url": "https://help.figma.com/hc/en-us/articles/360039827914"
+        }
+      ]
+    }
+  ]
+}
+
+**IMPORTANT NOTES:**
+- Extract actual values from user command
+- **CRITICAL: Each step's "explanation" must be BOTH instructional AND directional**
+  - Start by stating what you're about to do
+  - Explain WHY this step is necessary
+  - Describe WHAT tool/app/command you're using
+  - Explain HOW it works or what it does
+  - **PROVIDE MANUAL DIRECTIONS: Tell users how to do it manually (e.g., "You can also find this by clicking Desktop/Finder → Go → Applications → Utilities")**
+  - Include keyboard shortcuts, menu paths, or UI locations
+  - Provide context about the technology/concept
+  - Make it educational AND actionable
+- Example good explanation: "To set up SSH keys, we first need to open the Terminal application. Terminal is a command-line interface where we'll run the commands to generate your SSH key pair. On macOS, Terminal is the built-in application for executing shell commands. You can also find it manually by clicking Finder → Go → Applications → Utilities → Terminal, or by searching for 'Terminal' in Spotlight (Cmd+Space)."
+- Example bad explanation: "Open Terminal" (too short, not educational, no manual directions)
+- Include verification strategies
+- Pre-generate recovery steps for common failures
+- Use proper wait times between steps
+- Include helpful links in recovery steps
+- Make explanations beginner-friendly with manual alternatives
+- Each explanation should be 3-5 sentences minimum (including manual directions)
+
+Now generate the JSON guide for the user's command. Return ONLY the JSON object, no other text.`;
   }
 
   /**
@@ -1434,6 +1640,253 @@ Now generate the JSON plan for the user's command. Return ONLY the JSON object, 
 
     // All providers failed
     throw new Error(`Failed to generate Nut.js code. Errors: ${errors.join('; ')}`);
+  }
+
+  /**
+   * Generate automation guide with automatic fallback
+   * Tries Grok first, falls back to Claude if Grok fails
+   */
+  async generateGuide(request: GuideRequest): Promise<AutomationGuideResponse> {
+    const errors: string[] = [];
+
+    // Try Grok first
+    if (this.grokClient) {
+      try {
+        return await this.generateGuideWithGrok(request);
+      } catch (error: any) {
+        errors.push(`Grok: ${error.message}`);
+        logger.warn('Grok failed for guide generation, falling back to Claude', { error: error.message });
+      }
+    } else {
+      errors.push('Grok: Client not initialized (missing GROK_API_KEY)');
+    }
+
+    // Fallback to Claude
+    if (this.claudeClient) {
+      try {
+        return await this.generateGuideWithClaude(request);
+      } catch (error: any) {
+        errors.push(`Claude: ${error.message}`);
+        logger.error('All providers failed for guide generation', { errors });
+      }
+    } else {
+      errors.push('Claude: Client not initialized (missing ANTHROPIC_API_KEY)');
+    }
+
+    // All providers failed
+    throw new Error(`Failed to generate automation guide. Errors: ${errors.join('; ')}`);
+  }
+
+  /**
+   * Generate guide using Grok
+   */
+  private async generateGuideWithGrok(request: GuideRequest): Promise<AutomationGuideResponse> {
+    if (!this.grokClient) {
+      throw new Error('Grok client not initialized');
+    }
+
+    const startTime = Date.now();
+    const model = this.useGrok4 ? 'grok-2-1212' : 'grok-2-latest';
+
+    try {
+      logger.info('Generating automation guide with Grok', { model, command: request.command });
+
+      const completion = await this.grokClient.chat.completions.create({
+        model,
+        messages: [
+          {
+            role: 'system',
+            content: 'You are an expert automation guide creator. Return only valid JSON, no markdown or explanations.',
+          },
+          {
+            role: 'user',
+            content: this.buildStructuredGuidePrompt(request),
+          },
+        ],
+        temperature: 0.3,
+      });
+
+      const latencyMs = Date.now() - startTime;
+      const rawResponse = completion.choices[0]?.message?.content || '';
+
+      // Parse JSON response
+      const guideData = this.parseAndValidateGuide(rawResponse, request);
+      
+      // Update metadata
+      guideData.metadata.provider = 'grok';
+      guideData.metadata.generationTime = latencyMs;
+
+      logger.info('Grok guide generation successful', { latencyMs, stepCount: guideData.steps.length });
+
+      return {
+        guide: guideData,
+        provider: 'grok',
+        latencyMs,
+      };
+    } catch (error: any) {
+      const latencyMs = Date.now() - startTime;
+      logger.error('Grok guide generation failed', {
+        error: error.message,
+        latencyMs,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Generate guide using Claude
+   */
+  private async generateGuideWithClaude(request: GuideRequest): Promise<AutomationGuideResponse> {
+    if (!this.claudeClient) {
+      throw new Error('Claude client not initialized');
+    }
+
+    const startTime = Date.now();
+
+    try {
+      logger.info('Generating automation guide with Claude', { command: request.command });
+
+      const message = await this.claudeClient.messages.create({
+        model: 'claude-3-5-sonnet-20241022',
+        max_tokens: 8192,
+        temperature: 0.3,
+        messages: [
+          {
+            role: 'user',
+            content: this.buildStructuredGuidePrompt(request),
+          },
+        ],
+      });
+      const latencyMs = Date.now() - startTime;
+      const rawResponse = message.content[0]?.type === 'text' ? message.content[0].text : '';
+
+      // Parse JSON response
+      const guideData = this.parseAndValidateGuide(rawResponse, request);
+      
+      // Update metadata
+      guideData.metadata.provider = 'claude';
+      guideData.metadata.generationTime = latencyMs;
+
+      logger.info('Claude guide generation successful', { latencyMs, stepCount: guideData.steps.length });
+
+      return {
+        guide: guideData,
+        provider: 'claude',
+        latencyMs,
+      };
+    } catch (error: any) {
+      const latencyMs = Date.now() - startTime;
+      logger.error('Claude guide generation failed', {
+        error: error.message,
+        latencyMs,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Parse and validate automation guide JSON
+   */
+  private parseAndValidateGuide(rawResponse: string, request: GuideRequest): AutomationGuide {
+    // Remove markdown code fences if present
+    let cleaned = rawResponse.replace(/```(?:json)?\n?/g, '').trim();
+
+    // Parse JSON
+    let guideJson: any;
+    try {
+      guideJson = JSON.parse(cleaned);
+    } catch (error) {
+      throw new Error(`Failed to parse guide JSON: ${error}`);
+    }
+
+    // Validate required fields
+    if (!guideJson.intro || typeof guideJson.intro !== 'string') {
+      throw new Error('Guide must have an "intro" string');
+    }
+
+    if (!guideJson.steps || !Array.isArray(guideJson.steps)) {
+      throw new Error('Guide must have a "steps" array');
+    }
+
+    if (guideJson.steps.length === 0) {
+      throw new Error('Guide must have at least one step');
+    }
+
+    // Validate each step
+    for (const step of guideJson.steps) {
+      if (!step.id || !step.title || !step.explanation || !step.code || !step.marker) {
+        throw new Error(`Invalid step structure: ${JSON.stringify(step)}`);
+      }
+    }
+
+    // Generate full executable code with markers
+    const fullCode = this.generateFullGuideCode(guideJson);
+
+    // Calculate estimated duration
+    const estimatedDuration = guideJson.steps.reduce((total: number, step: any) => {
+      return total + (step.expectedDuration || 2000) + (step.waitAfter || 0);
+    }, 0);
+
+    // Build complete guide
+    const guide: AutomationGuide = {
+      id: randomUUID(),
+      command: request.command,
+      intro: guideJson.intro,
+      steps: guideJson.steps,
+      code: fullCode,
+      totalSteps: guideJson.steps.length,
+      commonRecoveries: guideJson.commonRecoveries || [],
+      metadata: {
+        provider: 'grok', // Will be overwritten by caller
+        generationTime: 0, // Will be overwritten by caller
+        targetApp: this.detectTargetApp(request.command),
+        targetOS: process.platform === 'darwin' ? 'darwin' : 'win32',
+        estimatedDuration,
+      },
+    };
+
+    return guide;
+  }
+
+  /**
+   * Generate full executable code with all markers
+   */
+  private generateFullGuideCode(guideJson: any): string {
+    let code = `// Auto-generated Guide Code\n`;
+    code += `const { keyboard, Key, mouse, screen } = require('@nut-tree-fork/nut-js');\n`;
+    code += `const { findAndClick } = require('../src/services/visionSpatialService');\n\n`;
+    code += `(async () => {\n`;
+    code += `  try {\n`;
+    code += `    // Intro\n`;
+    code += `    console.log("[GUIDE SUMMARY] ${guideJson.intro.replace(/"/g, '\\"')}");\n`;
+    code += `    await new Promise(resolve => setTimeout(resolve, 1000));\n\n`;
+
+    // Add each step
+    for (const step of guideJson.steps) {
+      code += `    // Step ${step.id}: ${step.title}\n`;
+      code += `    console.log("[GUIDE STEP ${step.id}] ${step.explanation.replace(/"/g, '\\"')}");\n`;
+      
+      // Extract code without require statements (already at top)
+      let stepCode = step.code;
+      stepCode = stepCode.replace(/const\s+\{[^}]+\}\s*=\s*require\([^)]+\);\s*/g, '');
+      stepCode = stepCode.replace(/console\.log\([^)]+\);\s*/g, ''); // Remove duplicate markers
+      
+      code += `    ${stepCode}\n`;
+      
+      if (step.waitAfter) {
+        code += `    await new Promise(resolve => setTimeout(resolve, ${step.waitAfter}));\n`;
+      }
+      code += `\n`;
+    }
+
+    code += `    console.log("[GUIDE COMPLETE] Guide finished successfully!");\n`;
+    code += `  } catch (error) {\n`;
+    code += `    console.error('[GUIDE ERROR]', error.message);\n`;
+    code += `    throw error;\n`;
+    code += `  }\n`;
+    code += `})();\n`;
+
+    return code;
   }
 
   /**
