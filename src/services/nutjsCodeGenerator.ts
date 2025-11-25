@@ -1,7 +1,7 @@
 /**
  * Nut.js Code Generator Service
  * Specialized LLM service for generating ONLY Nut.js desktop automation code
- * Uses Grok as primary provider with Claude as fallback
+ * Priority: Claude (fastest vision) → OpenAI GPT-4V → Grok (fallback)
  */
 
 import OpenAI from 'openai';
@@ -13,60 +13,266 @@ import { randomUUID } from 'crypto';
 
 export interface NutjsCodeResponse {
   code: string;
-  provider: 'grok' | 'claude';
+  provider: 'claude' | 'openai' | 'grok';
   latencyMs: number;
   error?: string;
+  usedVision?: boolean; // Indicates if screenshot was processed
+}
+
+export interface ScreenshotData {
+  base64: string; // Base64 encoded image
+  mimeType?: string; // e.g., 'image/png', 'image/jpeg'
 }
 
 export interface AutomationPlanResponse {
   plan: AutomationPlan;
-  provider: 'grok' | 'claude';
+  provider: 'claude' | 'openai' | 'grok';
   latencyMs: number;
   error?: string;
 }
 
 export interface AutomationGuideResponse {
   guide: AutomationGuide;
-  provider: 'grok' | 'claude';
+  provider: 'claude' | 'openai' | 'grok';
   latencyMs: number;
   error?: string;
 }
 
 export class NutjsCodeGenerator {
-  private grokClient: OpenAI | null = null;
   private claudeClient: Anthropic | null = null;
-  private useGrok4: boolean = false; // Set to true for highest quality, false for speed
+  private openaiClient: OpenAI | null = null;
+  private grokClient: OpenAI | null = null;
+  private useGrok4: boolean = false;
 
   constructor() {
-    // Check if we should use Grok 4 (higher quality, slower) or grok-beta (faster)
     this.useGrok4 = process.env.USE_GROK_4 === 'true';
-    // Initialize Grok client (uses OpenAI-compatible API)
+    
+    // Priority 1: Claude (fastest vision, 3-8s)
+    if (process.env.ANTHROPIC_API_KEY) {
+      this.claudeClient = new Anthropic({
+        apiKey: process.env.ANTHROPIC_API_KEY,
+      });
+      logger.info('Claude client initialized (Priority 1 - fastest vision)');
+    } else {
+      logger.warn('ANTHROPIC_API_KEY not found - Claude unavailable');
+    }
+
+    // Priority 2: OpenAI GPT-4 Vision (fast vision, 5-10s)
+    if (process.env.OPENAI_API_KEY) {
+      this.openaiClient = new OpenAI({
+        apiKey: process.env.OPENAI_API_KEY,
+      });
+      logger.info('OpenAI client initialized (Priority 2 - fast vision)');
+    } else {
+      logger.warn('OPENAI_API_KEY not found - OpenAI unavailable');
+    }
+
+    // Priority 3: Grok (slower vision 30s+, but good fallback)
     if (process.env.GROK_API_KEY) {
       this.grokClient = new OpenAI({
         apiKey: process.env.GROK_API_KEY,
         baseURL: 'https://api.x.ai/v1',
       });
-      logger.info('Grok client initialized for Nut.js code generation');
+      logger.info('Grok client initialized (Priority 3 - fallback)');
     } else {
-      logger.warn('GROK_API_KEY not found - Grok provider unavailable');
-    }
-
-    // Initialize Claude client as fallback
-    if (process.env.ANTHROPIC_API_KEY) {
-      this.claudeClient = new Anthropic({
-        apiKey: process.env.ANTHROPIC_API_KEY,
-        baseURL: 'https://api.anthropic.com',
-      });
-      logger.info('Claude client initialized as fallback for Nut.js code generation');
-    } else {
-      logger.warn('ANTHROPIC_API_KEY not found - Claude fallback unavailable');
+      logger.warn('GROK_API_KEY not found - Grok unavailable');
     }
   }
 
   /**
    * Build the specialized prompt for Nut.js code generation
+   * Enhanced with vision context when screenshot is provided
    */
-  private buildNutjsPrompt(command: string): string {
+  private buildNutjsPrompt(command: string, hasScreenshot: boolean = false, context?: any): string {
+    // Add unique timestamp to prevent API caching
+    const cacheBuster = hasScreenshot ? `\n[Request ID: ${Date.now()}-${Math.random().toString(36).substr(2, 9)}]` : '';
+    
+    // Add frontend instruction if provided
+    const frontendInstruction = context?.instruction ? `\n\n**FRONTEND INSTRUCTION:** ${context.instruction}` : '';
+    
+    // Check if type-only mode is requested
+    const isTypeOnlyMode = context?.responseMode === 'type-only';
+    
+    // Build type-only mode instructions if flag is set
+    const typeOnlyInstructions = isTypeOnlyMode ? `
+- **CRITICAL - TYPE ONLY MODE ENABLED**:
+  * **NEVER use findAndClick() or any UI interaction functions**
+  * **ONLY use keyboard.type() or typeWithNewlines() to type responses**
+  * **DO NOT click, navigate, or interact with UI elements**
+  * Your ONLY job is to TYPE the answer/solution into the active text field
+  * This is a PROMPT-ANYWHERE request - just type the response, nothing else
+` : '';
+    
+    const visionContext = hasScreenshot ? `
+**VISION MODE:** Screenshot provided. Analyze what's on screen and generate NutJS code.${cacheBuster}
+- ALWAYS return executable code (never plain text)
+${typeOnlyInstructions}
+- For "describe/answer/explain" commands:
+  * **CRITICAL - CONTEXT AWARENESS**: Look at what's ALREADY on screen
+  * **DETECT INCOMPLETE CONTENT**: Look for signs of incomplete code/text:
+    - Functions without return statements
+    - Comments like "// Need to complete", "// TODO", "// Rest of this"
+    - Unfinished logic or calculations
+    - Partial lists or numbered items
+  * If user says "finish...", "cont...", "continue...", "continue", "add more", "keep going", "complete this", "finish this" → CONTINUE/COMPLETE from where content left off
+  * **DO NOT restart numbering** - if screen shows "3. Item", continue with "4. Item", "5. Item"
+  * **DO NOT rewrite existing code** - only add the MISSING/INCOMPLETE parts
+  * **DO NOT repeat content** - only add NEW content that continues or completes the existing content
+  * **CRITICAL**: Look for the LANGUAGE specified in the screenshot (e.g., "TypeScript or JavaScript", "Python", "SQL")
+  * **CRITICAL**: Answer in THAT language ONLY - don't provide alternatives in other languages
+  * If screenshot says "TypeScript or JavaScript" → provide TypeScript/JavaScript solution ONLY
+  * If screenshot says "SQL" → provide SQL solution ONLY
+  * Analyze the screenshot to understand the ACTUAL question being asked
+  * **BE CONCISE**: Type ONLY the essential solution - no verbose explanations
+  * **NO fluff**: Skip introductions, skip "let me explain", skip unnecessary details
+  * **Get to the point**: Code + brief explanation if needed, that's it
+  * **CRITICAL**: Use multi-line template literals with ACTUAL line breaks
+  * **CRITICAL**: MUST include typeWithNewlines() helper function
+  * **CRITICAL**: keyboard.type() does NOT handle \\n - must use Key.Enter OR Shift+Enter
+  * **CRITICAL - SMART NEWLINE DETECTION**: Analyze the screenshot to determine the correct newline key:
+    - **Chat apps** (ChatGPT, Grok, Gemini, Slack, Teams, Discord): Use **Shift+Enter** for newlines (Enter submits)
+    - **Search boxes** (Google Search, Bing): Use **Shift+Enter** for newlines (Enter searches)
+    - **Text editors** (Google Docs, Notes, Word): Use **Enter** for newlines (no submit button)
+    - **Detection cues**:
+      * Send button visible → Chat app → Use Shift+Enter
+      * Search button/magnifying glass → Search box → Use Shift+Enter
+      * "Shift+Return to add new line" hint → Use Shift+Enter
+      * Formatting toolbar with send button → Chat app → Use Shift+Enter
+      * Large text area, no send button → Text editor → Use Enter
+  
+**REQUIRED PATTERN for multi-line answers:**
+\`\`\`javascript
+// Helper function - ALWAYS include this
+// IMPORTANT: Detects if we need Shift+Enter (chat apps) or just Enter (text editors)
+async function typeWithNewlines(text, useShiftEnter = false) {
+  for (const char of text) {
+    if (char === '\\n') {
+      if (useShiftEnter) {
+        // For chat apps: Shift+Enter adds newline without submitting
+        await keyboard.pressKey(Key.LeftShift);
+        await keyboard.pressKey(Key.Enter);
+        await keyboard.releaseKey(Key.Enter);
+        await keyboard.releaseKey(Key.LeftShift);
+      } else {
+        // For text editors: Enter adds newline
+        await keyboard.pressKey(Key.Enter);
+        await keyboard.releaseKey(Key.Enter);
+      }
+    } else {
+      await keyboard.type(char);
+    }
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+}
+
+// Multi-line answer (adapt to actual question - KEEP IT CONCISE)
+const answer = \`[Solution/Code - direct and brief]
+
+[Key points only if needed]
+
+[Example only if essential]\`;
+
+// ANALYZE SCREENSHOT to determine if it's a chat app or text editor
+// Chat apps (ChatGPT, Grok, Slack, Teams): Use Shift+Enter
+// Text editors (Google Docs, Notes): Use Enter only
+const isChatApp = true; // Set based on screenshot analysis
+
+// Type with appropriate newline handling
+await typeWithNewlines(answer, isChatApp);
+\`\`\`
+
+**EXAMPLES - Smart Newline Detection:**
+
+**Example 1: ChatGPT/Grok (Chat App)**
+\`\`\`javascript
+// Screenshot shows: ChatGPT input with send button
+const isChatApp = true; // Send button visible → Chat app
+await typeWithNewlines(answer, true); // Use Shift+Enter
+\`\`\`
+
+**Example 2: Slack/Teams (Chat App with Formatting)**
+\`\`\`javascript
+// Screenshot shows: Slack message box with "Shift+Return to add new line" hint
+const isChatApp = true; // Hint visible → Chat app
+await typeWithNewlines(answer, true); // Use Shift+Enter
+\`\`\`
+
+**Example 3: Google Search (Search Box)**
+\`\`\`javascript
+// Screenshot shows: Google search box with magnifying glass/search button
+const isChatApp = true; // Search button visible → Use Shift+Enter
+await typeWithNewlines(answer, true); // Use Shift+Enter to avoid triggering search
+\`\`\`
+
+**Example 4: Google Docs (Text Editor)**
+\`\`\`javascript
+// Screenshot shows: Large text area, no send button, document editor
+const isChatApp = false; // No send button → Text editor
+await typeWithNewlines(answer, false); // Use Enter only
+\`\`\`
+
+**EXAMPLE - Good (concise, respects language from screenshot):**
+// If screenshot says "TypeScript or JavaScript"
+const answer = \`TypeScript Solution:
+
+function findImmediatePercentage(deliveries: Delivery[]): number {
+  const firstOrders = deliveries.reduce((acc, d) => {
+    if (!acc[d.customer_id] || d.order_date < acc[d.customer_id].order_date) {
+      acc[d.customer_id] = d;
+    }
+    return acc;
+  }, {});
+  
+  const immediate = Object.values(firstOrders).filter(
+    o => o.order_date === o.customer_pref_delivery_date
+  ).length;
+  
+  return Math.round((immediate / Object.keys(firstOrders).length) * 100 * 100) / 100;
+}\`;
+
+**EXAMPLE - Bad (wrong language):**
+// Screenshot says "TypeScript" but you provide SQL - DON'T DO THIS
+const answer = \`SQL Solution: SELECT * FROM...\`;
+
+**EXAMPLES - Context Continuation/Completion (CRITICAL):**
+
+**Example 1: List Continuation**
+// Screenshot shows: "2. JWT" and "3. MFA" and user says "continue to 4"
+// CORRECT:
+const answer = \`4. OAuth 2.0
+5. API Keys\`;
+// WRONG: Starting from 2 again (already on screen!)
+
+**Example 2: Code Completion**
+// Screenshot shows incomplete function with "// Need to complete the rest"
+// CORRECT - Only add missing parts:
+const answer = \`  const immediateCount = Array.from(firstOrders.values()).filter(...).length;
+  return Math.round((immediateCount / total) * 100 * 100) / 100;
+}\`;
+// WRONG: Rewriting entire function (already on screen!)
+
+**Example 3: Sentence Completion**
+// Screenshot shows: "The Pythagorean theorem states that a² + b² = ..."
+// CORRECT:
+const answer = \`c²\`;
+// WRONG: "The Pythagorean theorem states that a² + b² = c²" (repeating!)
+
+**Example 4: Math Problem Completion**
+// Screenshot shows: "Solve for x: 2x + 5 = 15\n2x = 15 - 5\n2x = 10\n"
+// CORRECT:
+const answer = \`x = 10 / 2
+x = 5\`;
+// WRONG: Starting from "2x + 5 = 15" again (already on screen!)
+
+**Example 5: Formula Completion**
+// Screenshot shows: "Area of circle = πr²\nCircumference = ..."
+// CORRECT:
+const answer = \`2πr\`;
+// WRONG: "Area of circle = πr²\nCircumference = 2πr" (repeating!)
+
+**KEY PRINCIPLE: Only type what's MISSING or NEXT, never repeat what's already visible!**
+${frontendInstruction}
+` : '';
     return `You are a Nut.js code generation expert. Your ONLY job is to generate pure Nut.js code for desktop automation tasks.
 
 **CRITICAL RULES - READ CAREFULLY:**
@@ -118,6 +324,102 @@ The code will receive context.os parameter ('darwin' for Mac, 'win32' for Window
 - Regions: \`new Region(x, y, width, height)\`
 - Wait: Use \`await new Promise(resolve => setTimeout(resolve, ms))\` for delays
 - Search in app: Use \`Cmd+K\` (Key.LeftSuper + Key.K) for quick search in most apps
+
+**CRITICAL: Typing Large Text with Newlines**
+When typing long text (answers, descriptions, multi-line content):
+1. **CRITICAL**: keyboard.type() does NOT interpret \\n as Enter - it ignores them!
+2. **MUST manually press Key.Enter** for every newline character
+3. **Use this EXACT pattern for multi-line text:**
+
+\`\`\`javascript
+// Helper function to type text with proper newline handling
+async function typeWithNewlines(text) {
+  for (const char of text) {
+    if (char === '\\n') {
+      await keyboard.pressKey(Key.Enter);
+      await keyboard.releaseKey(Key.Enter);
+    } else {
+      await keyboard.type(char);
+    }
+    await new Promise(resolve => setTimeout(resolve, 30)); // Delay per character
+  }
+}
+
+// Multi-line answer with \\n for line breaks
+const answer = \`TypeScript Solution:
+
+function secondHighest(employees) {
+  const salaries = [...new Set(employees.map(e => e.salary))].sort((a,b) => b-a);
+  return salaries[1] || null;
+}
+
+
+
+Example:
+Input: [{id:1, salary:100}]
+Output: null\`;
+
+// Type with proper newline handling
+await typeWithNewlines(answer);
+\`\`\`
+
+**WHY THIS IS REQUIRED:**
+- keyboard.type() does NOT convert \\n to Enter key presses
+- Google Docs, Word, and most apps require ACTUAL Enter key events
+- Without this, all newlines are ignored and text appears compressed
+
+**CRITICAL: Answer Formatting Rules**
+When generating answers to questions (coding problems, explanations, etc.):
+- **BE CONCISE AND DIRECT**: No introductions, no verbose explanations
+- **NO fluff**: Skip "Looking at this question...", "I can help...", "Let me explain..."
+- **Start with the solution immediately** - code first, brief notes if needed
+- **Keep it short**: Only include what's essential to answer the question
+- **MUST use multi-line template literals** - the template literal MUST span multiple lines in your code
+- **DO NOT write the template literal on one line** - it will appear compressed
+- **Each section should be on its own line** with blank lines between sections
+
+**FORMATTING STRUCTURE (adapt content to actual question):**
+\`\`\`javascript
+// Helper function - ALWAYS include this for multi-line text
+async function typeWithNewlines(text) {
+  for (const char of text) {
+    if (char === '\\n') {
+      await keyboard.pressKey(Key.Enter);
+      await keyboard.releaseKey(Key.Enter);
+    } else {
+      await keyboard.type(char);
+    }
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+}
+
+// Multi-line template literal - notice it spans many lines
+const answer = \`[Section 1 title or solution]
+
+[Code, explanation, or details for section 1]
+
+[Section 2 if needed]
+
+[Code or explanation for section 2]
+
+[Example or edge cases if relevant]\`;
+
+// Type with proper newline handling
+await typeWithNewlines(answer);
+\`\`\`
+
+**KEY POINTS:**
+- ALWAYS include the typeWithNewlines() helper function
+- **BE CONCISE**: Only essential information, no verbose explanations
+- Replace the bracketed placeholders with your actual answer content
+- Keep the multi-line format with blank lines between sections
+- The helper will convert \\n to actual Enter key presses
+
+**CONCISE ANSWER STRUCTURE:**
+- Solution/Code (the actual answer)
+- Brief explanation (only if absolutely necessary)
+- Example (only if it adds clarity)
+- Skip everything else
 
 **IMPORTANT**: Use the forked package \`@nut-tree-fork/nut-js\` version 4.2.6+
 
@@ -368,7 +670,7 @@ When a command requires multiple steps within an app (e.g., "open Slack, find us
   - macOS: Cmd+Shift+G
   - Windows: Ctrl+L (address bar)
 
-**User Command:** ${command}
+${visionContext}**User Command:** ${command}
 
 **CRITICAL: Extract Values from User Command**
 The examples below use placeholder values like "example@gmail.com" or "bitfarm stock" - these are TEMPLATES ONLY.
@@ -855,25 +1157,44 @@ Now generate the code for: ${command}`;
 
   /**
    * Generate Nut.js code using Grok (primary)
+   * Supports vision-enhanced generation with screenshot context
    */
-  private async generateWithGrok(command: string): Promise<NutjsCodeResponse> {
+  private async generateWithGrok(command: string, screenshot?: ScreenshotData): Promise<NutjsCodeResponse> {
     if (!this.grokClient) {
       throw new Error('Grok client not initialized');
     }
 
     const startTime = Date.now();
-    const prompt = this.buildNutjsPrompt(command);
+    const hasScreenshot = !!screenshot;
+    const prompt = this.buildNutjsPrompt(command, hasScreenshot);
 
     try {
-      logger.info('Generating Nut.js code with Grok', { command });
+      logger.info('Generating Nut.js code with Grok', { command, hasScreenshot });
 
-      // Try grok-2-latest as the current production model
-      // grok-3 and grok-4 may not be available yet via API
-      const model = this.useGrok4 ? 'grok-2-latest' : 'grok-2-latest';
-      logger.info(`Using Grok model: ${model}`, { useGrok4: this.useGrok4 });
+      // Use vision model if screenshot provided, otherwise use standard model
+      // grok-4 supports both text and vision (multimodal)
+      // grok-2-latest is text-only but faster
+      const model = hasScreenshot ? 'grok-4' : (this.useGrok4 ? 'grok-4' : 'grok-2-latest');
+      logger.info(`Using Grok model: ${model}`, { useGrok4: this.useGrok4, vision: hasScreenshot });
+      
+      // Build message content - multimodal if screenshot provided
+      // Using OpenAI-compatible format (xAI supports both OpenAI and native formats)
+      const userContent: any = hasScreenshot ? [
+        {
+          type: 'image_url',
+          image_url: {
+            url: `data:${screenshot.mimeType || 'image/png'};base64,${screenshot.base64}`,
+            detail: 'low', // Use 'low' for faster processing (vs 'high' or 'auto')
+          },
+        },
+        {
+          type: 'text',
+          text: prompt,
+        },
+      ] : prompt;
       
       const response = await this.grokClient.chat.completions.create({
-        model, // grok-3 for speed, grok-2-latest for quality
+        model,
         messages: [
           {
             role: 'system',
@@ -881,12 +1202,15 @@ Now generate the code for: ${command}`;
           },
           {
             role: 'user',
-            content: prompt,
+            content: userContent,
           },
         ],
-        temperature: 0.5, // Slightly higher for faster generation
-        max_tokens: 3000, // Increased for complex multi-step workflows
-        stream: false, // Ensure non-streaming for predictable latency
+        temperature: 0.2, // Very low for fastest generation
+        max_tokens: hasScreenshot ? 1000 : 800, // Aggressive reduction for speed
+        stream: false,
+        top_p: 0.9, // Slightly reduce sampling space for faster generation
+        // Add unique user identifier to prevent caching
+        user: `nutjs_${Date.now()}`,
       });
 
       const code = response.choices[0]?.message?.content?.trim() || '';
@@ -905,6 +1229,7 @@ Now generate the code for: ${command}`;
         code: cleanedCode,
         provider: 'grok',
         latencyMs,
+        usedVision: hasScreenshot,
       };
     } catch (error: any) {
       const latencyMs = Date.now() - startTime;
@@ -919,28 +1244,61 @@ Now generate the code for: ${command}`;
 
   /**
    * Generate Nut.js code using Claude (fallback)
+   * Supports vision-enhanced generation with screenshot context
    */
-  private async generateWithClaude(command: string): Promise<NutjsCodeResponse> {
+  private async generateWithClaude(command: string, screenshot?: ScreenshotData, context?: any): Promise<NutjsCodeResponse> {
     if (!this.claudeClient) {
       throw new Error('Claude client not initialized');
     }
 
     const startTime = Date.now();
-    const prompt = this.buildNutjsPrompt(command);
+    const hasScreenshot = !!screenshot;
+    const prompt = this.buildNutjsPrompt(command, hasScreenshot, context);
 
     try {
-      logger.info('Generating Nut.js code with Claude (fallback)', { command });
+      // Log screenshot hash for debugging (use middle section to avoid PNG header)
+      const screenshotHash = screenshot ? screenshot.base64.substring(100, 132) : 'none';
+      const screenshotSize = screenshot ? screenshot.base64.length : 0;
+      logger.info('Generating Nut.js code with Claude (fallback)', { 
+        command, 
+        hasScreenshot,
+        screenshotHash,
+        screenshotSize,
+        responseMode: context?.responseMode,
+        isTypeOnly: context?.responseMode === 'type-only',
+        timestamp: Date.now()
+      });
+
+      // Build message content - multimodal if screenshot provided
+      const messageContent: any = hasScreenshot ? [
+        {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: screenshot.mimeType || 'image/png',
+            data: screenshot.base64,
+          },
+        },
+        {
+          type: 'text',
+          text: prompt,
+        },
+      ] : prompt;
 
       const response = await this.claudeClient.messages.create({
-        model: 'claude-sonnet-4.5-20250514', // Latest Claude 4.5 Sonnet
-        max_tokens: 3000, // Increased for complex multi-step workflows
-        temperature: 0.5, // Slightly higher for faster generation
+        model: 'claude-sonnet-4-20250514', // Latest Claude Sonnet 4
+        max_tokens: hasScreenshot ? 1000 : 800, // Optimized for speed
+        temperature: 0.2, // Lower for faster generation
         messages: [
           {
             role: 'user',
-            content: prompt,
+            content: messageContent,
           },
         ],
+        // Add metadata to prevent caching
+        metadata: {
+          user_id: `nutjs_${Date.now()}`,
+        },
       });
 
       const code = response.content[0]?.type === 'text' ? response.content[0].text.trim() : '';
@@ -959,10 +1317,91 @@ Now generate the code for: ${command}`;
         code: cleanedCode,
         provider: 'claude',
         latencyMs,
+        usedVision: hasScreenshot,
       };
     } catch (error: any) {
       const latencyMs = Date.now() - startTime;
       logger.error('Claude code generation failed', {
+        command,
+        error: error.message,
+        latencyMs,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Generate Nut.js code using OpenAI GPT-4 Vision
+   */
+  private async generateWithOpenAI(command: string, screenshot?: ScreenshotData): Promise<NutjsCodeResponse> {
+    if (!this.openaiClient) {
+      throw new Error('OpenAI client not initialized');
+    }
+
+    const startTime = Date.now();
+    const hasScreenshot = !!screenshot;
+    const prompt = this.buildNutjsPrompt(command, hasScreenshot);
+
+    try {
+      logger.info('Generating Nut.js code with OpenAI GPT-4V', { command, hasScreenshot });
+
+      // Use GPT-4o (supports vision) - faster and cheaper than gpt-4-turbo
+      const model = 'gpt-4o'; // gpt-4o supports both text and vision
+      
+      // Build message content - multimodal if screenshot provided
+      const userContent: any = hasScreenshot ? [
+        {
+          type: 'image_url',
+          image_url: {
+            url: `data:${screenshot.mimeType || 'image/png'};base64,${screenshot.base64}`,
+            detail: 'low', // Use 'low' for faster processing
+          },
+        },
+        {
+          type: 'text',
+          text: prompt,
+        },
+      ] : prompt;
+
+      const response = await this.openaiClient.chat.completions.create({
+        model,
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a Nut.js code generation expert. Generate ONLY executable Nut.js code without any explanations or markdown.',
+          },
+          {
+            role: 'user',
+            content: userContent,
+          },
+        ],
+        temperature: 0.2,
+        max_tokens: hasScreenshot ? 1000 : 800,
+        // Add unique user identifier to prevent caching
+        user: `nutjs_${Date.now()}`,
+      });
+
+      const code = response.choices[0]?.message?.content?.trim() || '';
+      const latencyMs = Date.now() - startTime;
+
+      // Clean up markdown code fences if present
+      const cleanedCode = this.cleanCodeOutput(code);
+
+      logger.info('OpenAI generated Nut.js code successfully', {
+        command,
+        latencyMs,
+        codeLength: cleanedCode.length,
+      });
+
+      return {
+        code: cleanedCode,
+        provider: 'openai',
+        latencyMs,
+        usedVision: hasScreenshot,
+      };
+    } catch (error: any) {
+      const latencyMs = Date.now() - startTime;
+      logger.error('OpenAI code generation failed', {
         command,
         error: error.message,
         latencyMs,
@@ -1608,37 +2047,69 @@ Now generate the JSON guide for the user's command. Return ONLY the JSON object,
   }
 
   /**
-   * Generate Nut.js code with automatic fallback
-   * Tries Grok first, falls back to Claude if Grok fails
+   * Generate Nut.js code from natural language command
+   * Priority: Claude (3-8s) → OpenAI GPT-4V (5-10s) → Grok (30s+)
+   * If vision fails, falls back to text-only generation
    */
-  async generateCode(command: string): Promise<NutjsCodeResponse> {
+  async generateCode(command: string, screenshot?: ScreenshotData, context?: any): Promise<NutjsCodeResponse> {
     const errors: string[] = [];
+    const hasScreenshot = !!screenshot;
+    
+    // Extract context flags
+    const responseMode = context?.responseMode;
+    const instruction = context?.instruction;
 
-    // Try Grok first
-    if (this.grokClient) {
-      try {
-        return await this.generateWithGrok(command);
-      } catch (error: any) {
-        errors.push(`Grok: ${error.message}`);
-        logger.warn('Grok failed, falling back to Claude', { error: error.message });
-      }
-    } else {
-      errors.push('Grok: Client not initialized (missing GROK_API_KEY)');
-    }
-
-    // Fallback to Claude
+    // Priority 1: Claude (fastest vision, 3-8s)
     if (this.claudeClient) {
       try {
-        return await this.generateWithClaude(command);
+        logger.info('Using Claude (Priority 1)', { hasScreenshot, responseMode });
+        return await this.generateWithClaude(command, screenshot, context);
       } catch (error: any) {
         errors.push(`Claude: ${error.message}`);
-        logger.error('All providers failed for Nut.js code generation', { errors });
+        logger.warn('Claude failed, trying OpenAI', { error: error.message });
       }
     } else {
       errors.push('Claude: Client not initialized (missing ANTHROPIC_API_KEY)');
     }
 
+    // Priority 2: OpenAI GPT-4 Vision (fast vision, 5-10s)
+    if (this.openaiClient) {
+      try {
+        logger.info('Using OpenAI GPT-4V (Priority 2)', { hasScreenshot });
+        return await this.generateWithOpenAI(command, screenshot);
+      } catch (error: any) {
+        errors.push(`OpenAI: ${error.message}`);
+        logger.warn('OpenAI failed, trying Grok', { error: error.message });
+      }
+    } else {
+      errors.push('OpenAI: Client not initialized (missing OPENAI_API_KEY)');
+    }
+
+    // Priority 3: Grok (slower vision 30s+, but good fallback)
+    if (this.grokClient) {
+      try {
+        logger.info('Using Grok (Priority 3 - fallback)', { hasScreenshot });
+        return await this.generateWithGrok(command, screenshot);
+      } catch (error: any) {
+        errors.push(`Grok: ${error.message}`);
+        logger.warn('Grok failed', { error: error.message });
+        
+        // Last resort: Try without vision if we had a screenshot
+        if (hasScreenshot && this.claudeClient) {
+          try {
+            logger.info('Last resort: Retrying Claude without vision');
+            return await this.generateWithClaude(command, undefined);
+          } catch (retryError: any) {
+            errors.push(`Claude without vision: ${retryError.message}`);
+          }
+        }
+      }
+    } else {
+      errors.push('Grok: Client not initialized (missing GROK_API_KEY)');
+    }
+
     // All providers failed
+    logger.error('All providers failed for Nut.js code generation', { errors });
     throw new Error(`Failed to generate Nut.js code. Errors: ${errors.join('; ')}`);
   }
 

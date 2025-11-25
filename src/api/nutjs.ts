@@ -4,7 +4,7 @@
  */
 
 import express, { Request, Response, NextFunction } from 'express';
-import { nutjsCodeGenerator } from '../services/nutjsCodeGenerator';
+import { nutjsCodeGenerator, ScreenshotData } from '../services/nutjsCodeGenerator';
 import { logger } from '../utils/logger';
 import { authenticate } from '../middleware/auth';
 import { GuideRequest } from '../types/automationGuide';
@@ -14,10 +14,15 @@ const router = express.Router();
 /**
  * POST /api/nutjs
  * Generate Nut.js code from natural language command
+ * Supports vision-enhanced generation with screenshot context
  * 
  * Request body:
  * {
- *   "command": "open my terminal"
+ *   "command": "open my terminal",
+ *   "screenshot": {  // Optional - for vision-enhanced generation
+ *     "base64": "iVBORw0KGgoAAAANSUhEUgAA...",
+ *     "mimeType": "image/png"  // Optional, defaults to image/png
+ *   }
  * }
  * 
  * Response:
@@ -26,6 +31,7 @@ const router = express.Router();
  *   "code": "import { keyboard, Key } from '@nut-tree/nut-js'; ...",
  *   "provider": "grok",
  *   "latencyMs": 1234,
+ *   "usedVision": true,  // Indicates if screenshot was processed
  *   "validation": {
  *     "valid": true
  *   }
@@ -33,7 +39,7 @@ const router = express.Router();
  */
 router.post('/', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
-    const { command } = req.body;
+    const { command, screenshot, fastMode, context } = req.body;
 
     // Validate request
     if (!command || typeof command !== 'string' || command.trim().length === 0) {
@@ -42,18 +48,43 @@ router.post('/', authenticate, async (req: Request, res: Response): Promise<void
         error: 'Missing or invalid "command" parameter. Please provide a natural language command.',
         example: {
           command: 'open my terminal',
+          screenshot: {
+            base64: 'iVBORw0KGgoAAAANSUhEUgAA...',
+            mimeType: 'image/png',
+          },
+          fastMode: false, // Optional: skip vision for 5-10x faster response
         },
       });
       return;
     }
 
+    // Validate screenshot if provided
+    let screenshotData: ScreenshotData | undefined;
+    if (screenshot && !fastMode) { // Skip vision if fastMode is enabled
+      if (!screenshot.base64 || typeof screenshot.base64 !== 'string') {
+        res.status(400).json({
+          success: false,
+          error: 'Invalid screenshot data. "base64" field is required and must be a string.',
+        });
+        return;
+      }
+      screenshotData = {
+        base64: screenshot.base64,
+        mimeType: screenshot.mimeType || 'image/png',
+      };
+    }
+
     logger.info('Nut.js code generation request received', {
       command,
+      hasScreenshot: !!screenshotData,
+      fastMode: !!fastMode,
+      responseMode: context?.responseMode,
+      requestId: context?.requestId,
       userId: (req as any).user?.id,
     });
 
-    // Generate Nut.js code
-    const result = await nutjsCodeGenerator.generateCode(command);
+    // Generate Nut.js code (with optional screenshot and context)
+    const result = await nutjsCodeGenerator.generateCode(command, screenshotData, context);
 
     // Validate the generated code
     const validation = nutjsCodeGenerator.validateNutjsCode(result.code);
@@ -82,6 +113,7 @@ router.post('/', authenticate, async (req: Request, res: Response): Promise<void
       provider: result.provider,
       latencyMs: result.latencyMs,
       codeLength: result.code.length,
+      usedVision: result.usedVision,
     });
 
     res.status(200).json({
@@ -89,6 +121,7 @@ router.post('/', authenticate, async (req: Request, res: Response): Promise<void
       code: result.code,
       provider: result.provider,
       latencyMs: result.latencyMs,
+      usedVision: result.usedVision,
       validation: {
         valid: true,
       },
@@ -292,32 +325,56 @@ router.get('/examples', (req: Request, res: Response): void => {
       command: 'open my terminal',
       description: 'Opens the terminal application using keyboard shortcuts',
       pattern: 'Uses Cmd+Space (Spotlight) → type "terminal" → Enter',
+      visionEnhanced: false,
     },
     {
       command: 'find winter clothes on Amazon',
       description: 'Opens browser, navigates to Amazon, and searches for winter clothes',
       pattern: 'Opens browser → navigates to amazon.com → types in search → clicks search',
+      visionEnhanced: false,
+    },
+    {
+      command: 'Polish up this email',
+      description: 'Vision-enhanced: Analyzes screenshot to see email draft, improves text, and types it back',
+      pattern: 'Sees email content in screenshot → selects all text → generates improved version → types polished text',
+      visionEnhanced: true,
+      requiresScreenshot: true,
+    },
+    {
+      command: 'Fill out this form',
+      description: 'Vision-enhanced: Identifies form fields from screenshot and fills them appropriately',
+      pattern: 'Analyzes form structure → navigates to each field → fills with appropriate data',
+      visionEnhanced: true,
+      requiresScreenshot: true,
     },
     {
       command: 'how much memory left on my computer',
       description: 'Opens Activity Monitor/Task Manager to check memory usage',
       pattern: 'Opens system monitor → navigates to memory tab → reads memory info',
+      visionEnhanced: false,
     },
     {
       command: 'take a screenshot',
       description: 'Captures a screenshot using Nut.js screen API',
       pattern: 'Uses screen.capture() to take screenshot',
+      visionEnhanced: false,
     },
     {
       command: 'type hello world',
       description: 'Types the text "hello world" at current cursor position',
       pattern: 'Uses keyboard.type() to input text',
+      visionEnhanced: false,
     },
   ];
 
   res.status(200).json({
     success: true,
     examples,
+    visionSupport: {
+      enabled: true,
+      description: 'Send a screenshot with your command for context-aware automation. The AI will analyze what\'s on screen and generate precise NutJS code.',
+      usage: 'Include a "screenshot" object with "base64" image data in your request.',
+    },
     note: 'These are example commands. The actual generated code will vary based on the specific command and system.',
   });
 });

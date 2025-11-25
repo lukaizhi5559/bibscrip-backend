@@ -44,8 +44,10 @@ app.use(cors({
 // Request logging middleware
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
-// JSON body parser
-app.use(express.json());
+// JSON body parser with increased limit for screenshot uploads
+// Default is 100kb, we need more for base64 encoded images
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
 // Swagger configuration
 const swaggerOptions = {
