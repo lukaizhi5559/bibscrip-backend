@@ -1740,6 +1740,17 @@ User: "Generate an image of Mickey Mouse in ChatGPT"
 - Include \`screenshot\` steps when you need to verify results or get fresh context
 - **NEVER use fixed coordinates** - always use vision-based descriptions
 
+**VISION SPEED MODES (for screenshot steps):**
+- Add \`speedMode\` field to screenshot steps to control analysis speed/accuracy trade-off
+- \`speedMode: "fast"\` - ~1-1.5s, minimal tokens (300), use for quick checks, error detection
+- \`speedMode: "balanced"\` - ~1.7-2s, moderate tokens (800), DEFAULT for most steps
+- \`speedMode: "accurate"\` - ~3-4s, max tokens (2000), use ONLY for critical OCR, precise text extraction
+- **GUIDELINES:**
+  * Use "fast" for: Checking if page loaded, detecting errors, verifying button exists
+  * Use "balanced" for: General screen analysis, UI state verification, most automation steps (DEFAULT)
+  * Use "accurate" for: Reading important text precisely, extracting data, critical decisions
+- Example: \`{ "type": "screenshot", "tag": "verify_loaded", "analyzeWithVision": true, "speedMode": "fast" }\`
+
 **ERROR HANDLING:**
 - Set appropriate \`onError\` strategies (replan for critical failures, skip for optional steps)
 - Add proactive \`questions\` if command is ambiguous

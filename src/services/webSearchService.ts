@@ -34,7 +34,7 @@ export interface SearchOptions {
 }
 
 export class WebSearchService {
-  private providers: string[] = ['duckduckgo', 'serper', 'bing'];
+  private providers: string[] = ['brave', 'duckduckgo', 'serper', 'bing'];
   private fallbackEnabled: boolean = true;
 
   /**
@@ -88,6 +88,8 @@ export class WebSearchService {
         return this.searchDuckDuckGo(query, options);
       case 'serper':
         return this.searchSerper(query, options);
+      case 'brave':
+        return this.searchBrave(query, options);
       case 'bing':
         return this.searchBing(query, options);
       default:
@@ -132,7 +134,7 @@ export class WebSearchService {
    */
   private async searchSerper(query: string, options: SearchOptions): Promise<SearchResponse> {
     const apiKey = process.env.SERPER_API_KEY;
-    if (!apiKey) {
+    if (!apiKey || apiKey === 'your-serper-api-key') {
       throw new Error('Serper API key not configured');
     }
 
@@ -175,11 +177,58 @@ export class WebSearchService {
   }
 
   /**
+   * Brave Search API (free tier available, requires API key)
+   */
+  private async searchBrave(query: string, options: SearchOptions): Promise<SearchResponse> {
+    const apiKey = process.env.BRAVE_SEARCH_API_KEY;
+    if (!apiKey || apiKey === 'your-brave-search-api-key') {
+      throw new Error('Brave Search API key not configured');
+    }
+
+    const { maxResults = 5 } = options;
+
+    try {
+      const response = await axios.get('https://api.search.brave.com/res/v1/web/search', {
+        params: {
+          q: query,
+          count: maxResults
+        },
+        headers: {
+          'X-Subscription-Token': apiKey,
+          'Accept': 'application/json'
+        },
+        timeout: 10000
+      });
+
+      const data = response.data;
+      const results: SearchResult[] = (data.web?.results || []).map((item: any) => ({
+        title: item.title || '',
+        url: item.url || '',
+        snippet: item.description || '',
+        source: 'brave',
+        publishedDate: item.age,
+        relevanceScore: 0.8
+      }));
+
+      return {
+        results,
+        query,
+        provider: 'brave',
+        totalResults: results.length,
+        searchTime: 0,
+        success: true
+      };
+    } catch (error) {
+      throw new Error(`Brave search failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /**
    * Bing Search API (requires API key)
    */
   private async searchBing(query: string, options: SearchOptions): Promise<SearchResponse> {
     const apiKey = process.env.BING_SEARCH_API_KEY;
-    if (!apiKey) {
+    if (!apiKey || apiKey === 'your-bing-search-api-key') {
       throw new Error('Bing Search API key not configured');
     }
 
