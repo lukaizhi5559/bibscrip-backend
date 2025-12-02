@@ -142,11 +142,25 @@ router.post('/', authenticate, async (req: Request, res: Response): Promise<void
 
 /**
  * POST /api/nutjs/plan
- * Generate structured automation plan from natural language command
+ * Generate context-aware structured automation plan from natural language command
+ * Supports replanning with feedback for adaptive automation
  * 
  * Request body:
  * {
- *   "command": "send email from Gmail about AI trends"
+ *   "command": "Generate Mickey Mouse images in ChatGPT, Grok and Perplexity",
+ *   "intent": "command_automate",  // Optional: 'command_automate' | 'command_guide'
+ *   "context": {  // Optional: context for plan generation
+ *     "screenIntel": {...},  // OCR snapshot from screen-intel MCP
+ *     "activeApp": "Google Chrome",
+ *     "activeUrl": "https://chat.openai.com",
+ *     "history": {...}
+ *   },
+ *   "previousPlan": {...},  // Optional: for replanning
+ *   "feedback": {  // Optional: user feedback for replanning
+ *     "reason": "failure",  // 'clarification' | 'failure' | 'scope_change'
+ *     "message": "Perplexity login failed, use ChatGPT and Grok only",
+ *     "stepId": "step_5"
+ *   }
  * }
  * 
  * Response:
@@ -154,12 +168,21 @@ router.post('/', authenticate, async (req: Request, res: Response): Promise<void
  *   "success": true,
  *   "plan": {
  *     "planId": "uuid",
- *     "originalCommand": "send email from Gmail about AI trends",
- *     "steps": [...],
- *     "maxRetriesPerStep": 3,
- *     "totalTimeout": 300000,
- *     "targetOS": "darwin",
- *     "targetApp": "gmail",
+ *     "version": 1,
+ *     "intent": "command_automate",
+ *     "goal": "Generate Mickey Mouse images in ChatGPT, Grok and Perplexity",
+ *     "steps": [
+ *       {
+ *         "id": "step_1",
+ *         "kind": { "type": "focusApp", "appName": "Google Chrome" },
+ *         "description": "Focus browser",
+ *         "status": "pending",
+ *         "retry": { "maxAttempts": 2, "delayMs": 1000 },
+ *         "onError": { "strategy": "fail_plan" }
+ *       },
+ *       ...
+ *     ],
+ *     "questions": [...],  // Optional clarifying questions
  *     "metadata": {...}
  *   },
  *   "provider": "grok",
@@ -168,7 +191,7 @@ router.post('/', authenticate, async (req: Request, res: Response): Promise<void
  */
 router.post('/plan', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
-    const { command } = req.body;
+    const { command, intent, context, previousPlan, feedback } = req.body;
 
     // Validate request
     if (!command || typeof command !== 'string' || command.trim().length === 0) {
@@ -176,7 +199,13 @@ router.post('/plan', authenticate, async (req: Request, res: Response): Promise<
         success: false,
         error: 'Missing or invalid "command" parameter. Please provide a natural language command.',
         example: {
-          command: 'send email from Gmail about AI trends',
+          command: 'Generate Mickey Mouse images in ChatGPT, Grok and Perplexity',
+          intent: 'command_automate',
+          context: {
+            screenIntel: { /* OCR data */ },
+            activeApp: 'Google Chrome',
+            activeUrl: 'https://chat.openai.com',
+          },
         },
       });
       return;
@@ -184,19 +213,32 @@ router.post('/plan', authenticate, async (req: Request, res: Response): Promise<
 
     logger.info('Automation plan generation request received', {
       command,
+      intent: intent || 'command_automate',
+      hasContext: !!context,
+      hasPreviousPlan: !!previousPlan,
+      hasFeedback: !!feedback,
+      isReplan: !!previousPlan || !!feedback,
       userId: (req as any).user?.id,
     });
 
-    // Generate structured automation plan
-    const result = await nutjsCodeGenerator.generatePlan(command);
+    // Generate structured automation plan with context
+    const result = await nutjsCodeGenerator.generatePlan({
+      command,
+      intent: intent || 'command_automate',
+      context,
+      previousPlan,
+      feedback,
+    });
 
     // Success response
     logger.info('Automation plan generated successfully', {
       command,
       provider: result.provider,
       latencyMs: result.latencyMs,
-      stepCount: result.plan.steps.length,
-      planId: result.plan.planId,
+      stepCount: result.plan?.steps?.length || 0,
+      planId: result.plan?.planId,
+      planVersion: result.plan?.version || 1,
+      hasQuestions: !!result.plan?.questions && result.plan.questions.length > 0,
     });
 
     res.status(200).json({

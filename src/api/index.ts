@@ -23,6 +23,7 @@ import { createOrchestrationWorkflowRoutes } from './orchestrationWorkflows';
 // Phase 2: DropRegistry - Agent Capability Catalog
 import dropRegistryRouter from './dropRegistry';
 import nutjsRouter from './nutjs';
+import visionRouter from './vision';
 import pool from '../config/postgres';
 // Import other route modules directly instead of using dynamic imports
 
@@ -307,11 +308,22 @@ router.get('/', (req, res) => {
       },
       nutjs: {
         path: '/api/nutjs',
-        description: 'Nut.js code generation for desktop automation (Grok + Claude)',
+        description: 'Nut.js automation plan generation (vision-based, context-aware)',
         endpoints: [
-          'POST /api/nutjs - Generate Nut.js code from natural language command',
-          'GET /api/nutjs/health - Health check for Nut.js code generation service',
-          'GET /api/nutjs/examples - Get example commands and patterns'
+          'POST /api/nutjs - Generate Nut.js code (legacy)',
+          'POST /api/nutjs/plan - Generate automation plan (preferred)',
+          'POST /api/nutjs/guide - Generate step-by-step guide',
+          'GET /api/nutjs/health - Health check for Nut.js service',
+          'GET /api/nutjs/examples - Get example commands'
+        ]
+      },
+      vision: {
+        path: '/api/vision',
+        description: 'Vision AI for UI element location and verification (for MCP execution)',
+        endpoints: [
+          'POST /api/vision/locate - Find element coordinates in screenshot',
+          'POST /api/vision/verify - Verify element exists in screenshot',
+          'POST /api/vision/analyze - Analyze screenshot for OCR/text extraction'
         ]
       }
     },
@@ -346,6 +358,8 @@ router.use('/orchestration', createOrchestrationWorkflowRoutes(pool));
 router.use('/drops', dropRegistryRouter);
 // Nut.js Code Generation - Specialized LLM for desktop automation
 router.use('/nutjs', nutjsRouter);
+// Vision AI - UI element location and verification for MCP execution
+router.use('/vision', visionRouter);
 
 // All routers are explicitly imported and mounted above
 // No need for dynamic mounting as it can cause route conflicts

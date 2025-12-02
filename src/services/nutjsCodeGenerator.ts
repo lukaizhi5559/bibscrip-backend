@@ -7,7 +7,12 @@
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { logger } from '../utils/logger';
-import { AutomationPlan, AutomationStep } from '../types/automationPlan';
+import { 
+  AutomationPlan, 
+  AutomationStep,
+  AutomationPlanRequest,
+  AutomationPlanResponse as AutomationPlanResponseType
+} from '../types/automationPlan';
 import { AutomationGuide, GuideRequest } from '../types/automationGuide';
 import { randomUUID } from 'crypto';
 
@@ -104,57 +109,47 @@ export class NutjsCodeGenerator {
 ` : '';
     
     const visionContext = hasScreenshot ? `
-**VISION MODE:** Screenshot provided. Analyze what's on screen and generate NutJS code.${cacheBuster}
-- ALWAYS return executable code (never plain text)
+**VISION MODE:** Screenshot provided.${cacheBuster}
 ${typeOnlyInstructions}
-- For "describe/answer/explain" commands:
-  * **CRITICAL - CONTEXT AWARENESS**: Look at what's ALREADY on screen
-  * **DETECT INCOMPLETE CONTENT**: Look for signs of incomplete code/text:
-    - Functions without return statements
-    - Comments like "// Need to complete", "// TODO", "// Rest of this"
-    - Unfinished logic or calculations
-    - Partial lists or numbered items
-  * If user says "finish...", "cont...", "continue...", "continue", "add more", "keep going", "complete this", "finish this" → CONTINUE/COMPLETE from where content left off
-  * **DO NOT restart numbering** - if screen shows "3. Item", continue with "4. Item", "5. Item"
-  * **DO NOT rewrite existing code** - only add the MISSING/INCOMPLETE parts
-  * **DO NOT repeat content** - only add NEW content that continues or completes the existing content
-  * **CRITICAL**: Look for the LANGUAGE specified in the screenshot (e.g., "TypeScript or JavaScript", "Python", "SQL")
-  * **CRITICAL**: Answer in THAT language ONLY - don't provide alternatives in other languages
-  * If screenshot says "TypeScript or JavaScript" → provide TypeScript/JavaScript solution ONLY
-  * If screenshot says "SQL" → provide SQL solution ONLY
-  * Analyze the screenshot to understand the ACTUAL question being asked
-  * **BE CONCISE**: Type ONLY the essential solution - no verbose explanations
-  * **NO fluff**: Skip introductions, skip "let me explain", skip unnecessary details
-  * **Get to the point**: Code + brief explanation if needed, that's it
-  * **CRITICAL**: Use multi-line template literals with ACTUAL line breaks
-  * **CRITICAL**: MUST include typeWithNewlines() helper function
-  * **CRITICAL**: keyboard.type() does NOT handle \\n - must use Key.Enter OR Shift+Enter
-  * **CRITICAL - SMART NEWLINE DETECTION**: Analyze the screenshot to determine the correct newline key:
-    - **Chat apps** (ChatGPT, Grok, Gemini, Slack, Teams, Discord): Use **Shift+Enter** for newlines (Enter submits)
-    - **Search boxes** (Google Search, Bing): Use **Shift+Enter** for newlines (Enter searches)
-    - **Text editors** (Google Docs, Notes, Word): Use **Enter** for newlines (no submit button)
-    - **Detection cues**:
-      * Send button visible → Chat app → Use Shift+Enter
-      * Search button/magnifying glass → Search box → Use Shift+Enter
-      * "Shift+Return to add new line" hint → Use Shift+Enter
-      * Formatting toolbar with send button → Chat app → Use Shift+Enter
-      * Large text area, no send button → Text editor → Use Enter
-  
-**REQUIRED PATTERN for multi-line answers:**
+**RULES:**
+- Return ONLY executable code
+- Analyze screenshot for context
+- **CRITICAL - NO EMOJIS OR MARKDOWN**: 
+  * NEVER use emojis (❌ 🎯 ✅ etc.) in typed responses
+  * NEVER use markdown formatting (**, *, ~~, etc.) unless it's ALREADY in the screenshot
+  * Type ONLY plain text - no special characters or formatting
+  * Exception: If screenshot shows markdown, preserve it exactly as shown
+- **COMMAND DETECTION**: Look for ">>" prefix in user input:
+  * >>finish, >>complete - Complete incomplete content (code, sentences, math, lists)
+  * >>continue, >>add - Continue from where content left off
+  * When detected: Add ONLY missing parts, don't repeat existing content
+  * Example: User types ">>finish" → Analyze screenshot → Complete the incomplete code/text
+- **HIGHLIGHTED TEXT DETECTION**: If screenshot shows highlighted/selected text (different background color):
+  * Analyze the highlighted text and surrounding context
+  * If highlighted text is incomplete (e.g., "**Ba..." when context suggests "**Batching**"):
+    - Complete the highlighted text based on context
+    - Type the completion to replace the highlighted text
+  * Example: Highlighted "**Ba..." in list about React → Complete to "**Batching**" based on context
+- Respect language from screenshot (TypeScript/Python/SQL)
+- Be concise, no fluff
+- MUST use typeWithNewlines() helper for multi-line text
+
+**NEWLINE DETECTION:**
+- Chat apps/Search boxes (send/search button visible) → Use Shift+Enter
+- Text editors (no submit button) → Use Enter
+
+
+**PATTERN:**
 \`\`\`javascript
-// Helper function - ALWAYS include this
-// IMPORTANT: Detects if we need Shift+Enter (chat apps) or just Enter (text editors)
 async function typeWithNewlines(text, useShiftEnter = false) {
   for (const char of text) {
     if (char === '\\n') {
       if (useShiftEnter) {
-        // For chat apps: Shift+Enter adds newline without submitting
         await keyboard.pressKey(Key.LeftShift);
         await keyboard.pressKey(Key.Enter);
         await keyboard.releaseKey(Key.Enter);
         await keyboard.releaseKey(Key.LeftShift);
       } else {
-        // For text editors: Enter adds newline
         await keyboard.pressKey(Key.Enter);
         await keyboard.releaseKey(Key.Enter);
       }
@@ -165,112 +160,10 @@ async function typeWithNewlines(text, useShiftEnter = false) {
   }
 }
 
-// Multi-line answer (adapt to actual question - KEEP IT CONCISE)
-const answer = \`[Solution/Code - direct and brief]
-
-[Key points only if needed]
-
-[Example only if essential]\`;
-
-// ANALYZE SCREENSHOT to determine if it's a chat app or text editor
-// Chat apps (ChatGPT, Grok, Slack, Teams): Use Shift+Enter
-// Text editors (Google Docs, Notes): Use Enter only
-const isChatApp = true; // Set based on screenshot analysis
-
-// Type with appropriate newline handling
+const answer = \`[Your solution]\`;
+const isChatApp = /* detect from screenshot */;
 await typeWithNewlines(answer, isChatApp);
 \`\`\`
-
-**EXAMPLES - Smart Newline Detection:**
-
-**Example 1: ChatGPT/Grok (Chat App)**
-\`\`\`javascript
-// Screenshot shows: ChatGPT input with send button
-const isChatApp = true; // Send button visible → Chat app
-await typeWithNewlines(answer, true); // Use Shift+Enter
-\`\`\`
-
-**Example 2: Slack/Teams (Chat App with Formatting)**
-\`\`\`javascript
-// Screenshot shows: Slack message box with "Shift+Return to add new line" hint
-const isChatApp = true; // Hint visible → Chat app
-await typeWithNewlines(answer, true); // Use Shift+Enter
-\`\`\`
-
-**Example 3: Google Search (Search Box)**
-\`\`\`javascript
-// Screenshot shows: Google search box with magnifying glass/search button
-const isChatApp = true; // Search button visible → Use Shift+Enter
-await typeWithNewlines(answer, true); // Use Shift+Enter to avoid triggering search
-\`\`\`
-
-**Example 4: Google Docs (Text Editor)**
-\`\`\`javascript
-// Screenshot shows: Large text area, no send button, document editor
-const isChatApp = false; // No send button → Text editor
-await typeWithNewlines(answer, false); // Use Enter only
-\`\`\`
-
-**EXAMPLE - Good (concise, respects language from screenshot):**
-// If screenshot says "TypeScript or JavaScript"
-const answer = \`TypeScript Solution:
-
-function findImmediatePercentage(deliveries: Delivery[]): number {
-  const firstOrders = deliveries.reduce((acc, d) => {
-    if (!acc[d.customer_id] || d.order_date < acc[d.customer_id].order_date) {
-      acc[d.customer_id] = d;
-    }
-    return acc;
-  }, {});
-  
-  const immediate = Object.values(firstOrders).filter(
-    o => o.order_date === o.customer_pref_delivery_date
-  ).length;
-  
-  return Math.round((immediate / Object.keys(firstOrders).length) * 100 * 100) / 100;
-}\`;
-
-**EXAMPLE - Bad (wrong language):**
-// Screenshot says "TypeScript" but you provide SQL - DON'T DO THIS
-const answer = \`SQL Solution: SELECT * FROM...\`;
-
-**EXAMPLES - Context Continuation/Completion (CRITICAL):**
-
-**Example 1: List Continuation**
-// Screenshot shows: "2. JWT" and "3. MFA" and user says "continue to 4"
-// CORRECT:
-const answer = \`4. OAuth 2.0
-5. API Keys\`;
-// WRONG: Starting from 2 again (already on screen!)
-
-**Example 2: Code Completion**
-// Screenshot shows incomplete function with "// Need to complete the rest"
-// CORRECT - Only add missing parts:
-const answer = \`  const immediateCount = Array.from(firstOrders.values()).filter(...).length;
-  return Math.round((immediateCount / total) * 100 * 100) / 100;
-}\`;
-// WRONG: Rewriting entire function (already on screen!)
-
-**Example 3: Sentence Completion**
-// Screenshot shows: "The Pythagorean theorem states that a² + b² = ..."
-// CORRECT:
-const answer = \`c²\`;
-// WRONG: "The Pythagorean theorem states that a² + b² = c²" (repeating!)
-
-**Example 4: Math Problem Completion**
-// Screenshot shows: "Solve for x: 2x + 5 = 15\n2x = 15 - 5\n2x = 10\n"
-// CORRECT:
-const answer = \`x = 10 / 2
-x = 5\`;
-// WRONG: Starting from "2x + 5 = 15" again (already on screen!)
-
-**Example 5: Formula Completion**
-// Screenshot shows: "Area of circle = πr²\nCircumference = ..."
-// CORRECT:
-const answer = \`2πr\`;
-// WRONG: "Area of circle = πr²\nCircumference = 2πr" (repeating!)
-
-**KEY PRINCIPLE: Only type what's MISSING or NEXT, never repeat what's already visible!**
 ${frontendInstruction}
 ` : '';
     return `You are a Nut.js code generation expert. Your ONLY job is to generate pure Nut.js code for desktop automation tasks.
@@ -1424,7 +1317,384 @@ Now generate the code for: ${command}`;
   }
 
   /**
-   * Build prompt for structured automation plan generation
+   * Build context-aware prompt for automation plan generation
+   * Supports replanning with feedback and multi-modal context
+   */
+  private buildContextAwarePlanPrompt(request: AutomationPlanRequest): string {
+    const os = process.platform === 'darwin' ? 'darwin' : 'win32';
+    const isReplan = !!request.previousPlan || !!request.feedback;
+    
+    // Build context section
+    let contextSection = '';
+    if (request.context) {
+      contextSection = `\n**CURRENT CONTEXT:**`;
+      if (request.context.screenshot) {
+        contextSection += `\n- Screenshot: Provided (Base64 image)`;
+        contextSection += `\n  * **CRITICAL**: Analyze the screenshot to understand current UI state`;
+        contextSection += `\n  * Use vision to find element coordinates (X, Y positions)`;
+        contextSection += `\n  * Generate locators based on what you SEE in the image`;
+        contextSection += `\n  * Describe elements visually (e.g., "blue Send button in bottom right")`;
+      }
+      if (request.context.activeApp) {
+        contextSection += `\n- Active App: ${request.context.activeApp}`;
+      }
+      if (request.context.activeUrl) {
+        contextSection += `\n- Active URL: ${request.context.activeUrl}`;
+      }
+      if (request.context.os) {
+        contextSection += `\n- Operating System: ${request.context.os}`;
+      }
+      if (request.context.screenIntel) {
+        contextSection += `\n- OCR Data: Available (supplementary text data)`;
+      }
+    }
+
+    // Build feedback section for replanning
+    let feedbackSection = '';
+    if (isReplan) {
+      feedbackSection = `\n\n**REPLANNING MODE:**`;
+      if (request.feedback) {
+        feedbackSection += `\n- Reason: ${request.feedback.reason}`;
+        feedbackSection += `\n- Feedback: ${request.feedback.message}`;
+        if (request.feedback.stepId) {
+          feedbackSection += `\n- Failed Step: ${request.feedback.stepId}`;
+        }
+      }
+      if (request.previousPlan) {
+        feedbackSection += `\n- Previous Plan Version: ${request.previousPlan.version || 1}`;
+        feedbackSection += `\n- Previous Steps Count: ${request.previousPlan.steps.length}`;
+        feedbackSection += `\n\n**INSTRUCTIONS FOR REPLANNING:**`;
+        feedbackSection += `\n- Analyze what went wrong in the previous plan`;
+        feedbackSection += `\n- Adapt the strategy based on user feedback`;
+        feedbackSection += `\n- Remove or modify steps that failed`;
+        feedbackSection += `\n- Consider adding clarifying questions if needed`;
+        feedbackSection += `\n- Increment version number to ${(request.previousPlan.version || 1) + 1}`;
+      }
+    }
+
+    return `You are an expert automation planner with multi-modal context awareness.
+
+**USER COMMAND:** "${request.command}"${contextSection}${feedbackSection}
+
+**YOUR TASK:** Generate a detailed, context-aware automation plan as a JSON object.
+
+**CRITICAL RULES:**
+1. Return ONLY valid JSON - no markdown, no explanations, no code fences
+2. Use LOW-LEVEL steps for debuggability and cross-app compatibility
+3. Each step must have a discriminated \`kind\` union (not arbitrary code)
+4. Target OS: ${os} (darwin = macOS, win32 = Windows)
+5. If context shows the app is already open, skip opening steps
+6. Use screen intelligence data to find elements accurately
+7. Include retry policies and error handlers for resilience
+8. Add clarifying questions if command is ambiguous
+
+**STEP KINDS:**
+
+**UI Primitives (NutJS "hands + eyes" - use for browser/app automation):**
+- \`{ "type": "focusApp", "appName": "Google Chrome" }\`
+- \`{ "type": "openUrl", "url": "https://..." }\`
+- \`{ "type": "findAndClick", "locator": { "strategy": "vision", "description": "blue Send button in bottom right" }, "timeoutMs": 5000 }\`
+- \`{ "type": "waitForElement", "locator": { "strategy": "vision", "description": "chat input field" }, "timeoutMs": 5000 }\`
+- \`{ "type": "movePointer", "target": { "strategy": "vision", "description": "the Compose button" } }\`
+- \`{ "type": "click", "button": "left", "clickCount": 1 }\`
+- \`{ "type": "typeText", "text": "Hello", "submit": false }\`
+- \`{ "type": "pressKey", "key": "Enter", "modifiers": ["Cmd"] }\`
+- \`{ "type": "pause", "ms": 2000 }\`
+- \`{ "type": "screenshot", "tag": "after_login", "analyzeWithVision": true }\`
+
+**Domain Skills (API setup communication - NOT for execution):**
+- \`{ "type": "apiAction", "skill": "setup.homeAssistant", "params": { "action": "create_token", "service": "Home Assistant" } }\`
+- \`{ "type": "apiAction", "skill": "setup.slack", "params": { "action": "create_oauth_app", "scopes": ["chat:write"] } }\`
+- \`{ "type": "apiAction", "skill": "setup.calendar", "params": { "action": "authorize_google", "scopes": ["calendar"] } }\`
+- \`{ "type": "apiAction", "skill": "setup.n8n", "params": { "action": "get_api_key", "baseUrl": "http://localhost:5678" } }\`
+- \`{ "type": "apiAction", "skill": "notify.user", "params": { "message": "Home Assistant token copied! MCP will register skill." } }\`
+
+**When to use apiAction:**
+- **ONLY for communicating setup completion to MCP**
+- After NutJS automation helps user set up an integration
+- To notify user that a skill is now available
+- **NOT for executing the actual task** (MCP handles that)
+
+**Skill Setup Pattern:**
+1. User asks: "Turn on my lights"
+2. You generate NutJS plan to:
+   - Navigate to Home Assistant settings
+   - Create API token
+   - Copy to clipboard
+3. Add apiAction step: \`{ "type": "apiAction", "skill": "notify.user", "params": { "message": "Home Assistant ready! Say 'turn on lights' anytime." } }\`
+4. MCP registers homeAssistant.turnOn in DuckDB
+5. Next time user says "turn on lights" → MCP executes directly (no backend needed)
+
+**Control Flow:**
+- \`{ "type": "askUser", "questionId": "q1" }\`
+- \`{ "type": "log", "level": "info", "message": "Starting..." }\`
+- \`{ "type": "end", "reason": "completed" }\`
+
+**VISION LOCATOR STRATEGIES:**
+- \`"vision"\` - Use LLM vision to find element by natural language description
+  * Example: \`{ "strategy": "vision", "description": "the blue Send button in the bottom right corner" }\`
+  * Example: \`{ "strategy": "vision", "description": "the text input field with placeholder 'Send a message'" }\`
+  * **PREFERRED**: Use this when screenshot is available
+- \`"textMatch"\` - Exact text match (fallback when no screenshot)
+- \`"contains"\` - Partial text match (fallback when no screenshot)
+- \`"bbox"\` - Normalized coordinates [x, y, width, height] (when you know exact position)
+
+**ERROR HANDLERS:**
+- \`{ "strategy": "fail_plan", "message": "Critical step failed" }\`
+- \`{ "strategy": "skip_step", "message": "Optional step" }\`
+- \`{ "strategy": "goto_step", "stepId": "step_5" }\`
+- \`{ "strategy": "ask_user", "questionId": "q1", "message": "Need clarification" }\`
+- \`{ "strategy": "replan", "reason": "Unexpected UI state" }\`
+
+**JSON STRUCTURE:**
+\`\`\`json
+{
+  "goal": "Brief summary of what this plan accomplishes",
+  "steps": [
+    {
+      "id": "step_1",
+      "kind": { "type": "focusApp", "appName": "Google Chrome" },
+      "description": "Focus the browser",
+      "status": "pending",
+      "retry": { "maxAttempts": 2, "delayMs": 1000 },
+      "onError": { "strategy": "fail_plan", "message": "Cannot focus browser" }
+    },
+    {
+      "id": "step_2",
+      "kind": { "type": "openUrl", "url": "https://chat.openai.com" },
+      "description": "Navigate to ChatGPT",
+      "status": "pending",
+      "dependsOn": ["step_1"],
+      "retry": { "maxAttempts": 3, "delayMs": 2000 },
+      "onError": { "strategy": "replan", "reason": "URL navigation failed" }
+    },
+    {
+      "id": "step_3",
+      "kind": {
+        "type": "waitForElement",
+        "locator": { "strategy": "vision", "description": "the chat input field at the bottom of the page" },
+        "timeoutMs": 10000
+      },
+      "description": "Wait for chat interface to load",
+      "status": "pending",
+      "retry": { "maxAttempts": 2, "delayMs": 3000 },
+      "onError": { "strategy": "ask_user", "questionId": "q1", "message": "ChatGPT not loading" }
+    }
+  ],
+  "retryPolicy": { "maxGlobalRetries": 2 },
+  "questions": [
+    {
+      "id": "q1",
+      "text": "ChatGPT is not loading. Would you like to try a different browser?",
+      "type": "choice",
+      "choices": ["Yes, try Safari", "No, retry Chrome", "Cancel automation"],
+      "required": true
+    }
+  ]
+}
+\`\`\`
+
+**EXAMPLE: "Generate Mickey Mouse images in ChatGPT, Grok and Perplexity"**
+\`\`\`json
+{
+  "goal": "Generate Mickey Mouse images using 3 AI platforms",
+  "steps": [
+    {
+      "id": "step_1",
+      "kind": { "type": "focusApp", "appName": "Google Chrome" },
+      "description": "Focus browser",
+      "status": "pending",
+      "retry": { "maxAttempts": 2, "delayMs": 1000 },
+      "onError": { "strategy": "fail_plan" }
+    },
+    {
+      "id": "step_2",
+      "kind": { "type": "openUrl", "url": "https://chat.openai.com" },
+      "description": "Navigate to ChatGPT",
+      "status": "pending",
+      "retry": { "maxAttempts": 2, "delayMs": 2000 },
+      "onError": { "strategy": "replan", "reason": "ChatGPT unreachable" }
+    },
+    {
+      "id": "step_3",
+      "kind": {
+        "type": "findAndClick",
+        "locator": { "strategy": "vision", "description": "the chat input field at the bottom" },
+        "timeoutMs": 10000
+      },
+      "description": "Click into chat input field",
+      "status": "pending",
+      "retry": { "maxAttempts": 2 },
+      "onError": { "strategy": "skip_step" }
+    },
+    {
+      "id": "step_4",
+      "kind": { "type": "typeText", "text": "Generate an image of Mickey Mouse", "submit": true },
+      "description": "Type and send prompt to ChatGPT",
+      "status": "pending",
+      "retry": { "maxAttempts": 1 },
+      "onError": { "strategy": "replan", "reason": "Failed to send prompt" }
+    },
+    {
+      "id": "step_5",
+      "kind": { "type": "pause", "ms": 5000 },
+      "description": "Wait for image generation",
+      "status": "pending"
+    },
+    {
+      "id": "step_6",
+      "kind": { "type": "screenshot", "tag": "chatgpt_result", "analyzeWithVision": true },
+      "description": "Capture ChatGPT result for verification",
+      "status": "pending"
+    },
+    {
+      "id": "step_7",
+      "kind": { "type": "openUrl", "url": "https://grok.x.ai" },
+      "description": "Navigate to Grok",
+      "status": "pending",
+      "retry": { "maxAttempts": 2 },
+      "onError": { "strategy": "replan", "reason": "Grok unreachable" }
+    }
+  ],
+  "retryPolicy": { "maxGlobalRetries": 1 },
+  "questions": []
+}
+\`\`\`
+
+**IMPORTANT NOTES:**
+
+**INTELLIGENT DECISION TREE (Analyze FIRST, then decide):**
+
+**Step 1: ANALYZE the task**
+- Is there a service/API that could handle this?
+- **Available Services & APIs:**
+  * **Home Automation**: Home Assistant (FREE, self-hosted), SmartThings, Philips Hue
+  * **Workflow Automation**: n8n (FREE, self-hosted), Zapier (PAID), IFTTT (FREE limited, Pro $3.99/mo), Make.com
+  * **Communication**: Slack (FREE), Discord, Microsoft Teams, Telegram
+  * **Calendar**: Google Calendar (FREE), Outlook Calendar (FREE), Apple Calendar
+  * **Email**: Gmail API (FREE), Outlook API (FREE), SendGrid (PAID)
+  * **Task Management**: Todoist, Notion, Trello, Asana
+  * **Smart Home**: Home Assistant, HomeKit, Google Home, Alexa
+  * **Car**: Tesla API, BMW ConnectedDrive (varies by manufacturer)
+  * **Weather**: OpenWeatherMap (FREE tier), Weather.gov (FREE)
+  * **Finance**: Plaid (PAID), Mint (deprecated), YNAB
+  * **Social Media**: Twitter API (PAID), Reddit API (FREE), Instagram (limited)
+  * **AI/LLM**: OpenAI API (PAID), Anthropic API (PAID), local LLMs (FREE)
+  * **No Public API**: ChatGPT web UI, Amazon shopping, most consumer web apps
+
+- **Examples:**
+  * "Turn on lights" → YES (Home Assistant API - FREE)
+  * "Send Slack message" → YES (Slack API - FREE)
+  * "Set calendar reminder" → YES (Google Calendar API - FREE)
+  * "Automate workflow" → YES (n8n - FREE, or Zapier - PAID)
+  * "Generate Mickey Mouse in ChatGPT" → NO (ChatGPT image gen has no public API)
+  * "Buy winter clothes on Amazon" → NO (Amazon automation not via API)
+
+**Step 2: IF API EXISTS → Check feasibility**
+- Is it free or does user already have access?
+  * Home Assistant (self-hosted) → FREE, guide setup
+  * Slack (user's workspace) → FREE, guide OAuth setup
+  * Google Calendar → FREE, guide OAuth setup
+  * n8n (self-hosted) → FREE, guide setup
+  * IFTTT Pro → PAID, inform user of cost, ask if they want to proceed
+  * Zapier → PAID (free tier limited), inform user, ask if they want to proceed
+
+**Step 3: DECIDE approach**
+1. **API skill setup (PREFERRED if free/accessible)**
+   → Generate NutJS plan to help user set up the integration
+   → Example: "Turn on lights" → Guide to Home Assistant token creation
+   → Add \`notifyUser\` step to inform MCP of new skill
+
+2. **UI automation (if no API or user declines paid service)**
+   → Use vision-based UI primitives
+   → Example: "Generate Mickey Mouse in ChatGPT" → Navigate UI, type prompt
+   → Example: "Buy on Amazon" → Navigate, search, add to cart
+
+3. **Inform + Guide (if paid service required)**
+   → Use \`askUser\` to inform about service and cost
+   → Example: "This requires IFTTT Pro ($3.99/mo). Proceed?"
+   → If yes → Guide setup, if no → Offer UI automation alternative
+
+4. **Guide mode (if impossible to automate)**
+   → Switch to \`command_guide\` intent
+   → Provide step-by-step instructions
+
+**THINKDROP AI'S ROLE:**
+- **You are an AI assistant that guides users to the right tools**
+- Help users discover and set up ecosystem tools (IFTTT, Zapier, n8n, Home Assistant, etc.)
+- Make users aware of costs, limitations, and alternatives
+- Empower non-technical users to build their own automation ecosystem
+
+**SETUP EXAMPLES:**
+
+**Example 1: "Turn on my lights" (FREE API - Home Assistant)**
+→ Analysis: Home Assistant API exists, free, self-hosted
+→ Decision: Guide setup (PREFERRED)
+→ Plan:
+  1. Open Home Assistant settings
+  2. Navigate to API tokens
+  3. Create new token
+  4. Copy token to clipboard
+  5. notifyUser: "Home Assistant ready! Say 'turn on lights' anytime."
+
+**Example 2: "Send Slack message" (FREE API - Slack OAuth)**
+→ Analysis: Slack API exists, free for user's workspace
+→ Decision: Guide setup (PREFERRED)
+→ Plan:
+  1. Open Slack API settings
+  2. Create OAuth app
+  3. Add chat:write scope
+  4. Copy bot token
+  5. notifyUser: "Slack ready! Send messages to any channel."
+
+**Example 3: "Automate my morning routine" (PAID - IFTTT Pro)**
+→ Analysis: IFTTT API exists, but requires Pro ($3.99/mo)
+→ Decision: Inform user, ask if they want to proceed
+→ Plan:
+  1. askUser: "This works best with IFTTT Pro ($3.99/mo). Alternatives: n8n (free, self-hosted). Proceed with IFTTT?"
+  2. If yes → Guide IFTTT setup
+  3. If no → Suggest n8n alternative or UI automation
+
+**Example 4: "Generate Mickey Mouse in ChatGPT" (NO API)**
+→ Analysis: ChatGPT image generation has no public API
+→ Decision: Use UI automation (ONLY option)
+→ Plan:
+  1. Open Chrome
+  2. Navigate to ChatGPT
+  3. Find input field (vision)
+  4. Type prompt
+  5. Wait for image generation
+
+**USE UI Primitives for:**
+- Browser-based tasks (Amazon, ChatGPT, web apps)
+- Visual tasks requiring screenshots (image generation, design review)
+- One-time tasks that don't need API setup
+
+**VISION-FIRST (for UI automation):**
+- When screenshot is provided, ALWAYS use \`strategy: "vision"\` with natural language descriptions
+- Think like a human looking at the screen - describe what you see visually
+- Vision service will return X,Y coordinates from your descriptions
+- Use \`findAndClick\` to combine finding and clicking in one step (more reliable)
+- Include \`screenshot\` steps when you need to verify results or get fresh context
+- **NEVER use fixed coordinates** - always use vision-based descriptions
+
+**ERROR HANDLING:**
+- Set appropriate \`onError\` strategies (replan for critical failures, skip for optional steps)
+- Add proactive \`questions\` if command is ambiguous
+- For replanning: analyze previous failure and adapt strategy
+
+**VISION DESCRIPTION EXAMPLES:**
+- Good: "the blue Send button in the bottom right corner"
+- Good: "the text input field with gray placeholder text"
+- Good: "the Compose button with a pencil icon in the top left"
+- Bad: "Send button" (too vague)
+- Bad: "button at coordinates 100, 200" (don't hardcode coordinates)
+
+Now generate the JSON plan for the user's command. Return ONLY the JSON object, no other text.`;
+  }
+
+  /**
+   * Build prompt for structured automation plan generation (LEGACY - kept for backward compatibility)
    */
   private buildStructuredPlanPrompt(command: string): string {
     const os = process.platform === 'darwin' ? 'darwin' : 'win32';
@@ -1639,34 +1909,52 @@ Now generate the JSON plan for the user's command. Return ONLY the JSON object, 
   }
 
   /**
-   * Generate structured automation plan with automatic fallback
-   * Tries Grok first, falls back to Claude if Grok fails
+   * Generate context-aware structured automation plan with automatic fallback
+   * Supports replanning with feedback for adaptive automation
+   * Tries Claude first, then OpenAI, then Grok (slowest)
    */
-  async generatePlan(command: string): Promise<AutomationPlanResponse> {
+  async generatePlan(request: AutomationPlanRequest | string): Promise<AutomationPlanResponse> {
     const errors: string[] = [];
+    
+    // Backward compatibility: accept string command
+    const planRequest: AutomationPlanRequest = typeof request === 'string' 
+      ? { command: request, intent: 'command_automate' }
+      : request;
 
-    // Try Grok first
-    if (this.grokClient) {
-      try {
-        return await this.generatePlanWithGrok(command);
-      } catch (error: any) {
-        errors.push(`Grok: ${error.message}`);
-        logger.warn('Grok failed for plan generation, falling back to Claude', { error: error.message });
-      }
-    } else {
-      errors.push('Grok: Client not initialized (missing GROK_API_KEY)');
-    }
-
-    // Fallback to Claude
+    // Try Claude first (fastest, best for vision)
     if (this.claudeClient) {
       try {
-        return await this.generatePlanWithClaude(command);
+        return await this.generatePlanWithClaude(planRequest);
       } catch (error: any) {
         errors.push(`Claude: ${error.message}`);
-        logger.error('All providers failed for plan generation', { errors });
+        logger.warn('Claude failed for plan generation, falling back to OpenAI', { error: error.message });
       }
     } else {
       errors.push('Claude: Client not initialized (missing ANTHROPIC_API_KEY)');
+    }
+
+    // Fallback to OpenAI
+    if (this.openaiClient) {
+      try {
+        return await this.generatePlanWithOpenAI(planRequest);
+      } catch (error: any) {
+        errors.push(`OpenAI: ${error.message}`);
+        logger.warn('OpenAI failed for plan generation, falling back to Grok', { error: error.message });
+      }
+    } else {
+      errors.push('OpenAI: Client not initialized (missing OPENAI_API_KEY)');
+    }
+
+    // Fallback to Grok (slowest)
+    if (this.grokClient) {
+      try {
+        return await this.generatePlanWithGrok(planRequest);
+      } catch (error: any) {
+        errors.push(`Grok: ${error.message}`);
+        logger.error('All providers failed for plan generation', { errors });
+      }
+    } else {
+      errors.push('Grok: Client not initialized (missing GROK_API_KEY)');
     }
 
     // All providers failed
@@ -1674,43 +1962,81 @@ Now generate the JSON plan for the user's command. Return ONLY the JSON object, 
   }
 
   /**
-   * Generate structured plan using Grok
+   * Generate structured plan using Grok with context awareness
    */
-  private async generatePlanWithGrok(command: string): Promise<AutomationPlanResponse> {
+  private async generatePlanWithGrok(request: AutomationPlanRequest): Promise<AutomationPlanResponse> {
     if (!this.grokClient) {
       throw new Error('Grok client not initialized');
     }
 
     const startTime = Date.now();
-    const model = this.useGrok4 ? 'grok-2-1212' : 'grok-2-latest';
+    const hasScreenshot = !!request.context?.screenshot?.base64;
+    
+    // Use vision model if screenshot provided, otherwise use standard model
+    const model = hasScreenshot ? 'grok-4' : (this.useGrok4 ? 'grok-4' : 'grok-2-latest');
 
     try {
-      logger.info('Generating automation plan with Grok', { model, command });
+      logger.info('Generating automation plan with Grok', { 
+        model, 
+        command: request.command,
+        hasScreenshot,
+        isReplan: !!request.previousPlan || !!request.feedback
+      });
+
+      // Build messages with optional vision
+      const messages: any[] = [
+        {
+          role: 'system',
+          content: 'You are an expert automation planner with vision capabilities. Analyze screenshots to understand UI state and generate precise automation plans. Return only valid JSON, no markdown or explanations.',
+        },
+      ];
+
+      // Add user message with screenshot if provided
+      if (hasScreenshot) {
+        messages.push({
+          role: 'user',
+          content: [
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:${request.context!.screenshot!.mimeType || 'image/png'};base64,${request.context!.screenshot!.base64}`,
+                detail: 'low', // Use 'low' for faster processing
+              },
+            },
+            {
+              type: 'text',
+              text: this.buildContextAwarePlanPrompt(request),
+            },
+          ],
+        });
+      } else {
+        messages.push({
+          role: 'user',
+          content: this.buildContextAwarePlanPrompt(request),
+        });
+      }
 
       const completion = await this.grokClient.chat.completions.create({
         model,
-        messages: [
-          {
-            role: 'system',
-            content: 'You are an expert automation planner. Return only valid JSON, no markdown or explanations.',
-          },
-          {
-            role: 'user',
-            content: this.buildStructuredPlanPrompt(command),
-          },
-        ],
-        temperature: 0.3, // Lower temperature for more consistent JSON output
+        messages,
+        temperature: 0.2, // Lower for faster generation
+        max_tokens: hasScreenshot ? 4096 : 3072, // Optimize based on vision needs
+        top_p: 0.9,
+        user: `nutjs_plan_${Date.now()}`,
       });
 
       const latencyMs = Date.now() - startTime;
       const rawResponse = completion.choices[0]?.message?.content || '';
 
       // Parse JSON response
-      const planData = this.parseAndValidatePlan(rawResponse, command);
+      const planData = this.parseAndValidatePlan(rawResponse, request);
       
       // Update metadata with correct provider and generation time
+      if (!planData.metadata) {
+        planData.metadata = {};
+      }
       planData.metadata.provider = 'grok';
-      planData.metadata.generationTime = latencyMs;
+      planData.metadata.generationTimeMs = latencyMs;
 
       logger.info('Grok plan generation successful', { latencyMs, stepCount: planData.steps.length });
 
@@ -1730,39 +2056,71 @@ Now generate the JSON plan for the user's command. Return ONLY the JSON object, 
   }
 
   /**
-   * Generate structured plan using Claude
+   * Generate structured plan using Claude with context awareness
    */
-  private async generatePlanWithClaude(command: string): Promise<AutomationPlanResponse> {
+  private async generatePlanWithClaude(request: AutomationPlanRequest): Promise<AutomationPlanResponse> {
     if (!this.claudeClient) {
       throw new Error('Claude client not initialized');
     }
 
     const startTime = Date.now();
+    const hasScreenshot = !!request.context?.screenshot?.base64;
 
     try {
-      logger.info('Generating automation plan with Claude', { command });
+      logger.info('Generating automation plan with Claude', { 
+        command: request.command,
+        hasScreenshot,
+        isReplan: !!request.previousPlan || !!request.feedback
+      });
+
+      // Build message content with optional vision
+      const messageContent: any[] = [
+        {
+          type: 'text',
+          text: this.buildContextAwarePlanPrompt(request),
+        },
+      ];
+
+      // Add screenshot if provided
+      if (hasScreenshot) {
+        messageContent.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: request.context!.screenshot!.mimeType || 'image/png',
+            data: request.context!.screenshot!.base64,
+          },
+        });
+      }
 
       const message = await this.claudeClient.messages.create({
-        model: 'claude-3-5-sonnet-20241022',
-        max_tokens: 8192,
-        temperature: 0.3,
+        model: 'claude-sonnet-4-20250514', // Latest Claude Sonnet 4
+        max_tokens: hasScreenshot ? 4096 : 3072, // Optimize based on vision needs
+        temperature: 0.2, // Lower for faster generation
         messages: [
           {
             role: 'user',
-            content: this.buildStructuredPlanPrompt(command),
+            content: messageContent,
           },
         ],
+        // Add metadata to prevent caching
+        metadata: {
+          user_id: `nutjs_plan_${Date.now()}`,
+        },
       });
 
       const latencyMs = Date.now() - startTime;
       const rawResponse = message.content[0]?.type === 'text' ? message.content[0].text : '';
 
       // Parse JSON response
-      const planData = this.parseAndValidatePlan(rawResponse, command);
+      const planData = this.parseAndValidatePlan(rawResponse, request);
       
       // Update metadata with correct provider and generation time
+      if (!planData.metadata) {
+        planData.metadata = {};
+      }
       planData.metadata.provider = 'claude';
-      planData.metadata.generationTime = latencyMs;
+      planData.metadata.generationTimeMs = latencyMs;
 
       logger.info('Claude plan generation successful', { latencyMs, stepCount: planData.steps.length });
 
@@ -1782,9 +2140,97 @@ Now generate the JSON plan for the user's command. Return ONLY the JSON object, 
   }
 
   /**
+   * Generate structured plan using OpenAI with context awareness
+   */
+  private async generatePlanWithOpenAI(request: AutomationPlanRequest): Promise<AutomationPlanResponse> {
+    if (!this.openaiClient) {
+      throw new Error('OpenAI client not initialized');
+    }
+
+    const startTime = Date.now();
+    const hasScreenshot = !!request.context?.screenshot?.base64;
+
+    try {
+      logger.info('Generating automation plan with OpenAI', { 
+        command: request.command,
+        hasScreenshot,
+        isReplan: !!request.previousPlan || !!request.feedback
+      });
+
+      // Build messages with optional vision
+      const messages: any[] = [
+        {
+          role: 'system',
+          content: 'You are an expert automation planner with vision capabilities. Analyze screenshots to understand UI state and generate precise automation plans. Return only valid JSON, no markdown or explanations.',
+        },
+      ];
+
+      // Add user message with screenshot if provided
+      if (hasScreenshot) {
+        messages.push({
+          role: 'user',
+          content: [
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:${request.context!.screenshot!.mimeType || 'image/png'};base64,${request.context!.screenshot!.base64}`,
+                detail: 'low', // Use 'low' for faster processing
+              },
+            },
+            {
+              type: 'text',
+              text: this.buildContextAwarePlanPrompt(request),
+            },
+          ],
+        });
+      } else {
+        messages.push({
+          role: 'user',
+          content: this.buildContextAwarePlanPrompt(request),
+        });
+      }
+
+      const completion = await this.openaiClient.chat.completions.create({
+        model: 'gpt-4o', // gpt-4o supports both text and vision
+        messages,
+        temperature: 0.2, // Lower for faster generation
+        max_tokens: hasScreenshot ? 4096 : 3072, // Optimize based on vision needs
+      });
+
+      const latencyMs = Date.now() - startTime;
+      const rawResponse = completion.choices[0]?.message?.content || '';
+
+      // Parse JSON response
+      const planData = this.parseAndValidatePlan(rawResponse, request);
+      
+      // Update metadata with correct provider and generation time
+      if (!planData.metadata) {
+        planData.metadata = {};
+      }
+      planData.metadata.provider = 'openai';
+      planData.metadata.generationTimeMs = latencyMs;
+
+      logger.info('OpenAI plan generation successful', { latencyMs, stepCount: planData.steps.length });
+
+      return {
+        plan: planData,
+        provider: 'openai',
+        latencyMs,
+      };
+    } catch (error: any) {
+      const latencyMs = Date.now() - startTime;
+      logger.error('OpenAI plan generation failed', {
+        error: error.message,
+        latencyMs,
+      });
+      throw error;
+    }
+  }
+
+  /**
    * Parse and validate automation plan JSON
    */
-  private parseAndValidatePlan(rawResponse: string, originalCommand: string): AutomationPlan {
+  private parseAndValidatePlan(rawResponse: string, request: AutomationPlanRequest): AutomationPlan {
     // Remove markdown code fences if present
     let cleaned = rawResponse.replace(/```(?:json)?\n?/g, '').trim();
 
@@ -1805,26 +2251,44 @@ Now generate the JSON plan for the user's command. Return ONLY the JSON object, 
       throw new Error('Plan must have at least one step');
     }
 
-    // Validate each step
+    // Validate each step has required fields
     for (const step of planJson.steps) {
-      if (!step.id || !step.description || !step.action || !step.code) {
-        throw new Error(`Invalid step: missing required fields (id, description, action, code)`);
+      if (!step.id || !step.description || !step.kind) {
+        throw new Error(`Invalid step: missing required fields (id, description, kind)`);
+      }
+      // Ensure status is set
+      if (!step.status) {
+        step.status = 'pending';
       }
     }
 
+    // Determine version (increment if replanning)
+    const version = request.previousPlan ? (request.previousPlan.version || 1) + 1 : 1;
+
     // Build complete AutomationPlan object
     const plan: AutomationPlan = {
-      planId: randomUUID(),
-      originalCommand,
+      planId: request.previousPlan?.planId || randomUUID(),
+      version,
+      intent: request.intent || 'command_automate',
+      goal: planJson.goal || request.command,
+      createdAt: new Date().toISOString(),
+      contextSnapshot: request.context ? {
+        // Don't include screenshot in response - it's huge and MCP already has it
+        // screenshot: request.context.screenshot,
+        screenIntel: request.context.screenIntel,
+        activeApp: request.context.activeApp,
+        activeUrl: request.context.activeUrl,
+        os: request.context.os || (process.platform === 'darwin' ? 'darwin' : 'win32'),
+        timestamp: new Date().toISOString(),
+      } : undefined,
       steps: planJson.steps,
-      maxRetriesPerStep: planJson.maxRetriesPerStep || 3,
-      totalTimeout: planJson.totalTimeout || 300000,
-      targetOS: process.platform === 'darwin' ? 'darwin' : 'win32',
-      targetApp: this.detectTargetApp(originalCommand),
+      retryPolicy: planJson.retryPolicy || { maxGlobalRetries: 2 },
+      questions: planJson.questions || [],
       metadata: {
         provider: 'grok', // Will be overwritten by caller
-        generationTime: 0, // Will be overwritten by caller
-        createdAt: new Date().toISOString(),
+        generationTimeMs: 0, // Will be overwritten by caller
+        targetOS: process.platform === 'darwin' ? 'darwin' : 'win32',
+        targetApp: this.detectTargetApp(request.command),
       },
     };
 
