@@ -299,6 +299,9 @@ export interface AutomationPlanRequest {
   
   /** User feedback (for replanning) */
   feedback?: AutomationUserFeedback;
+  
+  /** Answers to clarification questions (follow-up after needsClarification) */
+  clarificationAnswers?: Record<string, string>;
 }
 
 /**
@@ -306,7 +309,27 @@ export interface AutomationPlanRequest {
  */
 export interface AutomationPlanResponse {
   success: boolean;
+  
+  /** Full automation plan (when query is clear) */
   plan?: AutomationPlan;
+  
+  /** True if LLM needs clarification before planning */
+  needsClarification?: boolean;
+  
+  /** Clarifying questions to ask user (before generating plan) */
+  clarificationQuestions?: AutomationQuestion[];
+  
+  /** Partial context extracted from ambiguous query */
+  partialContext?: {
+    intent?: string;
+    apps?: string[];
+    workflow?: string;
+    extractedInfo?: Record<string, any>;
+  };
+  
+  /** Answers to clarification questions (for follow-up request) */
+  clarificationAnswers?: Record<string, string>;
+  
   provider?: string;
   latencyMs?: number;
   error?: string;

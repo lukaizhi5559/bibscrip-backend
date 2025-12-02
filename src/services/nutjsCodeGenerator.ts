@@ -11,7 +11,7 @@ import {
   AutomationPlan, 
   AutomationStep,
   AutomationPlanRequest,
-  AutomationPlanResponse as AutomationPlanResponseType
+  AutomationPlanResponse
 } from '../types/automationPlan';
 import { AutomationGuide, GuideRequest } from '../types/automationGuide';
 import { randomUUID } from 'crypto';
@@ -29,12 +29,7 @@ export interface ScreenshotData {
   mimeType?: string; // e.g., 'image/png', 'image/jpeg'
 }
 
-export interface AutomationPlanResponse {
-  plan: AutomationPlan;
-  provider: 'claude' | 'openai' | 'grok';
-  latencyMs: number;
-  error?: string;
-}
+// AutomationPlanResponse is now imported from '../types/automationPlan'
 
 export interface AutomationGuideResponse {
   guide: AutomationGuide;
@@ -1348,6 +1343,15 @@ Now generate the code for: ${command}`;
         contextSection += `\n- OCR Data: Available (supplementary text data)`;
       }
     }
+    
+    // Add clarification answers if provided
+    if (request.clarificationAnswers && Object.keys(request.clarificationAnswers).length > 0) {
+      contextSection += `\n\n**CLARIFICATION ANSWERS PROVIDED:**`;
+      for (const [questionId, answer] of Object.entries(request.clarificationAnswers)) {
+        contextSection += `\n- ${questionId}: ${answer}`;
+      }
+      contextSection += `\n\n**IMPORTANT**: Use these clarification answers to resolve any ambiguity in the command.`;
+    }
 
     // Build feedback section for replanning
     let feedbackSection = '';
@@ -1562,6 +1566,64 @@ Now generate the code for: ${command}`;
 \`\`\`
 
 **IMPORTANT NOTES:**
+
+**CRITICAL: HANDLING AMBIGUOUS QUERIES**
+
+**YOU MUST ASK FOR CLARIFICATION** when the user's request contains ANY of these red flags:
+
+🚨 **MANDATORY CLARIFICATION TRIGGERS:**
+1. **Vague references**: "that project", "the thing", "something like", "I think"
+2. **Missing specifics**: Which file? Which chapter? Which app? Which project?
+3. **Unclear workflow**: Multiple steps but unclear order or dependencies
+4. **Ambiguous targets**: "my project" (which one?), "the document" (which document?)
+5. **Incomplete information**: Copy from where to where? Process which data?
+
+**DO NOT MAKE ASSUMPTIONS. DO NOT GUESS. ASK QUESTIONS INSTEAD.**
+
+**Example 1: MUST ask for clarification**
+User: "I have a project called I think bible study or something. Can you process that?"
+❌ WRONG: Generate a plan that searches for projects
+✅ CORRECT: Return clarification questions:
+
+\`\`\`json
+{
+  "needsClarification": true,
+  "clarificationQuestions": [
+    {
+      "id": "q1",
+      "text": "What is the exact name of your project?",
+      "type": "freeform",
+      "required": true
+    },
+    {
+      "id": "q2",
+      "text": "Where is this project located?",
+      "type": "choice",
+      "choices": ["ChatGPT", "Google Docs", "Notion", "Local files", "Other"],
+      "required": true
+    },
+    {
+      "id": "q3",
+      "text": "What would you like me to do with this project?",
+      "type": "freeform",
+      "required": true
+    }
+  ],
+  "partialContext": {
+    "intent": "multi_step_workflow",
+    "extractedInfo": {
+      "projectName": "bible study (approximate)",
+      "action": "process"
+    }
+  }
+}
+\`\`\`
+
+**Example 2: Clear query - NO clarification needed**
+User: "Generate an image of Mickey Mouse in ChatGPT"
+✅ CORRECT: Generate plan directly (all info is clear)
+
+**RULE: If you can't execute the task with 100% certainty about what the user wants, ASK FOR CLARIFICATION.**
 
 **INTELLIGENT DECISION TREE (Analyze FIRST, then decide):**
 
@@ -1909,6 +1971,124 @@ Now generate the JSON plan for the user's command. Return ONLY the JSON object, 
   }
 
   /**
+   * STAGE 1: Check if user query needs clarification before planning
+   * Uses a lightweight prompt to determine if the query is ambiguous
+   */
+  private async checkIfNeedsClarification(request: AutomationPlanRequest): Promise<AutomationPlanResponse> {
+    // Build context including any previous answers
+    let contextInfo = `User request: "${request.command}"`;
+    
+    if (request.clarificationAnswers && Object.keys(request.clarificationAnswers).length > 0) {
+      contextInfo += `\n\nPrevious clarification answers provided:\n`;
+      for (const [questionId, answer] of Object.entries(request.clarificationAnswers)) {
+        contextInfo += `- ${questionId}: ${answer}\n`;
+      }
+    }
+
+    const clarificationPrompt = `You are a query analyzer. Determine if this automation request is CLEAR or AMBIGUOUS.
+
+${contextInfo}
+
+**CRITICAL: Ask for clarification if the request has IMPORTANT missing information or ambiguity.**
+
+🚨 **MUST ask for clarification if:**
+- **Vague references**: "that project", "the thing", "something like", "I think", "maybe"
+- **Missing critical target**: "open the file" (which file?), "check that project" (which project?)
+- **Ambiguous actions**: "save it" (where?), "send to my team" (who specifically?), "update the numbers" (which numbers? to what?)
+- **Impossible to identify what to automate**: "do that thing I mentioned"
+
+⚠️ **SHOULD ask for clarification if:**
+- **Important user preferences**: Save location, recipient lists, specific file paths
+- **Ambiguous scope**: "top 3 articles" (from where? saved where?)
+- **Missing context that affects outcome**: Which document? Which meeting? Which chapter?
+
+✅ **DO NOT ask for clarification if:**
+- **Minor styling preferences**: Color, font size, exact wording (can use reasonable defaults)
+- **The request is fully specific**: "Generate Mickey Mouse in ChatGPT", "Create calendar event for dentist next Tuesday at 2pm"
+- **Reasonable defaults exist and are obvious**: Search engine (Google), browser (Chrome), date format (MM/DD/YYYY)
+
+**Examples:**
+
+AMBIGUOUS (needs clarification):
+- "I think I have a project about bible study" → Which project? Where?
+- "Open that file" → Which file?
+- "Process the document" → Which document? What processing?
+- "Search for AI news and save top 3 articles" → Save WHERE? (important user preference)
+- "Send email to my team" → WHO specifically? (important - affects recipients)
+
+CLEAR (no clarification needed):
+- "Generate Mickey Mouse in ChatGPT" → Clear task, app specified
+- "Send email to john@example.com about meeting" → Clear recipient and topic
+- "Create calendar event for dentist next Tuesday at 2pm" → Clear task and time
+- "Search Google for Python tutorials" → Clear task, obvious defaults (Google, browser)
+
+**Response format:**
+
+If AMBIGUOUS (only if IMPOSSIBLE to execute):
+\`\`\`json
+{
+  "needsClarification": true,
+  "clarificationQuestions": [
+    {
+      "id": "q1",
+      "text": "What is the exact name of your project?",
+      "type": "freeform",
+      "required": true
+    }
+  ],
+  "partialContext": {
+    "extractedInfo": {}
+  }
+}
+\`\`\`
+
+If CLEAR (can be executed):
+\`\`\`json
+{
+  "needsClarification": false
+}
+\`\`\`
+
+Analyze now:`;
+
+    // Use Claude for fast clarification check
+    if (this.claudeClient) {
+      const message = await this.claudeClient.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1024,
+        temperature: 0.3,
+        messages: [
+          {
+            role: 'user',
+            content: clarificationPrompt,
+          },
+        ],
+      });
+
+      const rawResponse = message.content[0]?.type === 'text' ? message.content[0].text : '';
+      const cleaned = rawResponse.replace(/```(?:json)?\n?/g, '').trim();
+      const result = JSON.parse(cleaned);
+
+      if (result.needsClarification) {
+        return {
+          success: true,
+          needsClarification: true,
+          clarificationQuestions: result.clarificationQuestions,
+          partialContext: result.partialContext,
+          provider: 'claude',
+          latencyMs: 0,
+        };
+      }
+    }
+
+    // Query is clear, return null to indicate no clarification needed
+    return {
+      success: true,
+      needsClarification: false,
+    } as AutomationPlanResponse;
+  }
+
+  /**
    * Generate context-aware structured automation plan with automatic fallback
    * Supports replanning with feedback for adaptive automation
    * Tries Claude first, then OpenAI, then Grok (slowest)
@@ -1921,6 +2101,43 @@ Now generate the JSON plan for the user's command. Return ONLY the JSON object, 
       ? { command: request, intent: 'command_automate' }
       : request;
 
+    // STAGE 1: Check if query needs clarification (unless answers already provided)
+    logger.info('Checking for clarification answers', {
+      command: planRequest.command,
+      hasClarificationAnswers: !!planRequest.clarificationAnswers,
+      clarificationAnswersType: typeof planRequest.clarificationAnswers,
+      clarificationAnswersKeys: planRequest.clarificationAnswers ? Object.keys(planRequest.clarificationAnswers) : [],
+    });
+    
+    const hasAnswers = planRequest.clarificationAnswers && Object.keys(planRequest.clarificationAnswers).length > 0;
+    
+    if (hasAnswers) {
+      logger.info('Clarification answers provided, skipping clarification check', {
+        command: planRequest.command,
+        answerCount: Object.keys(planRequest.clarificationAnswers!).length,
+      });
+    }
+    
+    if (!hasAnswers) {
+      try {
+        const clarificationCheck = await this.checkIfNeedsClarification(planRequest);
+        // Only return if clarification is actually needed
+        if (clarificationCheck.needsClarification === true) {
+          logger.info('Query needs clarification', { 
+            command: planRequest.command,
+            questionCount: clarificationCheck.clarificationQuestions?.length 
+          });
+          return clarificationCheck;
+        }
+        // If needsClarification is false, continue to plan generation
+        logger.info('Query is clear, proceeding with plan generation', { command: planRequest.command });
+      } catch (error: any) {
+        logger.warn('Clarification check failed, proceeding with plan generation', { error: error.message });
+        // Continue to plan generation if clarification check fails
+      }
+    }
+
+    // STAGE 2: Generate the actual plan
     // Try Claude first (fastest, best for vision)
     if (this.claudeClient) {
       try {
@@ -2031,6 +2248,23 @@ Now generate the JSON plan for the user's command. Return ONLY the JSON object, 
       // Parse JSON response
       const planData = this.parseAndValidatePlan(rawResponse, request);
       
+      // Check if this is a clarification response
+      if (planData.needsClarification) {
+        logger.info('Grok returned clarification questions', { 
+          latencyMs, 
+          questionCount: planData.clarificationQuestions?.length 
+        });
+        
+        return {
+          success: true,
+          needsClarification: true,
+          clarificationQuestions: planData.clarificationQuestions,
+          partialContext: planData.partialContext,
+          provider: 'grok',
+          latencyMs,
+        };
+      }
+      
       // Update metadata with correct provider and generation time
       if (!planData.metadata) {
         planData.metadata = {};
@@ -2041,10 +2275,11 @@ Now generate the JSON plan for the user's command. Return ONLY the JSON object, 
       logger.info('Grok plan generation successful', { latencyMs, stepCount: planData.steps.length });
 
       return {
+        success: true,
         plan: planData,
         provider: 'grok',
         latencyMs,
-      };
+      } as AutomationPlanResponse;
     } catch (error: any) {
       const latencyMs = Date.now() - startTime;
       logger.error('Grok plan generation failed', {
@@ -2115,6 +2350,23 @@ Now generate the JSON plan for the user's command. Return ONLY the JSON object, 
       // Parse JSON response
       const planData = this.parseAndValidatePlan(rawResponse, request);
       
+      // Check if this is a clarification response
+      if (planData.needsClarification) {
+        logger.info('Claude returned clarification questions', { 
+          latencyMs, 
+          questionCount: planData.clarificationQuestions?.length 
+        });
+        
+        return {
+          success: true,
+          needsClarification: true,
+          clarificationQuestions: planData.clarificationQuestions,
+          partialContext: planData.partialContext,
+          provider: 'claude',
+          latencyMs,
+        };
+      }
+      
       // Update metadata with correct provider and generation time
       if (!planData.metadata) {
         planData.metadata = {};
@@ -2125,6 +2377,7 @@ Now generate the JSON plan for the user's command. Return ONLY the JSON object, 
       logger.info('Claude plan generation successful', { latencyMs, stepCount: planData.steps.length });
 
       return {
+        success: true,
         plan: planData,
         provider: 'claude',
         latencyMs,
@@ -2203,6 +2456,23 @@ Now generate the JSON plan for the user's command. Return ONLY the JSON object, 
       // Parse JSON response
       const planData = this.parseAndValidatePlan(rawResponse, request);
       
+      // Check if this is a clarification response
+      if (planData.needsClarification) {
+        logger.info('OpenAI returned clarification questions', { 
+          latencyMs, 
+          questionCount: planData.clarificationQuestions?.length 
+        });
+        
+        return {
+          success: true,
+          needsClarification: true,
+          clarificationQuestions: planData.clarificationQuestions,
+          partialContext: planData.partialContext,
+          provider: 'openai',
+          latencyMs,
+        };
+      }
+      
       // Update metadata with correct provider and generation time
       if (!planData.metadata) {
         planData.metadata = {};
@@ -2213,6 +2483,7 @@ Now generate the JSON plan for the user's command. Return ONLY the JSON object, 
       logger.info('OpenAI plan generation successful', { latencyMs, stepCount: planData.steps.length });
 
       return {
+        success: true,
         plan: planData,
         provider: 'openai',
         latencyMs,
@@ -2228,9 +2499,9 @@ Now generate the JSON plan for the user's command. Return ONLY the JSON object, 
   }
 
   /**
-   * Parse and validate automation plan JSON
+   * Parse and validate automation plan JSON or clarification response
    */
-  private parseAndValidatePlan(rawResponse: string, request: AutomationPlanRequest): AutomationPlan {
+  private parseAndValidatePlan(rawResponse: string, request: AutomationPlanRequest): AutomationPlan | any {
     // Remove markdown code fences if present
     let cleaned = rawResponse.replace(/```(?:json)?\n?/g, '').trim();
 
@@ -2242,7 +2513,20 @@ Now generate the JSON plan for the user's command. Return ONLY the JSON object, 
       throw new Error(`Failed to parse plan JSON: ${error}`);
     }
 
-    // Validate required fields
+    // Check if this is a clarification response
+    if (planJson.needsClarification === true) {
+      // Validate clarification response
+      if (!planJson.clarificationQuestions || !Array.isArray(planJson.clarificationQuestions)) {
+        throw new Error('Clarification response must have "clarificationQuestions" array');
+      }
+      if (planJson.clarificationQuestions.length === 0) {
+        throw new Error('Clarification response must have at least one question');
+      }
+      // Return as-is for clarification
+      return planJson;
+    }
+
+    // Validate required fields for normal plan
     if (!planJson.steps || !Array.isArray(planJson.steps)) {
       throw new Error('Plan must have a "steps" array');
     }

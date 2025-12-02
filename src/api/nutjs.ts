@@ -191,7 +191,7 @@ router.post('/', authenticate, async (req: Request, res: Response): Promise<void
  */
 router.post('/plan', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
-    const { command, intent, context, previousPlan, feedback } = req.body;
+    const { command, intent, context, previousPlan, feedback, clarificationAnswers } = req.body;
 
     // Validate request
     if (!command || typeof command !== 'string' || command.trim().length === 0) {
@@ -217,6 +217,7 @@ router.post('/plan', authenticate, async (req: Request, res: Response): Promise<
       hasContext: !!context,
       hasPreviousPlan: !!previousPlan,
       hasFeedback: !!feedback,
+      hasClarificationAnswers: !!clarificationAnswers,
       isReplan: !!previousPlan || !!feedback,
       userId: (req as any).user?.id,
     });
@@ -228,6 +229,7 @@ router.post('/plan', authenticate, async (req: Request, res: Response): Promise<
       context,
       previousPlan,
       feedback,
+      clarificationAnswers,
     });
 
     // Success response
@@ -239,13 +241,14 @@ router.post('/plan', authenticate, async (req: Request, res: Response): Promise<
       planId: result.plan?.planId,
       planVersion: result.plan?.version || 1,
       hasQuestions: !!result.plan?.questions && result.plan.questions.length > 0,
+      needsClarification: result.needsClarification || false,
+      clarificationQuestionCount: result.clarificationQuestions?.length || 0,
     });
 
+    // Return full result including clarification fields
     res.status(200).json({
-      success: true,
-      plan: result.plan,
-      provider: result.provider,
-      latencyMs: result.latencyMs,
+      ...result, // Spread all fields from result (plan, needsClarification, clarificationQuestions, etc.)
+      success: true, // Ensure success is always true for 200 responses
     });
   } catch (error: any) {
     logger.error('Automation plan generation failed', {
