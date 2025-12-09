@@ -7,7 +7,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import { nutjsCodeGenerator, ScreenshotData } from '../services/nutjsCodeGenerator';
 import { logger } from '../utils/logger';
 import { authenticate } from '../middleware/auth';
-import { GuideRequest } from '../types/automationGuide';
+import { InteractiveGuideRequest } from '../types/automationGuide';
 
 const router = express.Router();
 
@@ -266,55 +266,101 @@ router.post('/plan', authenticate, async (req: Request, res: Response): Promise<
 
 /**
  * POST /api/nutjs/guide
- * Generate interactive automation guide with step-by-step explanations
+ * Generate interactive guide with visual overlays for step-by-step guidance
  * Protected by API key authentication
  * 
  * Request body:
  * {
- *   "command": "How do I use AI plugins in Figma",
+ *   "command": "Show me how to buy winter clothes on Amazon",
  *   "context": {
- *     "failedStep": 2,
- *     "failureType": "app_not_found",
- *     "error": "Figma not installed"
+ *     "screenshot": { "base64": "...", "mimeType": "image/png" },
+ *     "activeApp": "Google Chrome",
+ *     "activeUrl": "https://amazon.com",
+ *     "os": "darwin",
+ *     "screenDimensions": { "width": 1920, "height": 1080 }
  *   }
+ * }
+ * 
+ * Response:
+ * {
+ *   "success": true,
+ *   "guide": {
+ *     "id": "uuid",
+ *     "command": "Show me how to buy winter clothes on Amazon",
+ *     "intent": "command_guide",
+ *     "intro": "I'll guide you through...",
+ *     "steps": [
+ *       {
+ *         "id": "step_1",
+ *         "title": "Open Chrome",
+ *         "description": "...",
+ *         "overlays": [...],
+ *         "completionMode": "either",
+ *         "visionCheck": {...}
+ *       }
+ *     ],
+ *     "totalSteps": 3,
+ *     "metadata": {...}
+ *   },
+ *   "provider": "claude",
+ *   "latencyMs": 1234
  * }
  */
 router.post('/guide', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
-    const { command, context } = req.body as GuideRequest;
+    const { command, context, previousGuide, feedback } = req.body as InteractiveGuideRequest;
 
     if (!command || typeof command !== 'string') {
       res.status(400).json({
         success: false,
         error: 'Invalid request: command is required and must be a string',
+        example: {
+          command: 'Show me how to buy winter clothes on Amazon',
+          context: {
+            screenshot: { base64: '...', mimeType: 'image/png' },
+            activeApp: 'Google Chrome',
+            os: 'darwin',
+          },
+          feedback: {
+            reason: 'missing_prerequisite',
+            message: "Don't have n8n installed",
+            stepId: 'step_1'
+          }
+        },
       });
       return;
     }
 
-    logger.info('Generating automation guide', { command, hasContext: !!context });
+    const isReplan = !!previousGuide || !!feedback;
 
-    const request: GuideRequest = {
+    logger.info('Generating interactive guide', { 
+      command, 
+      hasContext: !!context,
+      hasScreenshot: !!context?.screenshot,
+      activeApp: context?.activeApp,
+      isReplan,
+      hasFeedback: !!feedback,
+    });
+
+    const request: InteractiveGuideRequest = {
       command,
       context: context || {},
+      previousGuide,
+      feedback,
     };
 
     const result = await nutjsCodeGenerator.generateGuide(request);
 
-    res.json({
-      success: true,
-      guide: result.guide,
-      provider: result.provider,
-      latencyMs: result.latencyMs,
-    });
+    res.json(result);
   } catch (error: any) {
-    logger.error('Failed to generate automation guide', {
+    logger.error('Failed to generate interactive guide', {
       error: error.message,
       stack: error.stack,
     });
 
     res.status(500).json({
       success: false,
-      error: 'Failed to generate automation guide',
+      error: 'Failed to generate interactive guide',
       message: error.message,
     });
   }

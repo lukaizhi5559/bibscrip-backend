@@ -3,10 +3,15 @@ import { authenticate } from '../middleware/auth';
 import { logger } from '../utils/logger';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const router = Router();
 
 // Initialize vision clients
+const geminiClient = process.env.GEMINI_API_KEY
+  ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
+  : null;
+
 const claudeClient = process.env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
   : null;
@@ -343,8 +348,8 @@ router.post('/analyze', authenticate, async (req: Request, res: Response): Promi
     // Default to 'balanced' mode (best speed/accuracy trade-off)
     const mode = speedMode || 'balanced';
 
-    // Default to Claude if no provider is specified
-    const preferredProvider = provider || 'claude';
+    // Default to Gemini if no provider is specified
+    const preferredProvider = provider || 'gemini';
 
     logger.info('Vision analyze request received', {
       query: query || 'general analysis',
@@ -371,21 +376,7 @@ router.post('/analyze', authenticate, async (req: Request, res: Response): Promi
 
       try {
         // If specific provider requested, try that first
-        if (preferredProvider === 'openai' && openaiClient) {
-          try {
-            await analyzeWithOpenAIStreaming(screenshot, query, mode, sendEvent);
-            const latencyMs = Date.now() - startTime;
-            
-            sendEvent({ type: 'done', provider: 'openai', latencyMs });
-            res.end();
-            return;
-          } catch (error: any) {
-            logger.warn('OpenAI streaming failed', { error: error.message });
-          }
-        }
-
-        // Default: Try Claude first (with streaming)
-        if (claudeClient && preferredProvider !== 'openai') {
+        if (preferredProvider === 'claude' && claudeClient) {
           try {
             await analyzeWithClaudeStreaming(screenshot, query, mode, sendEvent);
             const latencyMs = Date.now() - startTime;
@@ -394,14 +385,12 @@ router.post('/analyze', authenticate, async (req: Request, res: Response): Promi
             res.end();
             return;
           } catch (error: any) {
-            logger.warn('Claude streaming failed, falling back to OpenAI', {
-              error: error.message,
-            });
+            logger.warn('Claude streaming failed', { error: error.message });
           }
         }
 
-        // Fallback to OpenAI streaming
-        if (openaiClient) {
+        // Default: Try OpenAI first (with streaming)
+        if (openaiClient && preferredProvider !== 'claude') {
           try {
             await analyzeWithOpenAIStreaming(screenshot, query, mode, sendEvent);
             const latencyMs = Date.now() - startTime;
@@ -410,7 +399,23 @@ router.post('/analyze', authenticate, async (req: Request, res: Response): Promi
             res.end();
             return;
           } catch (error: any) {
-            logger.warn('OpenAI streaming failed', { error: error.message });
+            logger.warn('OpenAI streaming failed, falling back to Claude', {
+              error: error.message,
+            });
+          }
+        }
+
+        // Fallback to Claude streaming
+        if (claudeClient) {
+          try {
+            await analyzeWithClaudeStreaming(screenshot, query, mode, sendEvent);
+            const latencyMs = Date.now() - startTime;
+            
+            sendEvent({ type: 'done', provider: 'claude', latencyMs });
+            res.end();
+            return;
+          } catch (error: any) {
+            logger.warn('Claude streaming failed', { error: error.message });
           }
         }
 
@@ -427,12 +432,12 @@ router.post('/analyze', authenticate, async (req: Request, res: Response): Promi
 
     // Non-streaming path (original logic)
     // If specific provider requested, try that first
-    if (preferredProvider === 'openai' && openaiClient) {
+    if (preferredProvider === 'gemini' && geminiClient) {
       try {
-        const result = await analyzeWithOpenAI(screenshot, query, mode);
+        const result = await analyzeWithGemini(screenshot, query, mode);
         const latencyMs = Date.now() - startTime;
 
-        logger.info('Vision analyze successful with OpenAI (forced)', {
+        logger.info('Vision analyze successful with Gemini 3 Pro (forced)', {
           textLength: result.text?.length || 0,
           latencyMs,
         });
@@ -440,12 +445,60 @@ router.post('/analyze', authenticate, async (req: Request, res: Response): Promi
         res.status(200).json({
           success: true,
           ...result,
-          provider: 'openai',
+          provider: 'gemini',
           latencyMs,
         });
         return;
       } catch (error: any) {
-        logger.warn('OpenAI vision analyze failed', {
+        logger.warn('Gemini 3 Pro vision analyze failed', {
+          error: error.message,
+        });
+      }
+    }
+
+    if (preferredProvider === 'gemini-2.5' && geminiClient) {
+      try {
+        const result = await analyzeWithGemini25(screenshot, query, mode);
+        const latencyMs = Date.now() - startTime;
+
+        logger.info('Vision analyze successful with Gemini 2.5 Pro (forced)', {
+          textLength: result.text?.length || 0,
+          latencyMs,
+        });
+
+        res.status(200).json({
+          success: true,
+          ...result,
+          provider: 'gemini-2.5',
+          latencyMs,
+        });
+        return;
+      } catch (error: any) {
+        logger.warn('Gemini 2.5 Pro vision analyze failed', {
+          error: error.message,
+        });
+      }
+    }
+
+    if (preferredProvider === 'claude' && claudeClient) {
+      try {
+        const result = await analyzeWithClaude(screenshot, query, mode);
+        const latencyMs = Date.now() - startTime;
+
+        logger.info('Vision analyze successful with Claude (forced)', {
+          textLength: result.text?.length || 0,
+          latencyMs,
+        });
+
+        res.status(200).json({
+          success: true,
+          ...result,
+          provider: 'claude',
+          latencyMs,
+        });
+        return;
+      } catch (error: any) {
+        logger.warn('Claude vision analyze failed', {
           error: error.message,
         });
       }
@@ -475,13 +528,13 @@ router.post('/analyze', authenticate, async (req: Request, res: Response): Promi
       }
     }
 
-    // Default fallback order: Try Claude first (with speed mode)
-    if (claudeClient && preferredProvider !== 'openai' && preferredProvider !== 'grok') {
+    // Default fallback order: Try Gemini 3 Pro first (latest model)
+    if (geminiClient && preferredProvider !== 'claude' && preferredProvider !== 'grok' && preferredProvider !== 'openai' && preferredProvider !== 'gemini-2.5') {
       try {
-        const result = await analyzeWithClaude(screenshot, query, mode);
+        const result = await analyzeWithGemini(screenshot, query, mode);
         const latencyMs = Date.now() - startTime;
 
-        logger.info('Vision analyze successful with Claude', {
+        logger.info('Vision analyze successful with Gemini 3 Pro', {
           textLength: result.text?.length || 0,
           latencyMs,
         });
@@ -489,19 +542,44 @@ router.post('/analyze', authenticate, async (req: Request, res: Response): Promi
         res.status(200).json({
           success: true,
           ...result,
-          provider: 'claude',
+          provider: 'gemini',
           latencyMs,
         });
         return;
       } catch (error: any) {
-        logger.warn('Claude vision analyze failed, falling back to OpenAI', {
+        logger.warn('Gemini 3 Pro vision analyze failed, trying Gemini 2.5', {
+          error: error.message,
+        });
+      }
+    }
+
+    // Fallback to Gemini 2.5 Pro (faster, more stable)
+    if (geminiClient && preferredProvider !== 'claude' && preferredProvider !== 'grok' && preferredProvider !== 'openai') {
+      try {
+        const result = await analyzeWithGemini25(screenshot, query, mode);
+        const latencyMs = Date.now() - startTime;
+
+        logger.info('Vision analyze successful with Gemini 2.5 Pro', {
+          textLength: result.text?.length || 0,
+          latencyMs,
+        });
+
+        res.status(200).json({
+          success: true,
+          ...result,
+          provider: 'gemini-2.5',
+          latencyMs,
+        });
+        return;
+      } catch (error: any) {
+        logger.warn('Gemini 2.5 Pro vision analyze failed, falling back to OpenAI', {
           error: error.message,
         });
       }
     }
 
     // Fallback to OpenAI
-    if (openaiClient) {
+    if (openaiClient && preferredProvider !== 'claude' && preferredProvider !== 'grok') {
       try {
         const result = await analyzeWithOpenAI(screenshot, query, mode);
         const latencyMs = Date.now() - startTime;
@@ -519,7 +597,32 @@ router.post('/analyze', authenticate, async (req: Request, res: Response): Promi
         });
         return;
       } catch (error: any) {
-        logger.warn('OpenAI vision analyze failed, falling back to Grok', {
+        logger.warn('OpenAI vision analyze failed, falling back to Claude', {
+          error: error.message,
+        });
+      }
+    }
+
+    // Fallback to Claude
+    if (claudeClient) {
+      try {
+        const result = await analyzeWithClaude(screenshot, query, mode);
+        const latencyMs = Date.now() - startTime;
+
+        logger.info('Vision analyze successful with Claude', {
+          textLength: result.text?.length || 0,
+          latencyMs,
+        });
+
+        res.status(200).json({
+          success: true,
+          ...result,
+          provider: 'claude',
+          latencyMs,
+        });
+        return;
+      } catch (error: any) {
+        logger.warn('Claude vision analyze failed, falling back to Grok', {
           error: error.message,
         });
       }
@@ -683,6 +786,160 @@ Analyze the screenshot and return ONLY a JSON object:
     exists: result.exists,
     confidence: result.confidence,
   };
+}
+
+async function analyzeWithGemini(
+  screenshot: { base64: string; mimeType: string },
+  query?: string,
+  speedMode: 'fast' | 'balanced' | 'accurate' = 'balanced'
+): Promise<{ text: string; analysis: string }> {
+  if (!geminiClient) {
+    throw new Error('Gemini client not initialized');
+  }
+
+  const prompt = query || `Analyze this screenshot and extract all visible text. Also provide a brief description of what you see.
+
+Return a JSON object:
+{
+  "text": "<all visible text>",
+  "analysis": "<brief description of UI>"
+}`;
+
+  // Speed mode configurations
+  const config = {
+    fast: {
+      model: 'gemini-2.0-flash',  // Fastest
+      maxTokens: 300,
+    },
+    balanced: {
+      model: 'gemini-3-pro-preview',  // Best balance
+      maxTokens: 800,
+    },
+    accurate: {
+      model: 'gemini-3-pro-preview',  // Most accurate
+      maxTokens: 2000,
+    },
+  }[speedMode];
+
+  const model = geminiClient.getGenerativeModel({ 
+    model: config.model,
+    generationConfig: {
+      temperature: 0.1,
+      maxOutputTokens: config.maxTokens,
+    }
+  });
+
+  const result = await model.generateContent({
+    contents: [{
+      role: 'user',
+      parts: [
+        {
+          inlineData: {
+            mimeType: screenshot.mimeType || 'image/png',
+            data: screenshot.base64,
+          },
+        },
+        {
+          text: prompt,
+        },
+      ],
+    }],
+  });
+
+  const response = result.response.text();
+  
+  // Try to parse as JSON first
+  try {
+    const cleaned = response.replace(/```(?:json)?\n?/g, '').trim();
+    const parsedResult = JSON.parse(cleaned);
+    return {
+      text: parsedResult.text || '',
+      analysis: parsedResult.analysis || response,
+    };
+  } catch {
+    // If not JSON, return raw response
+    return {
+      text: response,
+      analysis: response,
+    };
+  }
+}
+
+async function analyzeWithGemini25(
+  screenshot: { base64: string; mimeType: string },
+  query?: string,
+  speedMode: 'fast' | 'balanced' | 'accurate' = 'balanced'
+): Promise<{ text: string; analysis: string }> {
+  if (!geminiClient) {
+    throw new Error('Gemini client not initialized');
+  }
+
+  const prompt = query || `Analyze this screenshot and extract all visible text. Also provide a brief description of what you see.
+
+Return a JSON object:
+{
+  "text": "<all visible text>",
+  "analysis": "<brief description of UI>"
+}`;
+
+  // Speed mode configurations - all use Gemini 2.5 Pro
+  const config = {
+    fast: {
+      model: 'gemini-2.5-flash',  // Fastest 2.5 model
+      maxTokens: 300,
+    },
+    balanced: {
+      model: 'gemini-2.5-pro',  // Stable, fast
+      maxTokens: 800,
+    },
+    accurate: {
+      model: 'gemini-2.5-pro',  // Most accurate 2.5
+      maxTokens: 2000,
+    },
+  }[speedMode];
+
+  const model = geminiClient.getGenerativeModel({ 
+    model: config.model,
+    generationConfig: {
+      temperature: 0.1,
+      maxOutputTokens: config.maxTokens,
+    }
+  });
+
+  const result = await model.generateContent({
+    contents: [{
+      role: 'user',
+      parts: [
+        {
+          inlineData: {
+            mimeType: screenshot.mimeType || 'image/png',
+            data: screenshot.base64,
+          },
+        },
+        {
+          text: prompt,
+        },
+      ],
+    }],
+  });
+
+  const response = result.response.text();
+  
+  // Try to parse as JSON first
+  try {
+    const cleaned = response.replace(/```(?:json)?\n?/g, '').trim();
+    const parsedResult = JSON.parse(cleaned);
+    return {
+      text: parsedResult.text || '',
+      analysis: parsedResult.analysis || response,
+    };
+  } catch {
+    // If not JSON, return raw response
+    return {
+      text: response,
+      analysis: response,
+    };
+  }
 }
 
 async function analyzeWithClaude(
@@ -1287,6 +1544,487 @@ Return a JSON object:
       text: response,
       analysis: response,
     };
+  }
+}
+
+/**
+ * POST /api/vision/locate-element
+ * Locate an element in a screenshot and return its boundary coordinates
+ * Used by interactive guide mode to dynamically find UI elements
+ * 
+ * Request body:
+ * {
+ *   "screenshot": { "base64": "...", "mimeType": "image/png" },
+ *   "locator": {
+ *     "strategy": "vision",
+ *     "description": "the Add to Slack button",
+ *     "nodeQuery": { "textContains": "Add to Slack", "role": "button" }
+ *   },
+ *   "screenDimensions": { "width": 1920, "height": 1080 }
+ * }
+ * 
+ * Response:
+ * {
+ *   "success": true,
+ *   "boundary": { "x": 640, "y": 400, "width": 120, "height": 40 },
+ *   "coordinateSpace": "screen",
+ *   "confidence": 0.92,
+ *   "provider": "claude",
+ *   "latencyMs": 1234
+ * }
+ */
+router.post('/locate-element', authenticate, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { screenshot, locator, screenDimensions } = req.body;
+
+    // Validate request
+    if (!screenshot?.base64 || !locator) {
+      res.status(400).json({
+        success: false,
+        error: 'Missing required fields: screenshot and locator',
+      });
+      return;
+    }
+
+    logger.info('Locate element request received', {
+      strategy: locator.strategy,
+      description: locator.description,
+      hasNodeQuery: !!locator.nodeQuery,
+      userId: (req as any).user?.id,
+    });
+
+    const startTime = Date.now();
+
+    // Build vision prompt
+    const prompt = buildLocateElementPrompt(locator, screenDimensions);
+
+    // Try Claude first (best for vision)
+    let result: any = null;
+    let provider = '';
+
+    if (claudeClient) {
+      try {
+        const message = await claudeClient.messages.create({
+          model: 'claude-3-5-sonnet-20241022',
+          max_tokens: 1024,
+          temperature: 0.1,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'image',
+                  source: {
+                    type: 'base64',
+                    media_type: (screenshot.mimeType || 'image/png') as any,
+                    data: screenshot.base64,
+                  },
+                },
+                {
+                  type: 'text',
+                  text: prompt,
+                },
+              ],
+            },
+          ],
+        });
+
+        const response = message.content[0]?.type === 'text' ? message.content[0].text : '';
+        result = parseLocateElementResponse(response, screenDimensions);
+        provider = 'claude';
+      } catch (error: any) {
+        logger.warn('Claude locate-element failed, trying OpenAI', { error: error.message });
+      }
+    }
+
+    // Fallback to OpenAI
+    if (!result && openaiClient) {
+      try {
+        const completion = await openaiClient.chat.completions.create({
+          model: 'gpt-4o',
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'image_url',
+                  image_url: {
+                    url: `data:${screenshot.mimeType || 'image/png'};base64,${screenshot.base64}`,
+                  },
+                },
+                {
+                  type: 'text',
+                  text: prompt,
+                },
+              ],
+            },
+          ],
+          max_tokens: 1024,
+          temperature: 0.1,
+        });
+
+        const response = completion.choices[0]?.message?.content || '';
+        result = parseLocateElementResponse(response, screenDimensions);
+        provider = 'openai';
+      } catch (error: any) {
+        logger.error('OpenAI locate-element failed', { error: error.message });
+      }
+    }
+
+    const latencyMs = Date.now() - startTime;
+
+    if (!result) {
+      res.status(500).json({
+        success: false,
+        error: 'All vision providers failed to locate element',
+      });
+      return;
+    }
+
+    logger.info('Element located successfully', {
+      provider,
+      boundary: result.boundary,
+      confidence: result.confidence,
+      latencyMs,
+    });
+
+    res.status(200).json({
+      success: true,
+      ...result,
+      provider,
+      latencyMs,
+    });
+  } catch (error: any) {
+    logger.error('Locate element failed', {
+      error: error.message,
+      stack: error.stack,
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Failed to locate element',
+      message: error.message,
+    });
+  }
+});
+
+/**
+ * POST /api/vision/verify-step
+ * Verify that a guide step has been completed by analyzing screenshots
+ * 
+ * Request body:
+ * {
+ *   "stepId": "step_1",
+ *   "screenshot": { "base64": "...", "mimeType": "image/png" },
+ *   "previousScreenshot": { "base64": "...", "mimeType": "image/png" },
+ *   "verification": {
+ *     "strategy": "element_visible",
+ *     "expectedElement": "Spotlight search box",
+ *     "timeoutMs": 5000
+ *   }
+ * }
+ * 
+ * Response:
+ * {
+ *   "success": true,
+ *   "verified": true,
+ *   "confidence": 0.88,
+ *   "explanation": "Spotlight search box is now visible in the screenshot",
+ *   "provider": "claude",
+ *   "latencyMs": 1234
+ * }
+ */
+router.post('/verify-step', authenticate, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { stepId, screenshot, previousScreenshot, verification } = req.body;
+
+    // Validate request
+    if (!stepId || !screenshot?.base64 || !verification) {
+      res.status(400).json({
+        success: false,
+        error: 'Missing required fields: stepId, screenshot, and verification',
+      });
+      return;
+    }
+
+    logger.info('Verify step request received', {
+      stepId,
+      strategy: verification.strategy,
+      hasPreviousScreenshot: !!previousScreenshot,
+      userId: (req as any).user?.id,
+    });
+
+    const startTime = Date.now();
+
+    // Build verification prompt
+    const prompt = buildVerifyStepPrompt(verification, !!previousScreenshot);
+
+    // Try Claude first
+    let result: any = null;
+    let provider = '';
+
+    if (claudeClient) {
+      try {
+        const content: any[] = [];
+
+        // Add previous screenshot if provided (for comparison)
+        if (previousScreenshot?.base64) {
+          content.push({
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: (previousScreenshot.mimeType || 'image/png') as any,
+              data: previousScreenshot.base64,
+            },
+          });
+          content.push({
+            type: 'text',
+            text: '^ BEFORE (previous state)',
+          });
+        }
+
+        // Add current screenshot
+        content.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: (screenshot.mimeType || 'image/png') as any,
+            data: screenshot.base64,
+          },
+        });
+        content.push({
+          type: 'text',
+          text: previousScreenshot ? '^ AFTER (current state)' : '^ CURRENT STATE',
+        });
+
+        // Add verification prompt
+        content.push({
+          type: 'text',
+          text: prompt,
+        });
+
+        const message = await claudeClient.messages.create({
+          model: 'claude-3-5-sonnet-20241022',
+          max_tokens: 512,
+          temperature: 0.1,
+          messages: [
+            {
+              role: 'user',
+              content,
+            },
+          ],
+        });
+
+        const response = message.content[0]?.type === 'text' ? message.content[0].text : '';
+        result = parseVerifyStepResponse(response);
+        provider = 'claude';
+      } catch (error: any) {
+        logger.warn('Claude verify-step failed, trying OpenAI', { error: error.message });
+      }
+    }
+
+    // Fallback to OpenAI
+    if (!result && openaiClient) {
+      try {
+        const content: any[] = [];
+
+        if (previousScreenshot?.base64) {
+          content.push({
+            type: 'image_url',
+            image_url: {
+              url: `data:${previousScreenshot.mimeType || 'image/png'};base64,${previousScreenshot.base64}`,
+            },
+          });
+          content.push({
+            type: 'text',
+            text: '^ BEFORE (previous state)',
+          });
+        }
+
+        content.push({
+          type: 'image_url',
+          image_url: {
+            url: `data:${screenshot.mimeType || 'image/png'};base64,${screenshot.base64}`,
+          },
+        });
+        content.push({
+          type: 'text',
+          text: previousScreenshot ? '^ AFTER (current state)' : '^ CURRENT STATE',
+        });
+        content.push({
+          type: 'text',
+          text: prompt,
+        });
+
+        const completion = await openaiClient.chat.completions.create({
+          model: 'gpt-4o',
+          messages: [
+            {
+              role: 'user',
+              content,
+            },
+          ],
+          max_tokens: 512,
+          temperature: 0.1,
+        });
+
+        const response = completion.choices[0]?.message?.content || '';
+        result = parseVerifyStepResponse(response);
+        provider = 'openai';
+      } catch (error: any) {
+        logger.error('OpenAI verify-step failed', { error: error.message });
+      }
+    }
+
+    const latencyMs = Date.now() - startTime;
+
+    if (!result) {
+      res.status(500).json({
+        success: false,
+        error: 'All vision providers failed to verify step',
+      });
+      return;
+    }
+
+    logger.info('Step verification complete', {
+      stepId,
+      verified: result.verified,
+      confidence: result.confidence,
+      provider,
+      latencyMs,
+    });
+
+    res.status(200).json({
+      success: true,
+      ...result,
+      provider,
+      latencyMs,
+    });
+  } catch (error: any) {
+    logger.error('Verify step failed', {
+      error: error.message,
+      stack: error.stack,
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Failed to verify step',
+      message: error.message,
+    });
+  }
+});
+
+// ============================================================================
+// HELPER FUNCTIONS FOR NEW ENDPOINTS
+// ============================================================================
+
+function buildLocateElementPrompt(locator: any, screenDimensions?: any): string {
+  const { strategy, description, nodeQuery } = locator;
+  
+  let prompt = `Analyze this screenshot and locate the following UI element:\n\n`;
+  
+  if (description) {
+    prompt += `**Element Description:** ${description}\n`;
+  }
+  
+  if (nodeQuery) {
+    if (nodeQuery.textContains) {
+      prompt += `**Text Content:** Contains "${nodeQuery.textContains}"\n`;
+    }
+    if (nodeQuery.role) {
+      prompt += `**UI Role:** ${nodeQuery.role}\n`;
+    }
+    if (nodeQuery.app) {
+      prompt += `**Application:** ${nodeQuery.app}\n`;
+    }
+  }
+  
+  if (screenDimensions) {
+    prompt += `\n**Screen Dimensions:** ${screenDimensions.width}x${screenDimensions.height}\n`;
+  }
+  
+  prompt += `\n**Task:** Return a JSON object with the element's bounding box coordinates:\n`;
+  prompt += `{\n`;
+  prompt += `  "found": true,\n`;
+  prompt += `  "boundary": { "x": <left>, "y": <top>, "width": <width>, "height": <height> },\n`;
+  prompt += `  "confidence": <0.0-1.0>,\n`;
+  prompt += `  "explanation": "Brief explanation of what you found"\n`;
+  prompt += `}\n\n`;
+  prompt += `If the element is not found, return: { "found": false, "explanation": "reason" }\n`;
+  prompt += `Return ONLY the JSON object, no other text.`;
+  
+  return prompt;
+}
+
+function parseLocateElementResponse(response: string, screenDimensions?: any): any {
+  try {
+    const cleaned = response.replace(/```(?:json)?\n?/g, '').trim();
+    const result = JSON.parse(cleaned);
+    
+    if (!result.found) {
+      return {
+        success: false,
+        error: result.explanation || 'Element not found',
+      };
+    }
+    
+    return {
+      boundary: result.boundary,
+      coordinateSpace: 'screen',
+      confidence: result.confidence || 0.8,
+      explanation: result.explanation,
+    };
+  } catch (error) {
+    throw new Error(`Failed to parse locate element response: ${error}`);
+  }
+}
+
+function buildVerifyStepPrompt(verification: any, hasComparison: boolean): string {
+  const { strategy, expectedElement, expectedApp, nodeQuery } = verification;
+  
+  let prompt = `Analyze the screenshot${hasComparison ? 's' : ''} and verify if the following condition is met:\n\n`;
+  
+  if (strategy === 'element_visible') {
+    prompt += `**Verification:** Check if "${expectedElement}" is visible\n`;
+  } else if (strategy === 'app_running') {
+    prompt += `**Verification:** Check if "${expectedApp}" application is running/active\n`;
+  } else if (strategy === 'screenshot_comparison') {
+    prompt += `**Verification:** Compare BEFORE and AFTER screenshots to detect changes\n`;
+  } else if (strategy === 'screen_intel_node_present') {
+    prompt += `**Verification:** Check if UI element matching the following is present:\n`;
+    if (nodeQuery?.textContains) {
+      prompt += `  - Text contains: "${nodeQuery.textContains}"\n`;
+    }
+    if (nodeQuery?.role) {
+      prompt += `  - UI role: ${nodeQuery.role}\n`;
+    }
+  }
+  
+  prompt += `\n**Task:** Return a JSON object with verification result:\n`;
+  prompt += `{\n`;
+  prompt += `  "verified": true/false,\n`;
+  prompt += `  "confidence": <0.0-1.0>,\n`;
+  prompt += `  "explanation": "What you observed",\n`;
+  prompt += `  "suggestion": "Optional: what user should do next if not verified"\n`;
+  prompt += `}\n\n`;
+  prompt += `Return ONLY the JSON object, no other text.`;
+  
+  return prompt;
+}
+
+function parseVerifyStepResponse(response: string): any {
+  try {
+    const cleaned = response.replace(/```(?:json)?\n?/g, '').trim();
+    const result = JSON.parse(cleaned);
+    
+    return {
+      verified: result.verified === true,
+      confidence: result.confidence || 0.8,
+      explanation: result.explanation || '',
+      suggestion: result.suggestion,
+    };
+  } catch (error) {
+    throw new Error(`Failed to parse verify step response: ${error}`);
   }
 }
 

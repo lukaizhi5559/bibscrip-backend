@@ -57,19 +57,45 @@ export interface OrchestrationResult {
   llm_response?: EnhancedLLMResponse;
 }
 
-export interface IntentResult {
-  intent: string;
-  summary: string;
-  intent_type: 'automation' | 'information' | 'analysis' | 'creation';
-  required_agents: Array<{
-    type: string;
-    reason: string;
-  }>;
-  complexity: 'simple' | 'moderate' | 'complex';
-  execution_approach: 'single_agent' | 'multi_agent_sequence' | 'multi_agent_parallel';
+// Phi4-compatible intent types (9 intents)
+export type IntentType = 
+  | 'memory_store'
+  | 'memory_retrieve'
+  | 'web_search'
+  | 'general_knowledge'
+  | 'command_execute'
+  | 'command_automate'
+  | 'screen_intelligence'
+  | 'question'
+  | 'greeting';
+
+// Entity extracted by LLM
+export interface IntentEntity {
+  type: string;
+  value: string;
+  entity_type: string;
   confidence: number;
-  clarification_questions: string[];
-  llm_response?: EnhancedLLMResponse;
+  start?: number;
+  end?: number;
+}
+
+// Phi4-compatible intent result format
+export interface IntentResult {
+  intent: IntentType;
+  confidence: number;
+  entities: IntentEntity[];
+  suggestedResponse: string;
+  parser: 'llm';
+  metadata: {
+    processingTimeMs: number;
+    modelVersion: string;
+    scores: Record<IntentType, number>;
+    conversationContext?: {
+      sessionId?: string;
+      userId?: string;
+      historyLength?: number;
+    };
+  };
 }
 
 export interface AgentGenerationResult {
@@ -183,48 +209,85 @@ export class OrchestrationService {
   }
 
   /**
-   * Parse user intent using LLM intelligence
+   * Parse user intent using LLM intelligence (Phi4-compatible format)
    */
-  async parseIntent(userQuery: string): Promise<IntentResult> {
+  async parseIntent(userQuery: string, context?: any): Promise<IntentResult> {
+    const startTime = Date.now();
+    
     try {
-      logger.info('Parsing user intent', { userQuery });
+      logger.info('Parsing user intent (Phi4-compatible)', { 
+        userQuery: userQuery.substring(0, 100),
+        hasContext: !!context,
+        sessionId: context?.sessionId,
+        userId: context?.userId,
+        historyLength: context?.conversationHistory?.length || 0
+      });
 
-      // Use LLM to analyze user intent
-      const llmResponse = await llmOrchestratorService.processIntent(userQuery);
+      // Build enhanced prompt with conversation history
+      const enhancedQuery = this.buildIntentPromptWithContext(userQuery, context);
       
-      // Parse the LLM response
-      const intentData = this.parseIntentResponse(llmResponse.text);
+      // Use LLM to analyze user intent with all 9 intent types
+      const llmResponse = await llmOrchestratorService.processIntent(enhancedQuery);
+      
+      // Parse the LLM response to extract intent, confidence, entities, and scores
+      const intentData = this.parseIntentResponsePhi4(llmResponse.text);
+      
+      const processingTimeMs = Date.now() - startTime;
       
       if (!intentData) {
+        // Fallback response
         return {
-          intent: userQuery,
-          summary: 'Failed to parse user intent',
-          intent_type: 'information',
-          required_agents: [],
-          complexity: 'simple',
-          execution_approach: 'single_agent',
-          confidence: 0,
-          clarification_questions: ['Could you please rephrase your request more clearly?'],
-          llm_response: llmResponse
+          intent: 'question',
+          confidence: 0.3,
+          entities: [],
+          suggestedResponse: 'Let me answer that for you...',
+          parser: 'llm',
+          metadata: {
+            processingTimeMs,
+            modelVersion: llmResponse.provider || 'unknown',
+            scores: {
+              memory_store: 0.1,
+              memory_retrieve: 0.1,
+              web_search: 0.1,
+              general_knowledge: 0.2,
+              command_execute: 0.1,
+              command_automate: 0.1,
+              screen_intelligence: 0.1,
+              question: 0.3,
+              greeting: 0.1
+            },
+            conversationContext: {
+              sessionId: context?.sessionId,
+              userId: context?.userId,
+              historyLength: context?.conversationHistory?.length || 0
+            }
+          }
         };
       }
 
       const result: IntentResult = {
-        intent: userQuery,
-        summary: intentData.summary,
-        intent_type: intentData.intent_type || 'automation',
-        required_agents: intentData.required_agents || [],
-        complexity: intentData.complexity || 'moderate',
-        execution_approach: intentData.execution_approach || 'single_agent',
-        confidence: intentData.confidence || 0.8,
-        clarification_questions: this.generateIntentClarifications(intentData),
-        llm_response: llmResponse
+        intent: intentData.intent,
+        confidence: intentData.confidence,
+        entities: intentData.entities || [],
+        suggestedResponse: intentData.suggestedResponse || this.getSuggestedResponse(intentData.intent),
+        parser: 'llm',
+        metadata: {
+          processingTimeMs,
+          modelVersion: llmResponse.provider || 'unknown',
+          scores: intentData.scores,
+          conversationContext: {
+            sessionId: context?.sessionId,
+            userId: context?.userId,
+            historyLength: context?.conversationHistory?.length || 0
+          }
+        }
       };
 
-      logger.info('Intent parsing completed', {
-        intentType: result.intent_type,
-        complexity: result.complexity,
-        confidence: result.confidence,
+      logger.info('Intent parsing completed (Phi4-compatible)', {
+        intent: result.intent,
+        confidence: result.confidence.toFixed(2),
+        entitiesCount: result.entities.length,
+        processingTimeMs,
         provider: llmResponse.provider
       });
 
@@ -236,15 +299,34 @@ export class OrchestrationService {
         error: error instanceof Error ? error.message : String(error)
       });
 
+      const processingTimeMs = Date.now() - startTime;
+      
       return {
-        intent: userQuery,
-        summary: 'Intent parsing failed',
-        intent_type: 'information',
-        required_agents: [],
-        complexity: 'simple',
-        execution_approach: 'single_agent',
-        confidence: 0,
-        clarification_questions: ['There was an error processing your request. Please try again.']
+        intent: 'question',
+        confidence: 0.2,
+        entities: [],
+        suggestedResponse: 'I encountered an error processing your request...',
+        parser: 'llm',
+        metadata: {
+          processingTimeMs,
+          modelVersion: 'error',
+          scores: {
+            memory_store: 0.1,
+            memory_retrieve: 0.1,
+            web_search: 0.1,
+            general_knowledge: 0.1,
+            command_execute: 0.1,
+            command_automate: 0.1,
+            screen_intelligence: 0.1,
+            question: 0.2,
+            greeting: 0.1
+          },
+          conversationContext: {
+            sessionId: context?.sessionId,
+            userId: context?.userId,
+            historyLength: context?.conversationHistory?.length || 0
+          }
+        }
       };
     }
   }
@@ -1823,6 +1905,126 @@ export default {
     const union = new Set([...set1, ...set2]);
     
     return intersection.size / union.size;
+  }
+
+  /**
+   * Build intent prompt with conversation context (Phi4-compatible)
+   */
+  private buildIntentPromptWithContext(userQuery: string, context?: any): string {
+    let prompt = `Analyze the following user message and classify it into one of these 9 intent types:
+
+1. **memory_store**: User wants to remember/save information for later
+2. **memory_retrieve**: User wants to recall previously stored information
+3. **web_search**: User needs current/real-time information from the web
+4. **general_knowledge**: User asks factual questions that don't need web search
+5. **command_execute**: User wants to execute a single system command
+6. **command_automate**: User wants to automate a workflow or create a script
+7. **screen_intelligence**: User asks about what's on their screen
+8. **question**: General question that needs an answer
+9. **greeting**: User is greeting or saying goodbye
+
+User Message: "${userQuery}"`;
+
+    // Add conversation history if available
+    if (context?.conversationHistory && context.conversationHistory.length > 0) {
+      prompt += `\n\nConversation History (most recent last):`;
+      context.conversationHistory.slice(-3).forEach((msg: any) => {
+        prompt += `\n- ${msg.role}: ${msg.content}`;
+      });
+    }
+
+    prompt += `\n\nYou must respond with a JSON object containing:
+{
+  "intent": "<one of the 9 intent types>",
+  "confidence": <number between 0 and 1>,
+  "scores": {
+    "memory_store": <score 0-1>,
+    "memory_retrieve": <score 0-1>,
+    "web_search": <score 0-1>,
+    "general_knowledge": <score 0-1>,
+    "command_execute": <score 0-1>,
+    "command_automate": <score 0-1>,
+    "screen_intelligence": <score 0-1>,
+    "question": <score 0-1>,
+    "greeting": <score 0-1>
+  },
+  "entities": [
+    {
+      "type": "entity type (e.g., date, location, person)",
+      "value": "extracted value",
+      "entity_type": "NER type (e.g., DATE, LOCATION, PERSON)",
+      "confidence": <0-1>
+    }
+  ],
+  "suggestedResponse": "A brief suggested response"
+}
+
+Provide ALL 9 scores (one for each intent type), and select the highest scoring intent as the final classification.`;
+
+    return prompt;
+  }
+
+  /**
+   * Parse LLM response for Phi4-compatible intent format
+   */
+  private parseIntentResponsePhi4(llmText: string): any {
+    try {
+      // Try to extract JSON from the response
+      const jsonMatch = llmText.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        logger.warn('No JSON found in LLM intent response');
+        return null;
+      }
+
+      const parsed = JSON.parse(jsonMatch[0]);
+      
+      // Validate required fields
+      if (!parsed.intent || !parsed.scores) {
+        logger.warn('Missing required fields in intent response', { parsed });
+        return null;
+      }
+
+      // Ensure all 9 intent scores are present
+      const requiredIntents: IntentType[] = [
+        'memory_store', 'memory_retrieve', 'web_search', 'general_knowledge',
+        'command_execute', 'command_automate', 'screen_intelligence', 'question', 'greeting'
+      ];
+
+      const scores: Record<IntentType, number> = {} as Record<IntentType, number>;
+      requiredIntents.forEach(intent => {
+        scores[intent] = parsed.scores[intent] || 0.1;
+      });
+
+      return {
+        intent: parsed.intent as IntentType,
+        confidence: parsed.confidence || 0.5,
+        scores,
+        entities: parsed.entities || [],
+        suggestedResponse: parsed.suggestedResponse || ''
+      };
+    } catch (error) {
+      logger.error('Failed to parse intent response', { error, llmText: llmText.substring(0, 200) });
+      return null;
+    }
+  }
+
+  /**
+   * Get suggested response based on intent type
+   */
+  private getSuggestedResponse(intent: IntentType): string {
+    const responses: Record<IntentType, string> = {
+      memory_store: "I'll remember that for you...",
+      memory_retrieve: "Let me check what I remember...",
+      web_search: "Searching the web...",
+      general_knowledge: "Let me answer that for you...",
+      command_execute: "Executing command...",
+      command_automate: "Creating automation...",
+      screen_intelligence: "Analyzing your screen...",
+      question: "Let me answer that for you...",
+      greeting: "Hello! How can I help you?"
+    };
+
+    return responses[intent] || "Processing your request...";
   }
 
   /**

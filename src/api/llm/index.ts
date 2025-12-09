@@ -385,22 +385,31 @@ router.post('/ask', [
  */
 router.post('/intent', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
-    const { request } = req.body;
+    // Support both old format (request) and new Phi4 format (message + context)
+    const { request, message, context } = req.body;
     
-    if (!request || typeof request !== 'string') {
+    const userMessage = message || request;
+    
+    if (!userMessage || typeof userMessage !== 'string') {
       res.status(400).json({
-        error: 'Request field is required and must be a string'
+        error: 'Message or request field is required and must be a string'
       });
       return;
     }
 
-    logger.info('Parsing intent through unified LLM core', { 
-      request: request.substring(0, 100) 
+    logger.info('Parsing intent through unified LLM core (Phi4-compatible)', { 
+      message: userMessage.substring(0, 100),
+      hasContext: !!context,
+      sessionId: context?.sessionId,
+      userId: context?.userId
     });
 
-    const intentResult = await orchestrationService.parseIntent(request);
+    const intentResult = await orchestrationService.parseIntent(userMessage, context);
     
-    res.json(intentResult);
+    // Return Phi4-compatible response format
+    res.json({
+      data: intentResult
+    });
 
   } catch (error) {
     logger.error('Error parsing intent', {

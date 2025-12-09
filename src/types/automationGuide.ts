@@ -1,164 +1,287 @@
 /**
- * Type definitions for the Guide API
- * Used for interactive tutorial/guide automation with step-by-step explanations
+ * Type definitions for Interactive Guide API (command_guide intent)
+ * Used for step-by-step visual guidance with overlay rendering
  */
 
-/**
- * Verification type for guide steps
- */
-export type VerificationType = 
-  | 'element_visible'
-  | 'window_title'
-  | 'app_running'
-  | 'none';
+// ============================================================================
+// COORDINATE SYSTEMS & OVERLAYS
+// ============================================================================
 
 /**
- * Common failure types that can occur during guide execution
+ * Coordinate space for overlay positioning
  */
-export type FailureType =
-  | 'execution_error'
-  | 'timeout'
-  | 'verification_failed'
-  | 'app_not_found'
-  | 'permission_denied'
-  | 'network_error';
+export type OverlayCoordinateSpace = 'screen' | 'normalized' | 'node';
 
 /**
- * A single step in the automation guide
+ * Visual overlay types for guiding users
  */
-export interface GuideStep {
+export type GuidanceOverlayType = 'highlight' | 'arrow' | 'textBox' | 'label' | 'callout';
+
+/**
+ * Node query for dynamic element location (used with coordinateSpace: "node")
+ */
+export interface NodeQuery {
+  /** Text content to match */
+  textContains?: string;
+  
+  /** Application name */
+  app?: string;
+  
+  /** UI role hint */
+  role?: 'button' | 'input' | 'tab' | 'image' | 'link' | 'checkbox' | 'menu';
+  
+  /** Additional context for matching */
+  context?: string;
+}
+
+/**
+ * Visual overlay for guiding user attention
+ */
+export interface GuidanceOverlay {
+  /** Unique overlay identifier */
+  id: string;
+  
+  /** Type of visual overlay */
+  type: GuidanceOverlayType;
+  
+  /** Boundary coordinates */
+  boundary: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  
+  /** Coordinate system for boundary */
+  coordinateSpace: OverlayCoordinateSpace;
+  
+  /** Node query for dynamic location (when coordinateSpace is "node") */
+  nodeQuery?: NodeQuery;
+  
+  /** Arrow direction (for arrow type) */
+  arrowDirection?: 'up' | 'down' | 'left' | 'right';
+  
+  /** Position relative to boundary (for callout/textBox) */
+  position?: 'top' | 'bottom' | 'left' | 'right';
+  
+  /** Message to display */
+  message?: string;
+  
+  /** Label text (for label type) */
+  label?: string;
+  
+  /** Opacity (0-1) */
+  opacity?: number;
+  
+  /** Pulse animation */
+  pulse?: boolean;
+  
+  /** Z-index for layering */
+  zIndex?: number;
+}
+
+// ============================================================================
+// GHOST POINTER ACTIONS
+// ============================================================================
+
+/**
+ * Ghost pointer action types
+ */
+export type GhostPointerAction =
+  | {
+      type: 'moveToBoundary';
+      boundaryId: string;
+      easing?: 'linear' | 'easeOut' | 'spring';
+      durationMs?: number;
+    }
+  | {
+      type: 'clickOnBoundary';
+      boundaryId: string;
+      clickType?: 'single' | 'double' | 'right';
+      withRipple?: boolean;
+    }
+  | {
+      type: 'moveToPoint';
+      x: number;
+      y: number;
+      coordinateSpace: OverlayCoordinateSpace;
+      durationMs?: number;
+    };
+
+// ============================================================================
+// VISION VERIFICATION
+// ============================================================================
+
+/**
+ * Completion detection mode for guide steps
+ */
+export type CompletionMode = 'vision' | 'manual' | 'either';
+
+/**
+ * Vision verification strategy
+ */
+export interface VisionVerificationStrategy {
+  /** Strategy type */
+  strategy: 'screen_intel_node_present' | 'screenshot_comparison' | 'element_visible' | 'app_running';
+  
+  /** Node query for verification */
+  nodeQuery?: NodeQuery;
+  
+  /** Expected element description */
+  expectedElement?: string;
+  
+  /** Expected app name */
+  expectedApp?: string;
+  
+  /** Timeout in milliseconds */
+  timeoutMs?: number;
+  
+  /** Polling interval in milliseconds */
+  pollIntervalMs?: number;
+}
+
+// ============================================================================
+// INTERACTIVE GUIDE STEPS
+// ============================================================================
+
+/**
+ * A single step in an interactive guide
+ */
+export interface InteractiveGuideStep {
   /** Unique step identifier */
-  id: number;
+  id: string;
   
   /** Human-readable step title */
   title: string;
   
-  /** Detailed explanation of what this step does and why */
-  explanation: string;
+  /** Detailed explanation of what to do and why */
+  description: string;
   
-  /** Executable Nut.js code for this step */
-  code: string;
+  /** Visual overlays to render */
+  overlays: GuidanceOverlay[];
   
-  /** Console.log marker for frontend parsing (e.g., "[GUIDE STEP 1]") */
-  marker: string;
+  /** Ghost pointer actions (optional) */
+  pointerActions?: GhostPointerAction[];
   
-  /** Whether this step can fail (e.g., app not installed) */
-  canFail: boolean;
+  /** How to detect step completion */
+  completionMode: CompletionMode;
   
-  /** Expected duration in milliseconds (for timeout detection) */
+  /** Vision verification strategy (if completionMode includes "vision") */
+  visionCheck?: VisionVerificationStrategy;
+  
+  /** Fallback instruction if vision can't locate elements */
+  fallbackInstruction?: string;
+  
+  /** Expected duration in milliseconds */
   expectedDuration?: number;
-  
-  /** Verification to perform after step execution */
-  verification?: {
-    type: VerificationType;
-    expectedElement?: string;
-    expectedWindowTitle?: string;
-    expectedAppName?: string;
-  };
-  
-  /** Common failure type for this step (if canFail is true) */
-  commonFailure?: FailureType;
   
   /** Wait time after step completion (milliseconds) */
   waitAfter?: number;
 }
 
-/**
- * Recovery instructions for a specific failure type
- */
-export interface RecoveryStep {
-  /** Type of failure this recovery addresses */
-  failureType: FailureType;
-  
-  /** Human-readable title for the recovery */
-  title: string;
-  
-  /** Detailed explanation of the recovery process */
-  explanation: string;
-  
-  /** Manual instructions for the user to follow */
-  manualInstructions: string;
-  
-  /** Optional automation code for recovery (if possible) */
-  code?: string;
-  
-  /** Links to helpful resources */
-  helpLinks?: Array<{
-    title: string;
-    url: string;
-  }>;
-}
+// ============================================================================
+// INTERACTIVE GUIDE
+// ============================================================================
 
 /**
- * Complete automation guide structure
+ * Complete interactive automation guide
  */
-export interface AutomationGuide {
+export interface InteractiveGuide {
   /** Unique guide identifier */
   id: string;
   
   /** Original user command */
   command: string;
   
-  /** Introductory summary explaining what the guide will do */
+  /** Intent type (always "command_guide") */
+  intent: 'command_guide';
+  
+  /** Introductory summary */
   intro: string;
   
-  /** Array of guide steps */
-  steps: GuideStep[];
-  
-  /** Full executable code with all markers */
-  code: string;
+  /** Array of interactive guide steps */
+  steps: InteractiveGuideStep[];
   
   /** Total number of steps */
   totalSteps: number;
   
-  /** Pre-generated recovery steps for common failures */
-  commonRecoveries: RecoveryStep[];
-  
   /** Metadata about guide generation */
   metadata: {
-    provider: 'grok' | 'claude';
+    provider: 'gemini' | 'grok' | 'claude' | 'openai';
     generationTime: number;
     targetApp?: string;
     targetOS: 'darwin' | 'win32';
-    estimatedDuration?: number; // Total estimated time in ms
+    estimatedDuration?: number;
   };
 }
 
+// ============================================================================
+// REQUEST / RESPONSE
+// ============================================================================
+
 /**
- * Request body for guide generation
+ * Feedback for guide replanning
  */
-export interface GuideRequest {
-  /** User command requesting guidance */
+export interface GuideFeedback {
+  /** Reason for replanning */
+  reason: 'missing_prerequisite' | 'step_failed' | 'user_clarification' | 'scope_change';
+  
+  /** User's feedback message */
+  message: string;
+  
+  /** Step ID where issue occurred (optional) */
+  stepId?: string;
+}
+
+/**
+ * Request body for interactive guide generation
+ */
+export interface InteractiveGuideRequest {
+  /** User command requesting guidance (e.g., "Show me how to buy winter clothes on Amazon") */
   command: string;
   
-  /** Optional context (e.g., for failure recovery) */
+  /** Context for guide generation */
   context?: {
-    /** Step that failed (if recovering from failure) */
-    failedStep?: number;
+    /** Base64 screenshot for vision analysis */
+    screenshot?: {
+      base64: string;
+      mimeType?: string;
+    };
     
-    /** Type of failure that occurred */
-    failureType?: FailureType;
+    /** Currently active application */
+    activeApp?: string;
     
-    /** Error message from failure */
-    error?: string;
+    /** Current URL (if browser) */
+    activeUrl?: string;
     
-    /** User's OS */
+    /** Operating system */
     os?: 'darwin' | 'win32';
     
-    /** User ID for personalization */
-    userId?: string;
+    /** Screen dimensions */
+    screenDimensions?: {
+      width: number;
+      height: number;
+    };
   };
+  
+  /** Previous guide for replanning (optional) */
+  previousGuide?: InteractiveGuide;
+  
+  /** User feedback for replanning (optional) */
+  feedback?: GuideFeedback;
 }
 
 /**
- * Response from guide generation API
+ * Response from interactive guide generation API
  */
-export interface GuideResponse {
-  /** Generated automation guide */
-  guide: AutomationGuide;
+export interface InteractiveGuideResponse {
+  success: boolean;
+  
+  /** Generated interactive guide */
+  guide: InteractiveGuide;
   
   /** LLM provider used */
-  provider: 'grok' | 'claude';
+  provider: 'gemini' | 'grok' | 'claude' | 'openai';
   
   /** Generation latency in milliseconds */
   latencyMs: number;
@@ -167,30 +290,115 @@ export interface GuideResponse {
   error?: string;
 }
 
+// ============================================================================
+// VISION API TYPES
+// ============================================================================
+
 /**
- * Failure report from frontend
+ * Request to locate an element using vision
  */
-export interface GuideFailureReport {
-  /** Guide ID */
-  guideId: string;
+export interface LocateElementRequest {
+  /** Base64 screenshot */
+  screenshot: {
+    base64: string;
+    mimeType?: string;
+  };
   
-  /** Step that failed */
-  stepId: number;
+  /** Element description or query */
+  locator: {
+    strategy: 'vision' | 'textMatch' | 'nodeQuery';
+    description?: string;
+    nodeQuery?: NodeQuery;
+  };
   
-  /** Type of failure */
-  failureType: FailureType;
+  /** Screen dimensions for coordinate normalization */
+  screenDimensions?: {
+    width: number;
+    height: number;
+  };
+}
+
+/**
+ * Response from element location
+ */
+export interface LocateElementResponse {
+  success: boolean;
+  
+  /** Found element boundary */
+  boundary?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  
+  /** Coordinate space of returned boundary */
+  coordinateSpace: OverlayCoordinateSpace;
+  
+  /** Confidence score (0-1) */
+  confidence?: number;
+  
+  /** Error message if not found */
+  error?: string;
+}
+
+/**
+ * Request to verify a step completion
+ */
+export interface VerifyStepRequest {
+  /** Step ID being verified */
+  stepId: string;
+  
+  /** Current screenshot */
+  screenshot: {
+    base64: string;
+    mimeType?: string;
+  };
+  
+  /** Previous screenshot (for comparison) */
+  previousScreenshot?: {
+    base64: string;
+    mimeType?: string;
+  };
+  
+  /** Verification strategy */
+  verification: VisionVerificationStrategy;
+}
+
+/**
+ * Response from step verification
+ */
+export interface VerifyStepResponse {
+  success: boolean;
+  
+  /** Whether step is verified as complete */
+  verified: boolean;
+  
+  /** Confidence score (0-1) */
+  confidence?: number;
+  
+  /** Explanation of verification result */
+  explanation?: string;
+  
+  /** Suggested next action if not verified */
+  suggestion?: string;
   
   /** Error message */
-  error: string;
-  
-  /** Timestamp of failure */
-  timestamp: string;
-  
-  /** Additional context */
+  error?: string;
+}
+
+// ============================================================================
+// LEGACY TYPES (deprecated, kept for reference)
+// ============================================================================
+
+/** @deprecated Use InteractiveGuideRequest instead */
+export interface GuideRequest {
+  command: string;
   context?: {
-    exitCode?: number;
-    stderr?: string;
-    stdout?: string;
-    duration?: number;
+    failedStep?: number;
+    failureType?: string;
+    error?: string;
+    os?: 'darwin' | 'win32';
+    userId?: string;
   };
 }

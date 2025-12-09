@@ -113,11 +113,21 @@ export class StreamingHandler {
         ...metadata
       };
 
+      // Extract clean user message from prompt (remove JSON metadata if present)
+      const cleanMessage = this.extractCleanMessage(request.prompt);
+      
+      logger.info(`🧹 Cleaned message for ${requestId}:`, {
+        originalLength: request.prompt.length,
+        cleanedLength: cleanMessage.length,
+        originalPreview: request.prompt.substring(0, 100),
+        cleanedPreview: cleanMessage.substring(0, 100)
+      });
+      
       // Add current user message to conversation history BEFORE building prompt
       this.conversationContext.conversationHistory.push({
         id: requestId,
         role: 'user',
-        content: request.prompt,
+        content: cleanMessage,
         timestamp: Date.now(),
         source: 'text'
       });
@@ -134,7 +144,7 @@ export class StreamingHandler {
         hasSystemInstructions: !!request.context?.systemInstructions
       });
       
-      const enhancedPrompt = await this.buildThinkdropAIPrompt(request.prompt, request.context);
+      const enhancedPrompt = await this.buildThinkdropAIPrompt(cleanMessage, request.context);
       
       logger.info(`📝 Enhanced prompt built for ${requestId}:`, {
         originalLength: request.prompt.length,
@@ -575,12 +585,15 @@ export class StreamingHandler {
     // Minimal response guidance - frontend systemInstructions already provide detailed guidance
     const responseGuidance = '';
 
-    // Use the centralized prompt builder with web search support, but integrate our context
+    // Determine if web search is needed based on query type
+    const needsWebSearch = this.shouldEnableWebSearch(message);
+    
+    // Use the centralized prompt builder with conditional web search
     const basePrompt = await buildPrompt('ask', {
       userQuery: message,
       context: {
         responseLength: 'medium',
-        enableWebSearch: true, // Enable web search for current information
+        enableWebSearch: needsWebSearch,
       }
     });
     
@@ -618,6 +631,60 @@ User Message: "${message}"${historyContext}${factsContext}${entitiesContext}${me
     return this.conversationContext;
   }
 
+  /**
+   * Extract clean user message from prompt (remove JSON metadata)
+   */
+  private extractCleanMessage(prompt: string): string {
+    // Check if prompt contains JSON metadata (common pattern from frontend)
+    const jsonPattern = /\n\n\{["']sessionId["']:/;
+    
+    if (jsonPattern.test(prompt)) {
+      // Extract only the message before the JSON
+      const parts = prompt.split(/\n\n\{/);
+      return parts[0].trim();
+    }
+    
+    return prompt.trim();
+  }
+  
+  /**
+   * Determine if web search should be enabled for this query
+   */
+  private shouldEnableWebSearch(message: string): boolean {
+    const lower = message.toLowerCase();
+    
+    // Disable web search for code/technical questions
+    const codePatterns = [
+      /\b(function|method|class|variable|code|syntax|error|bug|debug)\b/i,
+      /\b(write|refactor|optimize|improve).*\b(code|function|method|class)\b/i,
+      /\bhow (to|do i|can i).*(code|program|implement|write|create)\b/i,
+      /\b(javascript|typescript|python|java|react|node|api)\b/i,
+      /\bscreen\b.*\b(corner|bottom|top|left|right|content|element)\b/i,
+      /\bwhat('?s| is) (at|on|in) (the|my) (screen|display|monitor)\b/i
+    ];
+    
+    // If it matches code patterns, disable web search
+    if (codePatterns.some(pattern => pattern.test(message))) {
+      logger.info(`🚫 Web search disabled for code/technical query: ${message.substring(0, 50)}...`);
+      return false;
+    }
+    
+    // Enable web search for current events, news, etc.
+    const webSearchPatterns = [
+      /\b(latest|recent|current|today|news|update|happening)\b/i,
+      /\b(weather|stock|price|score)\b/i,
+      /\bwhat (day|time|date) is (it|today)\b/i
+    ];
+    
+    const shouldEnable = webSearchPatterns.some(pattern => pattern.test(message));
+    
+    if (shouldEnable) {
+      logger.info(`✅ Web search enabled for current events query: ${message.substring(0, 50)}...`);
+    }
+    
+    return shouldEnable;
+  }
+  
   /**
    * Validate if a string is a valid UUID
    */

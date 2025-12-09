@@ -1,11 +1,12 @@
 /**
  * Nut.js Code Generator Service
  * Specialized LLM service for generating ONLY Nut.js desktop automation code
- * Priority: Claude (fastest vision) → OpenAI GPT-4V → Grok (fallback)
+ * Priority: Gemini 3 Pro Preview (latest) → OpenAI GPT-4V → Claude → Grok (fallback)
  */
 
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import { logger } from '../utils/logger';
 import { 
   AutomationPlan, 
@@ -13,12 +14,17 @@ import {
   AutomationPlanRequest,
   AutomationPlanResponse
 } from '../types/automationPlan';
-import { AutomationGuide, GuideRequest } from '../types/automationGuide';
+import { 
+  InteractiveGuide, 
+  InteractiveGuideRequest,
+  InteractiveGuideResponse,
+  GuideRequest // legacy, deprecated
+} from '../types/automationGuide';
 import { randomUUID } from 'crypto';
 
 export interface NutjsCodeResponse {
   code: string;
-  provider: 'claude' | 'openai' | 'grok';
+  provider: 'gemini' | 'claude' | 'openai' | 'grok';
   latencyMs: number;
   error?: string;
   usedVision?: boolean; // Indicates if screenshot was processed
@@ -31,14 +37,16 @@ export interface ScreenshotData {
 
 // AutomationPlanResponse is now imported from '../types/automationPlan'
 
+/** @deprecated Use InteractiveGuideResponse instead */
 export interface AutomationGuideResponse {
-  guide: AutomationGuide;
-  provider: 'claude' | 'openai' | 'grok';
+  guide: InteractiveGuide;
+  provider: 'gemini' | 'claude' | 'openai' | 'grok';
   latencyMs: number;
   error?: string;
 }
 
 export class NutjsCodeGenerator {
+  private geminiClient: GoogleGenerativeAI | null = null;
   private claudeClient: Anthropic | null = null;
   private openaiClient: OpenAI | null = null;
   private grokClient: OpenAI | null = null;
@@ -47,14 +55,12 @@ export class NutjsCodeGenerator {
   constructor() {
     this.useGrok4 = process.env.USE_GROK_4 === 'true';
     
-    // Priority 1: Claude (fastest vision, 3-8s)
-    if (process.env.ANTHROPIC_API_KEY) {
-      this.claudeClient = new Anthropic({
-        apiKey: process.env.ANTHROPIC_API_KEY,
-      });
-      logger.info('Claude client initialized (Priority 1 - fastest vision)');
+    // Priority 1: Gemini 3 Pro Preview (latest, best quality)
+    if (process.env.GEMINI_API_KEY) {
+      this.geminiClient = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+      logger.info('Gemini 3 Pro Preview client initialized (Priority 1 - latest model)');
     } else {
-      logger.warn('ANTHROPIC_API_KEY not found - Claude unavailable');
+      logger.warn('GEMINI_API_KEY not found - Gemini unavailable');
     }
 
     // Priority 2: OpenAI GPT-4 Vision (fast vision, 5-10s)
@@ -65,6 +71,16 @@ export class NutjsCodeGenerator {
       logger.info('OpenAI client initialized (Priority 2 - fast vision)');
     } else {
       logger.warn('OPENAI_API_KEY not found - OpenAI unavailable');
+    }
+
+    // Priority 3: Claude (fast vision, 3-8s)
+    if (process.env.ANTHROPIC_API_KEY) {
+      this.claudeClient = new Anthropic({
+        apiKey: process.env.ANTHROPIC_API_KEY,
+      });
+      logger.info('Claude client initialized (Priority 3 - fast vision)');
+    } else {
+      logger.warn('ANTHROPIC_API_KEY not found - Claude unavailable');
     }
 
     // Priority 3: Grok (slower vision 30s+, but good fallback)
@@ -2610,199 +2626,251 @@ Analyze now:`;
   }
 
   /**
-   * Build prompt for structured automation guide generation
+   * Build prompt for interactive guide generation with visual overlays
+   * Generates step-by-step guidance with boundary coordinates for UI overlays
    */
-  private buildStructuredGuidePrompt(request: GuideRequest): string {
+  private buildInteractiveGuidePrompt(request: InteractiveGuideRequest): string {
     const os = process.platform === 'darwin' ? 'darwin' : 'win32';
-    const isRecovery = !!request.context?.failedStep;
+    const hasScreenshot = !!request.context?.screenshot;
+    const isReplan = !!request.previousGuide || !!request.feedback;
     
-    return `You are an expert at creating interactive automation guides that teach users while automating tasks.
+    let replanSection = '';
+    if (isReplan) {
+      replanSection = `\n\n**REPLANNING MODE:**`;
+      if (request.feedback) {
+        replanSection += `\n- Reason: ${request.feedback.reason}`;
+        replanSection += `\n- User Feedback: "${request.feedback.message}"`;
+        if (request.feedback.stepId) {
+          replanSection += `\n- Issue at Step: ${request.feedback.stepId}`;
+        }
+      }
+      if (request.previousGuide) {
+        replanSection += `\n- Previous Guide Steps: ${request.previousGuide.steps.length}`;
+        replanSection += `\n\n**INSTRUCTIONS FOR REPLANNING:**`;
+        replanSection += `\n- Analyze the user's feedback and adapt the guide accordingly`;
+        replanSection += `\n- If missing prerequisites (e.g., "Don't have n8n installed"), add installation/setup steps FIRST`;
+        replanSection += `\n- If a step failed, provide alternative approaches or more detailed substeps`;
+        replanSection += `\n- Keep successful steps from the previous guide when applicable`;
+        replanSection += `\n- Address the specific issue raised in the feedback`;
+      }
+    }
+    
+    return `You are an expert at creating interactive visual guides that teach users step-by-step with overlay instructions.
 
 **USER COMMAND:** "${request.command}"
-${isRecovery ? `\n**RECOVERY MODE:** Step ${request.context?.failedStep} failed with error: ${request.context?.error}\n` : ''}
+${hasScreenshot ? '\n**SCREENSHOT PROVIDED:** Analyze the current screen state to provide contextual guidance\n' : ''}
+${request.context?.activeApp ? `**ACTIVE APP:** ${request.context.activeApp}\n` : ''}
+${request.context?.activeUrl ? `**ACTIVE URL:** ${request.context.activeUrl}\n` : ''}${replanSection}
 
-**YOUR TASK:** Generate an educational automation guide as a JSON object with step-by-step explanations.
+**YOUR TASK:** Generate ${isReplan ? 'a REVISED' : 'an'} interactive guide with visual overlays as a JSON object.
 
 **CRITICAL RULES:**
 1. Return ONLY valid JSON - no markdown, no explanations, no code fences
-2. Each step must have executable Nut.js code AND educational explanation
-3. Use CommonJS require() syntax: const { keyboard, Key } = require('@nut-tree-fork/nut-js');
-4. Import vision service: const { findAndClick } = require('../src/services/visionSpatialService');
-5. Include console.log() markers for frontend parsing: "[GUIDE SUMMARY]", "[GUIDE STEP 1]", etc.
+2. This is INTERACTIVE GUIDANCE - user performs actions manually, NOT automated execution
+3. Each step provides visual overlays (arrows, highlights, text boxes) to guide the user
+4. ${hasScreenshot ? '**ANALYZE THE SCREENSHOT**: Generate accurate boundary coordinates based on what you SEE in the image' : 'Use nodeQuery for dynamic element location'}
+5. Include verification strategies to detect when user completes each step
 6. Target OS: ${os} (darwin = macOS, win32 = Windows)
-7. Detect guide keywords: "how do i", "show me how", "guide me", "teach me", "what's the way to"
-8. Provide educational context - explain WHY each step is needed, not just WHAT it does
-9. Include common failure recoveries (app not installed, permission denied, etc.)
-10. Use vision AI (findAndClick) for ALL GUI interactions
-11. Use keyboard shortcuts ONLY for OS-level operations
+7. Provide clear, educational descriptions of what to do and why
+8. Include fallback instructions if vision can't locate elements
+9. Use completionMode: "either" (vision + manual "Next" button) for flexibility
+10. ${hasScreenshot ? '**COORDINATE GENERATION**: When screenshot is provided, use "screen" coordinateSpace with ACTUAL pixel coordinates from the image. Also include nodeQuery for validation.' : 'Use "node" coordinateSpace with nodeQuery for dynamic positioning'}
 
-**GUIDE STRUCTURE:**
+**INTERACTIVE GUIDE STRUCTURE:**
 {
-  "intro": "Educational introduction explaining what the guide will teach and why it's useful",
+  "intro": "Brief introduction explaining what this guide will teach",
   "steps": [
     {
-      "id": 1,
-      "title": "Short step title",
-      "explanation": "Detailed explanation of what this step does and why it's important",
-      "code": "const { keyboard, Key } = require('@nut-tree-fork/nut-js'); await keyboard.pressKey(Key.LeftSuper, Key.Space); await keyboard.releaseKey(Key.LeftSuper, Key.Space);",
-      "marker": "[GUIDE STEP 1]",
-      "canFail": true,
-      "expectedDuration": 2000,
-      "verification": {
-        "type": "element_visible",
-        "expectedElement": "Spotlight search"
-      },
-      "commonFailure": "app_not_found",
-      "waitAfter": 1000
-    }
-  ],
-  "commonRecoveries": [
-    {
-      "failureType": "app_not_found",
-      "title": "Install the application",
-      "explanation": "The application isn't installed on your system",
-      "manualInstructions": "Visit [app website] to download and install the application",
-      "helpLinks": [
+      "id": "step_1",
+      "title": "Open Spotlight Search",
+      "description": "Click on the magnifying glass icon in the top-right corner of your screen to open Spotlight Search. This is macOS's built-in search tool.",
+      "overlays": [
         {
-          "title": "Download Page",
-          "url": "https://example.com/download"
-        }
-      ]
-    }
-  ]
-}
-
-**MARKER FORMAT:**
-- Intro: console.log("[GUIDE SUMMARY] Your intro message here");
-- Steps: console.log("[GUIDE STEP 1] Your step explanation here");
-- Each step's code must include its marker at the beginning
-
-**FULL CODE GENERATION:**
-After defining the JSON structure, generate the complete executable code with all markers:
-- Start with: console.log("[GUIDE SUMMARY] ...");
-- For each step: console.log("[GUIDE STEP N] ..."); followed by the step's code
-- Include proper waits and error handling
-
-**COMMON FAILURE TYPES:**
-- "app_not_found": Application not installed
-- "permission_denied": Insufficient permissions
-- "timeout": Operation took too long
-- "verification_failed": Expected UI element not found
-- "execution_error": Code execution failed
-
-**EXAMPLE FOR "How do I setup SSH keys":**
-{
-  "intro": "SSH keys provide a secure way to authenticate with remote servers without using passwords. I'll guide you through generating and configuring SSH keys on your system.",
-  "steps": [
-    {
-      "id": 1,
-      "title": "Open Terminal",
-      "explanation": "To set up SSH keys, we first need to open the Terminal application. Terminal is a command-line interface where we'll run the commands to generate your SSH key pair. On macOS, Terminal is the built-in application for executing shell commands. You can find it manually by clicking on your Desktop/Finder → Go → Applications → Utilities → Terminal and double-clicking it, or simply press Cmd+Space and type 'Terminal' to open it via Spotlight.",
-      "code": "const { keyboard, Key } = require('@nut-tree-fork/nut-js'); const { findAndClick } = require('../src/services/visionSpatialService'); console.log('[GUIDE STEP 1] Opening Terminal application to begin SSH key setup...'); await keyboard.pressKey(Key.LeftSuper, Key.Space); await keyboard.releaseKey(Key.LeftSuper, Key.Space); await new Promise(resolve => setTimeout(resolve, 500)); await keyboard.type('Terminal'); await keyboard.pressKey(Key.Return); await keyboard.releaseKey(Key.Return); await new Promise(resolve => setTimeout(resolve, 2000));",
-      "marker": "[GUIDE STEP 1]",
-      "canFail": true,
-      "expectedDuration": 4000,
-      "verification": {
-        "type": "app_running",
-        "expectedAppName": "Terminal"
-      },
-      "commonFailure": "app_not_found",
-      "waitAfter": 1000
-    },
-    {
-      "id": 2,
-      "title": "Generate SSH Key",
-      "explanation": "Now we'll generate your SSH key pair using the ssh-keygen command. This creates two files: a private key (id_rsa) that stays on your computer, and a public key (id_rsa.pub) that you'll share with servers. We're using RSA encryption with 4096 bits for strong security. To do this manually, simply type 'ssh-keygen -t rsa -b 4096 -C \"your_email@example.com\"' in Terminal and press Enter. You'll be prompted to choose a location (press Enter for default) and set a passphrase (optional but recommended for extra security).",
-      "code": "console.log('[GUIDE STEP 2] Generating SSH key pair with RSA 4096-bit encryption...'); await keyboard.type('ssh-keygen -t rsa -b 4096 -C \"your_email@example.com\"'); await keyboard.pressKey(Key.Return); await keyboard.releaseKey(Key.Return); await new Promise(resolve => setTimeout(resolve, 2000));",
-      "marker": "[GUIDE STEP 2]",
-      "canFail": false,
-      "expectedDuration": 3000,
-      "verification": {
-        "type": "none"
-      },
-      "waitAfter": 2000
-    },
-    {
-      "id": 3,
-      "title": "Accept Default Location",
-      "explanation": "The system is asking where to save your SSH key. The default location (~/.ssh/id_rsa) is recommended because most tools look for keys there automatically. When you see the prompt 'Enter file in which to save the key', simply press Enter to accept the default. If you're doing this manually, you'll see this prompt in Terminal after running ssh-keygen.",
-      "code": "console.log('[GUIDE STEP 3] Accepting default SSH key location (~/.ssh/id_rsa)...'); await keyboard.pressKey(Key.Return); await keyboard.releaseKey(Key.Return); await new Promise(resolve => setTimeout(resolve, 1000));",
-      "marker": "[GUIDE STEP 3]",
-      "canFail": false,
-      "expectedDuration": 2000,
-      "verification": {
-        "type": "none"
-      },
-      "waitAfter": 1000
-    },
-    {
-      "id": 4,
-      "title": "Set Passphrase (Optional)",
-      "explanation": "You're now prompted to set a passphrase for your SSH key. A passphrase adds an extra layer of security - even if someone gets your private key file, they can't use it without the passphrase. You'll see two prompts: 'Enter passphrase' and 'Enter same passphrase again'. For this guide, we'll skip the passphrase by pressing Enter twice, but in production you should type a strong passphrase and press Enter, then type it again and press Enter.",
-      "code": "console.log('[GUIDE STEP 4] Skipping passphrase for demonstration (press Enter twice)...'); await keyboard.pressKey(Key.Return); await keyboard.releaseKey(Key.Return); await new Promise(resolve => setTimeout(resolve, 500)); await keyboard.pressKey(Key.Return); await keyboard.releaseKey(Key.Return); await new Promise(resolve => setTimeout(resolve, 1000));",
-      "marker": "[GUIDE STEP 4]",
-      "canFail": false,
-      "expectedDuration": 3000,
-      "verification": {
-        "type": "none"
-      },
-      "waitAfter": 1000
-    },
-    {
-      "id": 5,
-      "title": "View Public Key",
-      "explanation": "Your SSH key pair has been generated! Now we'll display your public key so you can copy it. The public key is what you'll add to GitHub, GitLab, or other services. To view it manually, type 'cat ~/.ssh/id_rsa.pub' in Terminal and press Enter. The 'cat' command displays file contents, and the tilde (~) represents your home directory. You'll see a long string starting with 'ssh-rsa' - that's your public key.",
-      "code": "console.log('[GUIDE STEP 5] Displaying your public SSH key...'); await keyboard.type('cat ~/.ssh/id_rsa.pub'); await keyboard.pressKey(Key.Return); await keyboard.releaseKey(Key.Return); await new Promise(resolve => setTimeout(resolve, 2000));",
-      "marker": "[GUIDE STEP 5]",
-      "canFail": false,
-      "expectedDuration": 3000,
-      "verification": {
-        "type": "none"
-      },
-      "waitAfter": 2000
-    }
-  ],
-  "commonRecoveries": [
-    {
-      "failureType": "app_not_found",
-      "title": "Install Figma",
-      "explanation": "Figma is not installed on your system. You'll need to download and install it first.",
-      "manualInstructions": "1. Visit figma.com/downloads\\n2. Download Figma for your operating system\\n3. Install the application\\n4. Create a free account or sign in\\n5. Try this guide again",
-      "helpLinks": [
-        {
-          "title": "Figma Downloads",
-          "url": "https://www.figma.com/downloads/"
+          "id": "highlight_spotlight",
+          "type": "highlight",
+          "boundary": { "x": 0, "y": 0, "width": 1, "height": 1 },
+          "coordinateSpace": "node",
+          "nodeQuery": { "textContains": "Spotlight", "role": "button", "context": "menu bar" },
+          "message": "Click here to open Spotlight",
+          "opacity": 0.4,
+          "pulse": true
         },
         {
-          "title": "Getting Started with Figma",
-          "url": "https://help.figma.com/hc/en-us/articles/360039827914"
+          "id": "arrow_spotlight",
+          "type": "arrow",
+          "boundary": { "x": 0.9, "y": 0.05, "width": 0.05, "height": 0.05 },
+          "coordinateSpace": "normalized",
+          "arrowDirection": "up",
+          "message": "Step 1: Click the magnifying glass"
         }
-      ]
+      ],
+      "pointerActions": [
+        {
+          "type": "moveToBoundary",
+          "boundaryId": "highlight_spotlight",
+          "easing": "easeOut",
+          "durationMs": 600
+        }
+      ],
+      "completionMode": "either",
+      "visionCheck": {
+        "strategy": "element_visible",
+        "expectedElement": "Spotlight search box",
+        "timeoutMs": 10000,
+        "pollIntervalMs": 1000
+      },
+      "fallbackInstruction": "If you can't find the magnifying glass, press Cmd+Space on your keyboard to open Spotlight.",
+      "expectedDuration": 3000,
+      "waitAfter": 1000
     }
   ]
 }
 
-**IMPORTANT NOTES:**
-- Extract actual values from user command
-- **CRITICAL: Each step's "explanation" must be BOTH instructional AND directional**
-  - Start by stating what you're about to do
-  - Explain WHY this step is necessary
-  - Describe WHAT tool/app/command you're using
-  - Explain HOW it works or what it does
-  - **PROVIDE MANUAL DIRECTIONS: Tell users how to do it manually (e.g., "You can also find this by clicking Desktop/Finder → Go → Applications → Utilities")**
-  - Include keyboard shortcuts, menu paths, or UI locations
-  - Provide context about the technology/concept
-  - Make it educational AND actionable
-- Example good explanation: "To set up SSH keys, we first need to open the Terminal application. Terminal is a command-line interface where we'll run the commands to generate your SSH key pair. On macOS, Terminal is the built-in application for executing shell commands. You can also find it manually by clicking Finder → Go → Applications → Utilities → Terminal, or by searching for 'Terminal' in Spotlight (Cmd+Space)."
-- Example bad explanation: "Open Terminal" (too short, not educational, no manual directions)
-- Include verification strategies
-- Pre-generate recovery steps for common failures
-- Use proper wait times between steps
-- Include helpful links in recovery steps
-- Make explanations beginner-friendly with manual alternatives
-- Each explanation should be 3-5 sentences minimum (including manual directions)
+**OVERLAY TYPES:**
+- "highlight": Semi-transparent box highlighting an element (use with pulse: true)
+- "arrow": Arrow pointing to an element with optional message
+- "callout": Text box with explanation, positioned relative to element
+- "textBox": Floating instruction box
+- "label": Small label tag on element
 
-Now generate the JSON guide for the user's command. Return ONLY the JSON object, no other text.`;
+**COORDINATE SPACES:**
+${hasScreenshot ? `- "screen": **USE THIS** - Absolute pixel coordinates from the screenshot you're analyzing (x, y, width, height in pixels)
+- "normalized": 0-1 coordinates for resolution-independent elements (e.g., arrows, callouts)
+- "node": Fallback only - uses nodeQuery when coordinates can't be determined` : `- "node": **USE THIS** - Dynamic, uses nodeQuery to find element (when no screenshot provided)
+- "normalized": 0-1 coordinates, resolution-independent
+- "screen": Not available (no screenshot provided)`}
+
+**NODE QUERY FIELDS (always include for validation):**
+- textContains: Text visible in/near the element
+- role: UI role (button, input, link, etc.)
+- app: Application name
+- context: Additional context for disambiguation
+
+${hasScreenshot ? `**IMPORTANT**: Analyze the screenshot carefully and provide REAL pixel coordinates for all UI elements you can see. The boundary should match the actual position and size of the element in the image.` : ''}
+
+**COMPLETION MODES:**
+- "vision": Auto-advance when vision detects completion
+- "manual": User clicks "Next" button
+- "either": Vision check OR manual (RECOMMENDED)
+
+**POINTER ACTIONS (optional ghost cursor):**
+- moveToBoundary: Animate cursor to element
+- clickOnBoundary: Show click animation
+- moveToPoint: Move to specific coordinates
+
+**EXAMPLE: "Show me how to buy winter clothes on Amazon"**
+${hasScreenshot ? `(With screenshot - use actual pixel coordinates):` : `(Without screenshot - use node coordinates):`}
+{
+  "intro": "I'll guide you through searching for and purchasing winter clothes on Amazon step-by-step.",
+  "steps": [
+    {
+      "id": "step_1",
+      "title": "Open Chrome Browser",
+      "description": "First, we need to open Google Chrome. You can find it in your Applications folder or use Spotlight to search for it.",
+      "overlays": [
+        {
+          "id": "chrome_icon",
+          "type": "highlight",
+          "boundary": ${hasScreenshot ? `{ "x": 145, "y": 1050, "width": 70, "height": 70 }` : `{ "x": 0, "y": 0, "width": 1, "height": 1 }`},
+          "coordinateSpace": ${hasScreenshot ? `"screen"` : `"node"`},
+          "nodeQuery": { "textContains": "Chrome", "role": "button", "context": "dock or applications" },
+          "pulse": true,
+          "opacity": 0.4
+        },
+        {
+          "id": "instruction",
+          "type": "callout",
+          "boundary": { "x": 0.5, "y": 0.3, "width": 0.3, "height": 0.1 },
+          "coordinateSpace": "normalized",
+          "position": "top",
+          "message": "Click on Chrome to open the browser"
+        }
+      ],
+      "completionMode": "either",
+      "visionCheck": {
+        "strategy": "app_running",
+        "expectedApp": "Google Chrome",
+        "timeoutMs": 8000
+      },
+      "fallbackInstruction": "If Chrome isn't visible, press Cmd+Space, type 'Chrome', and press Enter.",
+      "expectedDuration": 5000
+    },
+    {
+      "id": "step_2",
+      "title": "Navigate to Amazon",
+      "description": "Type 'amazon.com' in the address bar at the top of the browser and press Enter.",
+      "overlays": [
+        {
+          "id": "address_bar",
+          "type": "highlight",
+          "boundary": ${hasScreenshot ? `{ "x": 420, "y": 85, "width": 800, "height": 45 }` : `{ "x": 0, "y": 0, "width": 1, "height": 1 }`},
+          "coordinateSpace": ${hasScreenshot ? `"screen"` : `"node"`},
+          "nodeQuery": { "role": "input", "context": "address bar", "textContains": "Search" },
+          "pulse": true
+        },
+        {
+          "id": "type_instruction",
+          "type": "textBox",
+          "boundary": { "x": 0.3, "y": 0.15, "width": 0.4, "height": 0.08 },
+          "coordinateSpace": "normalized",
+          "message": "Type: amazon.com"
+        }
+      ],
+      "completionMode": "either",
+      "visionCheck": {
+        "strategy": "element_visible",
+        "expectedElement": "Amazon logo or amazon.com in URL",
+        "timeoutMs": 10000
+      },
+      "fallbackInstruction": "Click the address bar, type 'amazon.com', and press Enter.",
+      "expectedDuration": 8000
+    },
+    {
+      "id": "step_3",
+      "title": "Search for Winter Clothes",
+      "description": "Find the search box and type 'winter clothes'. Then click the search button or press Enter.",
+      "overlays": [
+        {
+          "id": "search_box",
+          "type": "highlight",
+          "boundary": { "x": 0, "y": 0, "width": 1, "height": 1 },
+          "coordinateSpace": "node",
+          "nodeQuery": { "role": "input", "textContains": "Search", "context": "Amazon search" },
+          "pulse": true
+        }
+      ],
+      "pointerActions": [
+        {
+          "type": "moveToBoundary",
+          "boundaryId": "search_box",
+          "easing": "easeOut",
+          "durationMs": 800
+        }
+      ],
+      "completionMode": "either",
+      "visionCheck": {
+        "strategy": "screenshot_comparison",
+        "timeoutMs": 10000
+      },
+      "fallbackInstruction": "Look for the search box near the top of the page, type 'winter clothes', and press Enter.",
+      "expectedDuration": 10000
+    }
+  ]
+}
+
+**IMPORTANT:**
+${hasScreenshot ? `- **CRITICAL**: Analyze the screenshot and generate REAL pixel coordinates for coordinateSpace: "screen"
+- Measure the actual position (x, y) and size (width, height) of each UI element you see
+- Always include nodeQuery alongside screen coordinates for validation
+- Use normalized coordinates (0-1) only for floating elements like arrows and callouts` : `- Use coordinateSpace: "node" with nodeQuery for ALL interactive elements
+- Boundaries should be { "x": 0, "y": 0, "width": 1, "height": 1 } as placeholders`}
+- Provide clear, beginner-friendly descriptions
+- Always include fallbackInstruction for when vision fails
+- Use completionMode: "either" for flexibility
+- Keep overlay messages concise (under 10 words)
+- Generate 3-7 steps depending on task complexity
+
+Now generate the interactive guide JSON for the user's command. Return ONLY the JSON object, no other text.`;
   }
 
   /**
@@ -2873,44 +2941,291 @@ Now generate the JSON guide for the user's command. Return ONLY the JSON object,
   }
 
   /**
-   * Generate automation guide with automatic fallback
-   * Tries Grok first, falls back to Claude if Grok fails
+   * Generate interactive guide with automatic fallback
+   * Priority: Gemini 3 Pro Preview (latest) → OpenAI GPT-4V → Claude → Grok (fallback)
    */
-  async generateGuide(request: GuideRequest): Promise<AutomationGuideResponse> {
+  async generateGuide(request: InteractiveGuideRequest): Promise<InteractiveGuideResponse> {
     const errors: string[] = [];
 
-    // Try Grok first
-    if (this.grokClient) {
+    // Priority 1: Gemini 3 Pro Preview (latest, best quality)
+    if (this.geminiClient) {
       try {
-        return await this.generateGuideWithGrok(request);
+        return await this.generateInteractiveGuideWithGemini(request);
       } catch (error: any) {
-        errors.push(`Grok: ${error.message}`);
-        logger.warn('Grok failed for guide generation, falling back to Claude', { error: error.message });
+        errors.push(`Gemini: ${error.message}`);
+        logger.warn('Gemini failed for guide generation, falling back to OpenAI', { error: error.message });
       }
     } else {
-      errors.push('Grok: Client not initialized (missing GROK_API_KEY)');
+      errors.push('Gemini: Client not initialized (missing GEMINI_API_KEY)');
     }
 
-    // Fallback to Claude
+    // Priority 2: OpenAI GPT-4 Vision (fast vision, 5-10s)
+    if (this.openaiClient) {
+      try {
+        return await this.generateInteractiveGuideWithOpenAI(request);
+      } catch (error: any) {
+        errors.push(`OpenAI: ${error.message}`);
+        logger.warn('OpenAI failed for guide generation, falling back to Claude', { error: error.message });
+      }
+    } else {
+      errors.push('OpenAI: Client not initialized (missing OPENAI_API_KEY)');
+    }
+
+    // Priority 3: Claude (fast vision, 3-8s)
     if (this.claudeClient) {
       try {
-        return await this.generateGuideWithClaude(request);
+        return await this.generateInteractiveGuideWithClaude(request);
       } catch (error: any) {
         errors.push(`Claude: ${error.message}`);
-        logger.error('All providers failed for guide generation', { errors });
+        logger.warn('Claude failed for guide generation, falling back to Grok', { error: error.message });
       }
     } else {
       errors.push('Claude: Client not initialized (missing ANTHROPIC_API_KEY)');
     }
 
+    // Priority 4: Grok (fallback, 30s+)
+    if (this.grokClient) {
+      try {
+        return await this.generateInteractiveGuideWithGrok(request);
+      } catch (error: any) {
+        errors.push(`Grok: ${error.message}`);
+        logger.error('All providers failed for guide generation', { errors });
+      }
+    } else {
+      errors.push('Grok: Client not initialized (missing GROK_API_KEY)');
+    }
+
     // All providers failed
-    throw new Error(`Failed to generate automation guide. Errors: ${errors.join('; ')}`);
+    throw new Error(`Failed to generate interactive guide. Errors: ${errors.join('; ')}`);
   }
 
   /**
-   * Generate guide using Grok
+   * Generate interactive guide using Gemini 3 Pro Preview
    */
-  private async generateGuideWithGrok(request: GuideRequest): Promise<AutomationGuideResponse> {
+  private async generateInteractiveGuideWithGemini(request: InteractiveGuideRequest): Promise<InteractiveGuideResponse> {
+    if (!this.geminiClient) {
+      throw new Error('Gemini client not initialized');
+    }
+
+    const startTime = Date.now();
+
+    try {
+      logger.info('Generating interactive guide with Gemini 3 Pro Preview', { command: request.command });
+
+      const model = this.geminiClient.getGenerativeModel({ 
+        model: 'gemini-3-pro-preview',
+        generationConfig: {
+          temperature: 0.3,
+          maxOutputTokens: 8192,
+        }
+      });
+      
+      const parts: any[] = [];
+
+      // Add screenshot if provided
+      if (request.context?.screenshot) {
+        parts.push({
+          inlineData: {
+            mimeType: request.context.screenshot.mimeType || 'image/png',
+            data: request.context.screenshot.base64,
+          },
+        });
+      }
+
+      // Add prompt
+      parts.push({
+        text: this.buildInteractiveGuidePrompt(request),
+      });
+
+      const result = await model.generateContent({
+        contents: [{ role: 'user', parts }],
+      });
+
+      const latencyMs = Date.now() - startTime;
+      const rawResponse = result.response.text();
+
+      // Parse JSON response
+      const guide = this.parseAndValidateInteractiveGuide(rawResponse, request);
+      
+      // Update metadata
+      guide.metadata.provider = 'gemini' as any;
+      guide.metadata.generationTime = latencyMs;
+
+      logger.info('Gemini 3 Pro Preview interactive guide generation successful', { latencyMs, stepCount: guide.steps.length });
+
+      return {
+        success: true,
+        guide,
+        provider: 'gemini' as any,
+        latencyMs,
+      };
+    } catch (error: any) {
+      const latencyMs = Date.now() - startTime;
+      logger.error('Gemini 3 Pro Preview interactive guide generation failed', {
+        error: error.message,
+        latencyMs,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Generate interactive guide using Claude
+   */
+  private async generateInteractiveGuideWithClaude(request: InteractiveGuideRequest): Promise<InteractiveGuideResponse> {
+    if (!this.claudeClient) {
+      throw new Error('Claude client not initialized');
+    }
+
+    const startTime = Date.now();
+
+    try {
+      logger.info('Generating interactive guide with Claude', { command: request.command });
+
+      const content: any[] = [];
+
+      // Add screenshot if provided
+      if (request.context?.screenshot) {
+        content.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: (request.context.screenshot.mimeType || 'image/png') as any,
+            data: request.context.screenshot.base64,
+          },
+        });
+      }
+
+      // Add prompt
+      content.push({
+        type: 'text',
+        text: this.buildInteractiveGuidePrompt(request),
+      });
+
+      const message = await this.claudeClient.messages.create({
+        model: 'claude-3-5-sonnet-latest',
+        max_tokens: 8192,
+        temperature: 0.3,
+        messages: [
+          {
+            role: 'user',
+            content,
+          },
+        ],
+      });
+
+      const latencyMs = Date.now() - startTime;
+      const rawResponse = message.content[0]?.type === 'text' ? message.content[0].text : '';
+
+      // Parse JSON response
+      const guide = this.parseAndValidateInteractiveGuide(rawResponse, request);
+      
+      // Update metadata
+      guide.metadata.provider = 'claude';
+      guide.metadata.generationTime = latencyMs;
+
+      logger.info('Claude interactive guide generation successful', { latencyMs, stepCount: guide.steps.length });
+
+      return {
+        success: true,
+        guide,
+        provider: 'claude',
+        latencyMs,
+      };
+    } catch (error: any) {
+      const latencyMs = Date.now() - startTime;
+      logger.error('Claude interactive guide generation failed', {
+        error: error.message,
+        latencyMs,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Generate interactive guide using OpenAI GPT-4 Vision
+   */
+  private async generateInteractiveGuideWithOpenAI(request: InteractiveGuideRequest): Promise<InteractiveGuideResponse> {
+    if (!this.openaiClient) {
+      throw new Error('OpenAI client not initialized');
+    }
+
+    const startTime = Date.now();
+
+    try {
+      logger.info('Generating interactive guide with OpenAI', { command: request.command });
+
+      const messages: any[] = [
+        {
+          role: 'system',
+          content: 'You are an expert at creating interactive visual guides. You MUST return ONLY valid JSON, no other text. Analyze screenshots carefully and provide accurate pixel coordinates for UI elements.'
+        }
+      ];
+
+      // Add screenshot if provided
+      if (request.context?.screenshot) {
+        messages.push({
+          role: 'user',
+          content: [
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:${request.context.screenshot.mimeType || 'image/png'};base64,${request.context.screenshot.base64}`,
+              },
+            },
+            {
+              type: 'text',
+              text: this.buildInteractiveGuidePrompt(request),
+            },
+          ],
+        });
+      } else {
+        messages.push({
+          role: 'user',
+          content: this.buildInteractiveGuidePrompt(request),
+        });
+      }
+
+      const completion = await this.openaiClient.chat.completions.create({
+        model: 'gpt-4o',
+        messages,
+        temperature: 0.3,
+        max_tokens: 4096,
+        response_format: { type: 'json_object' },
+      });
+
+      const latencyMs = Date.now() - startTime;
+      const rawResponse = completion.choices[0]?.message?.content || '';
+
+      // Parse JSON response
+      const guide = this.parseAndValidateInteractiveGuide(rawResponse, request);
+      
+      // Update metadata
+      guide.metadata.provider = 'openai';
+      guide.metadata.generationTime = latencyMs;
+
+      logger.info('OpenAI interactive guide generation successful', { latencyMs, stepCount: guide.steps.length });
+
+      return {
+        success: true,
+        guide,
+        provider: 'openai',
+        latencyMs,
+      };
+    } catch (error: any) {
+      const latencyMs = Date.now() - startTime;
+      logger.error('OpenAI interactive guide generation failed', {
+        error: error.message,
+        latencyMs,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Generate interactive guide using Grok
+   */
+  private async generateInteractiveGuideWithGrok(request: InteractiveGuideRequest): Promise<InteractiveGuideResponse> {
     if (!this.grokClient) {
       throw new Error('Grok client not initialized');
     }
@@ -2930,7 +3245,7 @@ Now generate the JSON guide for the user's command. Return ONLY the JSON object,
           },
           {
             role: 'user',
-            content: this.buildStructuredGuidePrompt(request),
+            content: this.buildInteractiveGuidePrompt(request),
           },
         ],
         temperature: 0.3,
@@ -2940,22 +3255,23 @@ Now generate the JSON guide for the user's command. Return ONLY the JSON object,
       const rawResponse = completion.choices[0]?.message?.content || '';
 
       // Parse JSON response
-      const guideData = this.parseAndValidateGuide(rawResponse, request);
+      const guide = this.parseAndValidateInteractiveGuide(rawResponse, request);
       
       // Update metadata
-      guideData.metadata.provider = 'grok';
-      guideData.metadata.generationTime = latencyMs;
+      guide.metadata.provider = 'grok';
+      guide.metadata.generationTime = latencyMs;
 
-      logger.info('Grok guide generation successful', { latencyMs, stepCount: guideData.steps.length });
+      logger.info('Grok interactive guide generation successful', { latencyMs, stepCount: guide.steps.length });
 
       return {
-        guide: guideData,
+        success: true,
+        guide,
         provider: 'grok',
         latencyMs,
       };
     } catch (error: any) {
       const latencyMs = Date.now() - startTime;
-      logger.error('Grok guide generation failed', {
+      logger.error('Grok interactive guide generation failed', {
         error: error.message,
         latencyMs,
       });
@@ -2964,60 +3280,9 @@ Now generate the JSON guide for the user's command. Return ONLY the JSON object,
   }
 
   /**
-   * Generate guide using Claude
+   * Parse and validate interactive guide JSON
    */
-  private async generateGuideWithClaude(request: GuideRequest): Promise<AutomationGuideResponse> {
-    if (!this.claudeClient) {
-      throw new Error('Claude client not initialized');
-    }
-
-    const startTime = Date.now();
-
-    try {
-      logger.info('Generating automation guide with Claude', { command: request.command });
-
-      const message = await this.claudeClient.messages.create({
-        model: 'claude-3-5-sonnet-20241022',
-        max_tokens: 8192,
-        temperature: 0.3,
-        messages: [
-          {
-            role: 'user',
-            content: this.buildStructuredGuidePrompt(request),
-          },
-        ],
-      });
-      const latencyMs = Date.now() - startTime;
-      const rawResponse = message.content[0]?.type === 'text' ? message.content[0].text : '';
-
-      // Parse JSON response
-      const guideData = this.parseAndValidateGuide(rawResponse, request);
-      
-      // Update metadata
-      guideData.metadata.provider = 'claude';
-      guideData.metadata.generationTime = latencyMs;
-
-      logger.info('Claude guide generation successful', { latencyMs, stepCount: guideData.steps.length });
-
-      return {
-        guide: guideData,
-        provider: 'claude',
-        latencyMs,
-      };
-    } catch (error: any) {
-      const latencyMs = Date.now() - startTime;
-      logger.error('Claude guide generation failed', {
-        error: error.message,
-        latencyMs,
-      });
-      throw error;
-    }
-  }
-
-  /**
-   * Parse and validate automation guide JSON
-   */
-  private parseAndValidateGuide(rawResponse: string, request: GuideRequest): AutomationGuide {
+  private parseAndValidateInteractiveGuide(rawResponse: string, request: InteractiveGuideRequest): InteractiveGuide {
     // Remove markdown code fences if present
     let cleaned = rawResponse.replace(/```(?:json)?\n?/g, '').trim();
 
@@ -3026,46 +3291,50 @@ Now generate the JSON guide for the user's command. Return ONLY the JSON object,
     try {
       guideJson = JSON.parse(cleaned);
     } catch (error) {
-      throw new Error(`Failed to parse guide JSON: ${error}`);
+      throw new Error(`Failed to parse interactive guide JSON: ${error}`);
     }
 
     // Validate required fields
     if (!guideJson.intro || typeof guideJson.intro !== 'string') {
-      throw new Error('Guide must have an "intro" string');
+      throw new Error('Interactive guide must have an "intro" string');
     }
 
     if (!guideJson.steps || !Array.isArray(guideJson.steps)) {
-      throw new Error('Guide must have a "steps" array');
+      throw new Error('Interactive guide must have a "steps" array');
     }
 
     if (guideJson.steps.length === 0) {
-      throw new Error('Guide must have at least one step');
+      throw new Error('Interactive guide must have at least one step');
     }
 
-    // Validate each step
+    // Validate each step has required fields for interactive guide
     for (const step of guideJson.steps) {
-      if (!step.id || !step.title || !step.explanation || !step.code || !step.marker) {
-        throw new Error(`Invalid step structure: ${JSON.stringify(step)}`);
+      if (!step.id || !step.title || !step.description) {
+        throw new Error(`Invalid interactive step structure (missing id, title, or description): ${JSON.stringify(step)}`);
+      }
+      
+      if (!step.overlays || !Array.isArray(step.overlays)) {
+        throw new Error(`Step ${step.id} must have an "overlays" array`);
+      }
+      
+      if (!step.completionMode) {
+        throw new Error(`Step ${step.id} must have a "completionMode" field`);
       }
     }
 
-    // Generate full executable code with markers
-    const fullCode = this.generateFullGuideCode(guideJson);
-
     // Calculate estimated duration
     const estimatedDuration = guideJson.steps.reduce((total: number, step: any) => {
-      return total + (step.expectedDuration || 2000) + (step.waitAfter || 0);
+      return total + (step.expectedDuration || 5000) + (step.waitAfter || 0);
     }, 0);
 
-    // Build complete guide
-    const guide: AutomationGuide = {
+    // Build complete interactive guide
+    const guide: InteractiveGuide = {
       id: randomUUID(),
       command: request.command,
+      intent: 'command_guide',
       intro: guideJson.intro,
       steps: guideJson.steps,
-      code: fullCode,
       totalSteps: guideJson.steps.length,
-      commonRecoveries: guideJson.commonRecoveries || [],
       metadata: {
         provider: 'grok', // Will be overwritten by caller
         generationTime: 0, // Will be overwritten by caller
@@ -3076,47 +3345,6 @@ Now generate the JSON guide for the user's command. Return ONLY the JSON object,
     };
 
     return guide;
-  }
-
-  /**
-   * Generate full executable code with all markers
-   */
-  private generateFullGuideCode(guideJson: any): string {
-    let code = `// Auto-generated Guide Code\n`;
-    code += `const { keyboard, Key, mouse, screen } = require('@nut-tree-fork/nut-js');\n`;
-    code += `const { findAndClick } = require('../src/services/visionSpatialService');\n\n`;
-    code += `(async () => {\n`;
-    code += `  try {\n`;
-    code += `    // Intro\n`;
-    code += `    console.log("[GUIDE SUMMARY] ${guideJson.intro.replace(/"/g, '\\"')}");\n`;
-    code += `    await new Promise(resolve => setTimeout(resolve, 1000));\n\n`;
-
-    // Add each step
-    for (const step of guideJson.steps) {
-      code += `    // Step ${step.id}: ${step.title}\n`;
-      code += `    console.log("[GUIDE STEP ${step.id}] ${step.explanation.replace(/"/g, '\\"')}");\n`;
-      
-      // Extract code without require statements (already at top)
-      let stepCode = step.code;
-      stepCode = stepCode.replace(/const\s+\{[^}]+\}\s*=\s*require\([^)]+\);\s*/g, '');
-      stepCode = stepCode.replace(/console\.log\([^)]+\);\s*/g, ''); // Remove duplicate markers
-      
-      code += `    ${stepCode}\n`;
-      
-      if (step.waitAfter) {
-        code += `    await new Promise(resolve => setTimeout(resolve, ${step.waitAfter}));\n`;
-      }
-      code += `\n`;
-    }
-
-    code += `    console.log("[GUIDE COMPLETE] Guide finished successfully!");\n`;
-    code += `  } catch (error) {\n`;
-    code += `    console.error('[GUIDE ERROR]', error.message);\n`;
-    code += `    throw error;\n`;
-    code += `  }\n`;
-    code += `})();\n`;
-
-    return code;
   }
 
   /**
