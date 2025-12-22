@@ -49,7 +49,7 @@ const grokClient = process.env.GROK_API_KEY
  */
 router.post('/locate', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
-    const { screenshot, description, role } = req.body;
+    const { screenshot, description, role, screenInfo } = req.body;
 
     // Validate request
     if (!screenshot?.base64 || !description) {
@@ -64,15 +64,59 @@ router.post('/locate', authenticate, async (req: Request, res: Response): Promis
       description,
       role,
       screenshotSize: screenshot.base64.length,
+      hasScreenInfo: !!screenInfo,
+      screenInfo: screenInfo ? {
+        width: screenInfo.width,
+        height: screenInfo.height,
+        scaleFactor: screenInfo.scaleFactor,
+      } : undefined,
       userId: (req as any).user?.id,
     });
 
     const startTime = Date.now();
 
-    // Try Claude first (best for vision)
+    // Try OpenAI first (best for precise coordinate location)
+    if (openaiClient) {
+      try {
+        const result = await locateWithOpenAI(screenshot, description, role, screenInfo);
+        const latencyMs = Date.now() - startTime;
+
+        logger.info('Vision locate successful with OpenAI', {
+          description,
+          coordinates: result.coordinates,
+          confidence: result.confidence,
+          latencyMs,
+          isZeroCoordinates: result.coordinates.x === 0 && result.coordinates.y === 0,
+          isLowConfidence: result.confidence < 0.3,
+        });
+        
+        // Log warning if returning (0,0) coordinates
+        if (result.coordinates.x === 0 && result.coordinates.y === 0) {
+          logger.warn('⚠️ Vision API returned (0,0) coordinates - element likely not found', {
+            description,
+            confidence: result.confidence,
+            provider: 'openai',
+          });
+        }
+
+        res.status(200).json({
+          success: true,
+          ...result,
+          provider: 'openai',
+          latencyMs,
+        });
+        return;
+      } catch (error: any) {
+        logger.warn('OpenAI vision locate failed, falling back to Claude', {
+          error: error.message,
+        });
+      }
+    }
+
+    // Fallback to Claude
     if (claudeClient) {
       try {
-        const result = await locateWithClaude(screenshot, description, role);
+        const result = await locateWithClaude(screenshot, description, role, screenInfo);
         const latencyMs = Date.now() - startTime;
 
         logger.info('Vision locate successful with Claude', {
@@ -90,34 +134,7 @@ router.post('/locate', authenticate, async (req: Request, res: Response): Promis
         });
         return;
       } catch (error: any) {
-        logger.warn('Claude vision locate failed, falling back to OpenAI', {
-          error: error.message,
-        });
-      }
-    }
-
-    // Fallback to OpenAI
-    if (openaiClient) {
-      try {
-        const result = await locateWithOpenAI(screenshot, description, role);
-        const latencyMs = Date.now() - startTime;
-
-        logger.info('Vision locate successful with OpenAI', {
-          description,
-          coordinates: result.coordinates,
-          confidence: result.confidence,
-          latencyMs,
-        });
-
-        res.status(200).json({
-          success: true,
-          ...result,
-          provider: 'openai',
-          latencyMs,
-        });
-        return;
-      } catch (error: any) {
-        logger.warn('OpenAI vision locate failed, falling back to Grok', {
+        logger.warn('Claude vision locate failed, falling back to Grok', {
           error: error.message,
         });
       }
@@ -126,7 +143,7 @@ router.post('/locate', authenticate, async (req: Request, res: Response): Promis
     // Fallback to Grok (slowest)
     if (grokClient) {
       try {
-        const result = await locateWithGrok(screenshot, description, role);
+        const result = await locateWithGrok(screenshot, description, role, screenInfo);
         const latencyMs = Date.now() - startTime;
 
         logger.info('Vision locate successful with Grok', {
@@ -208,34 +225,7 @@ router.post('/verify', authenticate, async (req: Request, res: Response): Promis
 
     const startTime = Date.now();
 
-    // Try Claude first
-    if (claudeClient) {
-      try {
-        const result = await verifyWithClaude(screenshot, description);
-        const latencyMs = Date.now() - startTime;
-
-        logger.info('Vision verify successful with Claude', {
-          description,
-          exists: result.exists,
-          confidence: result.confidence,
-          latencyMs,
-        });
-
-        res.status(200).json({
-          success: true,
-          ...result,
-          provider: 'claude',
-          latencyMs,
-        });
-        return;
-      } catch (error: any) {
-        logger.warn('Claude vision verify failed, falling back to OpenAI', {
-          error: error.message,
-        });
-      }
-    }
-
-    // Fallback to OpenAI
+    // Try OpenAI first (best for vision verification)
     if (openaiClient) {
       try {
         const result = await verifyWithOpenAI(screenshot, description);
@@ -256,7 +246,34 @@ router.post('/verify', authenticate, async (req: Request, res: Response): Promis
         });
         return;
       } catch (error: any) {
-        logger.warn('OpenAI vision verify failed, falling back to Grok', {
+        logger.warn('OpenAI vision verify failed, falling back to Claude', {
+          error: error.message,
+        });
+      }
+    }
+
+    // Fallback to Claude
+    if (claudeClient) {
+      try {
+        const result = await verifyWithClaude(screenshot, description);
+        const latencyMs = Date.now() - startTime;
+
+        logger.info('Vision verify successful with Claude', {
+          description,
+          exists: result.exists,
+          confidence: result.confidence,
+          latencyMs,
+        });
+
+        res.status(200).json({
+          success: true,
+          ...result,
+          provider: 'claude',
+          latencyMs,
+        });
+        return;
+      } catch (error: any) {
+        logger.warn('Claude vision verify failed, falling back to Grok', {
           error: error.message,
         });
       }
@@ -675,29 +692,125 @@ router.post('/analyze', authenticate, async (req: Request, res: Response): Promi
 // Helper Functions - Claude
 // ============================================================================
 
+/**
+ * Extracts JSON from Claude's response, handling various formats:
+ * - Plain JSON
+ * - JSON in markdown code blocks
+ * - JSON with surrounding text
+ */
+function extractJsonFromResponse(response: string): any {
+  let cleaned = response.trim();
+  
+  // Remove markdown code blocks
+  cleaned = cleaned.replace(/```(?:json)?\n?/g, '').trim();
+  
+  // Try to parse as-is first
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    // If that fails, try to find JSON object in the text
+    // Look for { ... } pattern
+    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      try {
+        return JSON.parse(jsonMatch[0]);
+      } catch {
+        // If still fails, try to find the last complete JSON object
+        const lastBraceIndex = cleaned.lastIndexOf('}');
+        if (lastBraceIndex !== -1) {
+          const firstBraceIndex = cleaned.indexOf('{');
+          if (firstBraceIndex !== -1 && firstBraceIndex < lastBraceIndex) {
+            const jsonStr = cleaned.substring(firstBraceIndex, lastBraceIndex + 1);
+            return JSON.parse(jsonStr);
+          }
+        }
+      }
+    }
+    
+    // If all else fails, throw the original error
+    throw new Error(`Failed to extract JSON from response: ${response.substring(0, 100)}...`);
+  }
+}
+
 async function locateWithClaude(
   screenshot: { base64: string; mimeType: string },
   description: string,
-  role?: string
+  role?: string,
+  screenInfo?: { width: number; height: number; scaleFactor: number }
 ): Promise<{ coordinates: { x: number; y: number }; confidence: number }> {
   if (!claudeClient) {
     throw new Error('Claude client not initialized');
   }
 
   const roleHint = role ? ` (a ${role} element)` : '';
-  const prompt = `You are a vision AI that locates UI elements in screenshots.
+  const screenDimensions = screenInfo 
+    ? `\n\n**SCREEN DIMENSIONS (CRITICAL):**\n- Screen width: ${screenInfo.width}px\n- Screen height: ${screenInfo.height}px\n- Scale factor: ${screenInfo.scaleFactor}x\n- Screenshot dimensions: ${screenInfo.width}x${screenInfo.height}\n- Coordinate space: (0,0) to (${screenInfo.width}, ${screenInfo.height})`
+    : '';
+  
+  const prompt = `You are a precise UI element locator. Find the EXACT pixel coordinates of: "${description}"${roleHint}${screenDimensions}
 
-Find the element: "${description}"${roleHint}
+**CRITICAL - UI CONTEXT AWARENESS:**
 
-Analyze the screenshot and return ONLY a JSON object with the pixel coordinates of the element's center:
+The screenshot may show EITHER:
+A) **Full Desktop View** - Multiple UI layers visible:
+   1. Desktop Background (wallpaper)
+   2. Desktop Folders/Icons (typically right side - blue/colored folder icons)
+   3. OS Menu Bar (top - system menu)
+   4. Dock/Taskbar (bottom/side - app launcher)
+   5. Application Window (browser, app - contains the interface)
+   6. Web/App Interface (INSIDE the window)
 
+B) **Fullscreen Application** - Single app fills entire screen:
+   - No desktop folders/icons visible
+   - No OS menu bar or dock visible
+   - Application UI fills the entire screenshot
+   - Examples: Slack fullscreen, Chrome fullscreen, VS Code fullscreen
+
+**CRITICAL DISTINCTION - Desktop Files vs Application Content:**
+- **Desktop folders/files** = OS-level icons (blue/colored folder icons on desktop background)
+- **Application content** = UI elements INSIDE the application (buttons, sidebars, panels, text)
+- **NEVER confuse desktop folders with application UI elements**
+- If description mentions "sidebar", "panel", "project", "conversation" → Look for UI elements INSIDE the application
+- If description mentions "blue folder icon" or "desktop folder" → Check if it's a desktop file (return confidence 0.0) or app UI element
+
+**PIXEL-ACCURATE COORDINATE SYSTEM:**
+- **CRITICAL**: The screenshot has EXACT dimensions (see above)
+- Coordinates are in PIXELS relative to the screenshot image
+- (0, 0) = top-left corner of the screenshot
+- (${screenInfo?.width || 'width'}, ${screenInfo?.height || 'height'}) = bottom-right corner
+- Return the CENTER POINT of the element (where a mouse click would land)
+- **Precision matters** - your coordinates will be used for mouse clicks
+
+**CONTEXT VALIDATION (MUST DO FIRST):**
+1. Identify what application/website is visible in the screenshot
+2. Check if the target element matches the visible context
+3. Distinguish between desktop UI and application UI
+4. Return confidence 0.0 if:
+   - Wrong application/website is visible
+   - Description references desktop folders but should be app UI
+   - Element not visible or doesn't exist
+   - Context doesn't match expected application
+
+**CONFIDENCE LEVELS:**
+- 0.9-1.0: Element clearly visible, correct context, precise location
+- 0.7-0.8: Element visible but slightly uncertain about exact position
+- 0.4-0.6: Element might be there but uncertain
+- 0.0-0.3: Element not found, wrong context, or desktop folder confusion
+
+**EXAMPLES:**
+- "hamburger menu in app" + app visible → {"x": 50, "y": 120, "confidence": 0.95}
+- "blue folder icon" in description → {"x": 0, "y": 0, "confidence": 0.0} (desktop element, not app UI)
+- "sidebar project" but sidebar collapsed → {"x": 0, "y": 0, "confidence": 0.0} (not visible)
+- Wrong app visible → {"x": 0, "y": 0, "confidence": 0.0}
+
+Return ONLY valid JSON. No explanations. No markdown. No extra text.
+
+Required format:
 {
-  "x": <number>,
-  "y": <number>,
+  "x": <pixel number>,
+  "y": <pixel number>,
   "confidence": <0.0 to 1.0>
-}
-
-If the element is not found, return confidence 0.0 and estimate where it might be.`;
+}`;
 
   const message = await claudeClient.messages.create({
     model: 'claude-sonnet-4-20250514',
@@ -725,8 +838,28 @@ If the element is not found, return confidence 0.0 and estimate where it might b
   });
 
   const response = message.content[0]?.type === 'text' ? message.content[0].text : '';
-  const cleaned = response.replace(/```(?:json)?\n?/g, '').trim();
-  const result = JSON.parse(cleaned);
+  
+  // Log raw response for debugging
+  logger.debug('Claude vision raw response', {
+    description,
+    rawResponse: response.substring(0, 500),
+  });
+  
+  const result = extractJsonFromResponse(response);
+  
+  // Enhanced logging for (0,0) coordinates
+  if (result.x === 0 && result.y === 0) {
+    logger.warn('⚠️ Claude Vision returned (0,0) coordinates', {
+      description,
+      role,
+      confidence: result.confidence,
+      rawResponse: response.substring(0, 1000),
+      screenInfo,
+      interpretation: result.confidence === 0 
+        ? 'Element not found or wrong context (expected behavior)'
+        : 'Possible bug - high confidence but (0,0) coordinates',
+    });
+  }
 
   return {
     coordinates: { x: result.x, y: result.y },
@@ -742,12 +875,11 @@ async function verifyWithClaude(
     throw new Error('Claude client not initialized');
   }
 
-  const prompt = `You are a vision AI that verifies if UI elements exist in screenshots.
+  const prompt = `Does this element exist: "${description}"?
 
-Does this element exist: "${description}"?
+CRITICAL: Return ONLY valid JSON. No explanations. No markdown. No extra text before or after.
 
-Analyze the screenshot and return ONLY a JSON object:
-
+Required format:
 {
   "exists": <true or false>,
   "confidence": <0.0 to 1.0>
@@ -779,8 +911,7 @@ Analyze the screenshot and return ONLY a JSON object:
   });
 
   const response = message.content[0]?.type === 'text' ? message.content[0].text : '';
-  const cleaned = response.replace(/```(?:json)?\n?/g, '').trim();
-  const result = JSON.parse(cleaned);
+  const result = extractJsonFromResponse(response);
 
   return {
     exists: result.exists,
@@ -953,7 +1084,9 @@ async function analyzeWithClaude(
 
   const prompt = query || `Analyze this screenshot and extract all visible text. Also provide a brief description of what you see.
 
-Return a JSON object:
+CRITICAL: Return ONLY valid JSON. No explanations. No markdown. No extra text before or after.
+
+Required format:
 {
   "text": "<all visible text>",
   "analysis": "<brief description of UI>"
@@ -1004,8 +1137,7 @@ Return a JSON object:
   
   // Try to parse as JSON first
   try {
-    const cleaned = response.replace(/```(?:json)?\n?/g, '').trim();
-    const result = JSON.parse(cleaned);
+    const result = extractJsonFromResponse(response);
     return {
       text: result.text || '',
       analysis: result.analysis || response,
@@ -1099,26 +1231,99 @@ Return a JSON object:
 async function locateWithOpenAI(
   screenshot: { base64: string; mimeType: string },
   description: string,
-  role?: string
+  role?: string,
+  screenInfo?: { width: number; height: number; scaleFactor: number }
 ): Promise<{ coordinates: { x: number; y: number }; confidence: number }> {
   if (!openaiClient) {
     throw new Error('OpenAI client not initialized');
   }
 
   const roleHint = role ? ` (a ${role} element)` : '';
-  const prompt = `You are a vision AI that locates UI elements in screenshots.
+  const screenDimensions = screenInfo 
+    ? `\n\n**SCREEN DIMENSIONS (CRITICAL):**\n- Screen width: ${screenInfo.width}px\n- Screen height: ${screenInfo.height}px\n- Scale factor: ${screenInfo.scaleFactor}x\n- Screenshot dimensions: ${screenInfo.width}x${screenInfo.height}\n- Coordinate space: (0,0) to (${screenInfo.width}, ${screenInfo.height})`
+    : '';
+  
+  const prompt = `You are a precise UI element locator. Find the EXACT pixel coordinates of: "${description}"${roleHint}${screenDimensions}
 
-Find the element: "${description}"${roleHint}
+**CRITICAL - UI CONTEXT AWARENESS:**
 
-Analyze the screenshot and return ONLY a JSON object with the pixel coordinates of the element's center:
+The screenshot may show EITHER:
+A) **Full Desktop View** - Multiple UI layers visible:
+   1. Desktop Background (wallpaper)
+   2. Desktop Folders/Icons (typically right side - blue/colored folder icons)
+   3. OS Menu Bar (top - system menu)
+   4. Dock/Taskbar (bottom/side - app launcher)
+   5. Application Window (browser, app - contains the interface)
+   6. Web/App Interface (INSIDE the window)
 
+B) **Fullscreen Application** - Single app fills entire screen:
+   - No desktop folders/icons visible
+   - No OS menu bar or dock visible
+   - Application UI fills the entire screenshot
+   - Examples: Slack fullscreen, Chrome fullscreen, VS Code fullscreen
+
+**CRITICAL DISTINCTION - Desktop Files vs Application Content:**
+- **Desktop folders/files** = OS-level icons (blue/colored folder icons on desktop background)
+- **Application content** = UI elements INSIDE the application (buttons, sidebars, panels, text)
+- **NEVER confuse desktop folders with application UI elements**
+- If description mentions "sidebar", "panel", "project", "conversation" → Look for UI elements INSIDE the application
+- If description mentions "blue folder icon" or "desktop folder" → Check if it's a desktop file (return confidence 0.0) or app UI element
+
+**PIXEL-ACCURATE COORDINATE SYSTEM:**
+- **CRITICAL**: The screenshot has EXACT dimensions (see above)
+- Coordinates are in PIXELS relative to the screenshot image
+- Origin: Top-left corner (0, 0)
+- X axis: Left (0) → Right (${screenInfo?.width || 'width'})
+- Y axis: Top (0) → Bottom (${screenInfo?.height || 'height'})
+- Return the CENTER POINT of the element (where a mouse click would land)
+- **Precision matters** - your coordinates will be used for mouse clicks
+
+**CRITICAL Y-COORDINATE ADJUSTMENT:**
+- **Bottom elements are SIGNIFICANTLY HIGHER than they appear**
+- **INPUT FIELDS**: Target the TEXT ENTRY AREA, not the bounding box center
+  * Input fields have borders, padding, and bottom spacing
+  * The clickable text area is in the UPPER portion of the bounding box
+  * For input fields: Use Y coordinate of TOP EDGE + 15-25px (not center)
+  * Example: Input field bounding box y=800-900 → Click at y=800-810 (top + 15px)
+- **Message input fields at bottom: Subtract 80-100px from bounding box center**
+- Bottom buttons/controls: Subtract 30-50px from visual position
+- **For elements in bottom 20% of screen (y > ${(screenInfo?.height || 900) * 0.8}):**
+  * Reduce Y coordinate by 80-100 pixels from bounding box center
+  * Message inputs typically at y = ${(screenInfo?.height || 900) - 100} to ${(screenInfo?.height || 900) - 80}
+  * Aim for the TEXT CURSOR position, NOT the toolbar buttons below
+  * The input container includes toolbar buttons - target the TEXT AREA only
+
+**CONTEXT VALIDATION (MUST DO FIRST):**
+1. Identify what application/website is visible in the screenshot
+2. Check if the target element matches the visible context
+3. Distinguish between desktop UI and application UI
+4. Return confidence 0.0 if:
+   - Wrong application/website is visible
+   - Description references desktop folders but should be app UI
+   - Element not visible or doesn't exist
+   - Context doesn't match expected application
+
+**CONFIDENCE LEVELS:**
+- 0.9-1.0: Element clearly visible, correct context, precise location
+- 0.7-0.8: Element visible but slightly uncertain about exact position
+- 0.4-0.6: Element might be there but uncertain
+- 0.0-0.3: Element not found, wrong context, or desktop folder confusion
+
+**EXAMPLES:**
+- "hamburger menu in app" + app visible → {"x": 50, "y": 120, "confidence": 0.95}
+- "message input at bottom" (900px screen) → {"x": 720, "y": 800, "confidence": 0.95} (NOT y=820 or y=860)
+- "blue folder icon" in description → {"x": 0, "y": 0, "confidence": 0.0} (desktop element, not app UI)
+- "sidebar project" but sidebar collapsed → {"x": 0, "y": 0, "confidence": 0.0} (not visible)
+- Wrong app visible → {"x": 0, "y": 0, "confidence": 0.0}
+
+Return ONLY valid JSON. No explanations. No markdown. No extra text.
+
+Required format:
 {
-  "x": <number>,
-  "y": <number>,
+  "x": <pixel number>,
+  "y": <pixel number>,
   "confidence": <0.0 to 1.0>
-}
-
-If the element is not found, return confidence 0.0 and estimate where it might be.`;
+}`;
 
   const completion = await openaiClient.chat.completions.create({
     model: 'gpt-4o',
@@ -1146,7 +1351,29 @@ If the element is not found, return confidence 0.0 and estimate where it might b
 
   const response = completion.choices[0]?.message?.content || '';
   const cleaned = response.replace(/```(?:json)?\n?/g, '').trim();
+  
+  // Log raw response for debugging
+  logger.debug('OpenAI vision raw response', {
+    description,
+    rawResponse: response.substring(0, 500), // First 500 chars
+    cleanedResponse: cleaned.substring(0, 500),
+  });
+  
   const result = JSON.parse(cleaned);
+  
+  // Enhanced logging for (0,0) coordinates
+  if (result.x === 0 && result.y === 0) {
+    logger.warn('⚠️ OpenAI Vision returned (0,0) coordinates', {
+      description,
+      role,
+      confidence: result.confidence,
+      rawResponse: response.substring(0, 1000), // More context for debugging
+      screenInfo,
+      interpretation: result.confidence === 0 
+        ? 'Element not found or wrong context (expected behavior)'
+        : 'Possible bug - high confidence but (0,0) coordinates',
+    });
+  }
 
   return {
     coordinates: { x: result.x, y: result.y },
@@ -1363,26 +1590,82 @@ Return a JSON object:
 async function locateWithGrok(
   screenshot: { base64: string; mimeType: string },
   description: string,
-  role?: string
+  role?: string,
+  screenInfo?: { width: number; height: number; scaleFactor: number }
 ): Promise<{ coordinates: { x: number; y: number }; confidence: number }> {
   if (!grokClient) {
     throw new Error('Grok client not initialized');
   }
 
   const roleHint = role ? ` (a ${role} element)` : '';
-  const prompt = `You are a vision AI that locates UI elements in screenshots.
+  const screenDimensions = screenInfo 
+    ? `\n\n**SCREEN DIMENSIONS (CRITICAL):**\n- Screen width: ${screenInfo.width}px\n- Screen height: ${screenInfo.height}px\n- Scale factor: ${screenInfo.scaleFactor}x\n- Screenshot dimensions: ${screenInfo.width}x${screenInfo.height}\n- Coordinate space: (0,0) to (${screenInfo.width}, ${screenInfo.height})`
+    : '';
+  
+  const prompt = `You are a precise UI element locator. Find the EXACT pixel coordinates of: "${description}"${roleHint}${screenDimensions}
 
-Find the element: "${description}"${roleHint}
+**CRITICAL - UI CONTEXT AWARENESS:**
 
-Analyze the screenshot and return ONLY a JSON object with the pixel coordinates of the element's center:
+The screenshot may show EITHER:
+A) **Full Desktop View** - Multiple UI layers visible:
+   1. Desktop Background (wallpaper)
+   2. Desktop Folders/Icons (typically right side - blue/colored folder icons)
+   3. OS Menu Bar (top - system menu)
+   4. Dock/Taskbar (bottom/side - app launcher)
+   5. Application Window (browser, app - contains the interface)
+   6. Web/App Interface (INSIDE the window)
 
+B) **Fullscreen Application** - Single app fills entire screen:
+   - No desktop folders/icons visible
+   - No OS menu bar or dock visible
+   - Application UI fills the entire screenshot
+   - Examples: Slack fullscreen, Chrome fullscreen, VS Code fullscreen
+
+**CRITICAL DISTINCTION - Desktop Files vs Application Content:**
+- **Desktop folders/files** = OS-level icons (blue/colored folder icons on desktop background)
+- **Application content** = UI elements INSIDE the application (buttons, sidebars, panels, text)
+- **NEVER confuse desktop folders with application UI elements**
+- If description mentions "sidebar", "panel", "project", "conversation" → Look for UI elements INSIDE the application
+- If description mentions "blue folder icon" or "desktop folder" → Check if it's a desktop file (return confidence 0.0) or app UI element
+
+**PIXEL-ACCURATE COORDINATE SYSTEM:**
+- **CRITICAL**: The screenshot has EXACT dimensions (see above)
+- Coordinates are in PIXELS relative to the screenshot image
+- (0, 0) = top-left corner of the screenshot
+- (${screenInfo?.width || 'width'}, ${screenInfo?.height || 'height'}) = bottom-right corner
+- Return the CENTER POINT of the element (where a mouse click would land)
+- **Precision matters** - your coordinates will be used for mouse clicks
+
+**CONTEXT VALIDATION (MUST DO FIRST):**
+1. Identify what application/website is visible in the screenshot
+2. Check if the target element matches the visible context
+3. Distinguish between desktop UI and application UI
+4. Return confidence 0.0 if:
+   - Wrong application/website is visible
+   - Description references desktop folders but should be app UI
+   - Element not visible or doesn't exist
+   - Context doesn't match expected application
+
+**CONFIDENCE LEVELS:**
+- 0.9-1.0: Element clearly visible, correct context, precise location
+- 0.7-0.8: Element visible but slightly uncertain about exact position
+- 0.4-0.6: Element might be there but uncertain
+- 0.0-0.3: Element not found, wrong context, or desktop folder confusion
+
+**EXAMPLES:**
+- "hamburger menu in app" + app visible → {"x": 50, "y": 120, "confidence": 0.95}
+- "blue folder icon" in description → {"x": 0, "y": 0, "confidence": 0.0} (desktop element, not app UI)
+- "sidebar project" but sidebar collapsed → {"x": 0, "y": 0, "confidence": 0.0} (not visible)
+- Wrong app visible → {"x": 0, "y": 0, "confidence": 0.0}
+
+Return ONLY valid JSON. No explanations. No markdown. No extra text.
+
+Required format:
 {
-  "x": <number>,
-  "y": <number>,
+  "x": <pixel number>,
+  "y": <pixel number>,
   "confidence": <0.0 to 1.0>
-}
-
-If the element is not found, return confidence 0.0 and estimate where it might be.`;
+}`;
 
   const completion = await grokClient.chat.completions.create({
     model: 'grok-vision-beta', // Grok's vision model
@@ -1410,7 +1693,29 @@ If the element is not found, return confidence 0.0 and estimate where it might b
 
   const response = completion.choices[0]?.message?.content || '';
   const cleaned = response.replace(/```(?:json)?\n?/g, '').trim();
+  
+  // Log raw response for debugging
+  logger.debug('Grok vision raw response', {
+    description,
+    rawResponse: response.substring(0, 500),
+    cleanedResponse: cleaned.substring(0, 500),
+  });
+  
   const result = JSON.parse(cleaned);
+  
+  // Enhanced logging for (0,0) coordinates
+  if (result.x === 0 && result.y === 0) {
+    logger.warn('⚠️ Grok Vision returned (0,0) coordinates', {
+      description,
+      role,
+      confidence: result.confidence,
+      rawResponse: response.substring(0, 1000),
+      screenInfo,
+      interpretation: result.confidence === 0 
+        ? 'Element not found or wrong context (expected behavior)'
+        : 'Possible bug - high confidence but (0,0) coordinates',
+    });
+  }
 
   return {
     coordinates: { x: result.x, y: result.y },

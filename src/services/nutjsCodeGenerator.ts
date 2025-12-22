@@ -96,6 +96,73 @@ export class NutjsCodeGenerator {
   }
 
   /**
+   * Extracts JSON from LLM response, handling various formats and fixing common syntax errors:
+   * - Plain JSON
+   * - JSON in markdown code blocks
+   * - JSON with surrounding text
+   * - Trailing commas
+   * - Missing commas
+   */
+  private extractJsonFromResponse(response: string): any {
+    let cleaned = response.trim();
+    
+    // Remove markdown code blocks
+    cleaned = cleaned.replace(/```(?:json)?\n?/g, '').trim();
+    
+    // Try to parse as-is first
+    try {
+      return JSON.parse(cleaned);
+    } catch (firstError) {
+      // If that fails, try to find JSON object in the text
+      // Look for { ... } pattern
+      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        let jsonStr = jsonMatch[0];
+        
+        // Fix common JSON syntax errors
+        // 1. Remove trailing commas before closing braces/brackets
+        jsonStr = jsonStr.replace(/,(\s*[}\]])/g, '$1');
+        
+        // 2. Fix missing commas between properties (heuristic: newline between } and ")
+        jsonStr = jsonStr.replace(/\}(\s*)"(\w+)":/g, '},$1"$2":');
+        jsonStr = jsonStr.replace(/\](\s*)"(\w+)":/g, '],$1"$2":');
+        
+        // 3. Fix missing commas in arrays (heuristic: newline between } and {)
+        jsonStr = jsonStr.replace(/\}(\s*)\{/g, '},$1{');
+        
+        try {
+          return JSON.parse(jsonStr);
+        } catch (secondError) {
+          // If still fails, try to find the last complete JSON object
+          const lastBraceIndex = jsonStr.lastIndexOf('}');
+          if (lastBraceIndex !== -1) {
+            const firstBraceIndex = jsonStr.indexOf('{');
+            if (firstBraceIndex !== -1 && firstBraceIndex < lastBraceIndex) {
+              const truncatedJson = jsonStr.substring(firstBraceIndex, lastBraceIndex + 1);
+              
+              // Apply fixes again to truncated JSON
+              let fixedJson = truncatedJson.replace(/,(\s*[}\]])/g, '$1');
+              fixedJson = fixedJson.replace(/\}(\s*)"(\w+)":/g, '},$1"$2":');
+              fixedJson = fixedJson.replace(/\](\s*)"(\w+)":/g, '],$1"$2":');
+              fixedJson = fixedJson.replace(/\}(\s*)\{/g, '},$1{');
+              
+              try {
+                return JSON.parse(fixedJson);
+              } catch (thirdError) {
+                // Log all errors for debugging
+                throw new Error(`Failed to parse JSON after multiple attempts. Original: ${firstError}. After fixes: ${secondError}. After truncation: ${thirdError}`);
+              }
+            }
+          }
+        }
+      }
+      
+      // If all else fails, throw the original error
+      throw new Error(`Failed to extract JSON from response: ${response.substring(0, 200)}...`);
+    }
+  }
+
+  /**
    * Build the specialized prompt for Nut.js code generation
    * Enhanced with vision context when screenshot is provided
    */
@@ -1330,21 +1397,36 @@ Now generate the code for: ${command}`;
   /**
    * Build context-aware prompt for automation plan generation
    * Supports replanning with feedback and multi-modal context
+   * 
+   * REFACTORED VERSION - Addresses expert feedback:
+   * - Strict schema alignment with TypeScript types
+   * - No markdown fences (prevents model mirroring)
+   * - Deterministic delimiters for user input
+   * - Single source of truth for enums
+   * - Conditional openUrl based on domain match
+   * - 272 lines vs 800+ (66% reduction)
    */
   private buildContextAwarePlanPrompt(request: AutomationPlanRequest): string {
-    const os = process.platform === 'darwin' ? 'darwin' : 'win32';
+    // Single source of truth for OS
+    const os = request.context?.os || (process.platform === 'darwin' ? 'darwin' : 'win32');
     const isReplan = !!request.previousPlan || !!request.feedback;
+    
+    // Deterministic delimiters for user input (prevents injection)
+    const userCommand = `<<USER_COMMAND>>\n${request.command}\n<</USER_COMMAND>>`;
+    
+    // Check if we need to navigate (domain mismatch)
+    let navigationGuidance = '';
+    if (request.context?.activeUrl) {
+      navigationGuidance = `\n- Current URL: ${request.context.activeUrl}`;
+      navigationGuidance += `\n- Navigation Rule: If target domain matches current URL domain, skip openUrl. Otherwise, use openUrl to navigate.`;
+    }
     
     // Build context section
     let contextSection = '';
     if (request.context) {
-      contextSection = `\n**CURRENT CONTEXT:**`;
+      contextSection = '\n\n=== CONTEXT ===';
       if (request.context.screenshot) {
-        contextSection += `\n- Screenshot: Provided (Base64 image)`;
-        contextSection += `\n  * **CRITICAL**: Analyze the screenshot to understand current UI state`;
-        contextSection += `\n  * Use vision to find element coordinates (X, Y positions)`;
-        contextSection += `\n  * Generate locators based on what you SEE in the image`;
-        contextSection += `\n  * Describe elements visually (e.g., "blue Send button in bottom right")`;
+        contextSection += '\n- Screenshot: Available (analyze for UI state)';
       }
       if (request.context.activeApp) {
         contextSection += `\n- Active App: ${request.context.activeApp}`;
@@ -1352,650 +1434,236 @@ Now generate the code for: ${command}`;
       if (request.context.activeUrl) {
         contextSection += `\n- Active URL: ${request.context.activeUrl}`;
       }
-      if (request.context.os) {
-        contextSection += `\n- Operating System: ${request.context.os}`;
-      }
+      contextSection += `\n- OS: ${os}`;
       if (request.context.screenIntel) {
-        contextSection += `\n- OCR Data: Available (supplementary text data)`;
+        contextSection += '\n- OCR Data: Available';
       }
     }
     
-    // Add clarification answers if provided
+    // Clarification answers (if provided)
+    let clarificationSection = '';
     if (request.clarificationAnswers && Object.keys(request.clarificationAnswers).length > 0) {
-      contextSection += `\n\n**CLARIFICATION ANSWERS PROVIDED:**`;
-      for (const [questionId, answer] of Object.entries(request.clarificationAnswers)) {
-        contextSection += `\n- ${questionId}: ${answer}`;
+      clarificationSection = '\n\n=== CLARIFICATION ANSWERS ===';
+      for (const [qid, answer] of Object.entries(request.clarificationAnswers)) {
+        clarificationSection += `\n- ${qid}: ${answer}`;
       }
-      contextSection += `\n\n**IMPORTANT**: Use these clarification answers to resolve any ambiguity in the command.`;
+      clarificationSection += '\nUse these answers to resolve ambiguity.';
     }
-
-    // Build feedback section for replanning
-    let feedbackSection = '';
+    
+    // Replan section
+    let replanSection = '';
     if (isReplan) {
-      feedbackSection = `\n\n**REPLANNING MODE:**`;
+      replanSection = '\n\n=== REPLANNING MODE ===';
       if (request.feedback) {
-        feedbackSection += `\n- Reason: ${request.feedback.reason}`;
-        feedbackSection += `\n- Feedback: ${request.feedback.message}`;
+        const feedbackMsg = `<<FEEDBACK>>\n${request.feedback.message}\n<</FEEDBACK>>`;
+        replanSection += `\n- Reason: ${request.feedback.reason}`;
+        replanSection += `\n- Feedback: ${feedbackMsg}`;
         if (request.feedback.stepId) {
-          feedbackSection += `\n- Failed Step: ${request.feedback.stepId}`;
+          replanSection += `\n- Failed Step: ${request.feedback.stepId}`;
         }
       }
       if (request.previousPlan) {
-        feedbackSection += `\n- Previous Plan Version: ${request.previousPlan.version || 1}`;
-        feedbackSection += `\n- Previous Steps Count: ${request.previousPlan.steps.length}`;
-        feedbackSection += `\n\n**INSTRUCTIONS FOR REPLANNING:**`;
-        feedbackSection += `\n- Analyze what went wrong in the previous plan`;
-        feedbackSection += `\n- Adapt the strategy based on user feedback`;
-        feedbackSection += `\n- Remove or modify steps that failed`;
-        feedbackSection += `\n- Consider adding clarifying questions if needed`;
-        feedbackSection += `\n- Increment version number to ${(request.previousPlan.version || 1) + 1}`;
+        replanSection += `\n- Previous Version: ${request.previousPlan.version || 1}`;
+        replanSection += `\n- Increment to: ${(request.previousPlan.version || 1) + 1}`;
+        replanSection += '\n- Analyze failure, adapt strategy, modify/remove failed steps';
       }
     }
 
-    return `You are an expert automation planner with multi-modal context awareness.
+    return `You are an automation planner. Generate a structured JSON plan.
 
-**USER COMMAND:** "${request.command}"${contextSection}${feedbackSection}
+${userCommand}${contextSection}${clarificationSection}${replanSection}
 
-**YOUR TASK:** Generate a detailed, context-aware automation plan as a JSON object.
+=== CONTRACT ===
 
-**CRITICAL RULES:**
-1. Return ONLY valid JSON - no markdown, no explanations, no code fences
-2. Use LOW-LEVEL steps for debuggability and cross-app compatibility
-3. Each step must have a discriminated \`kind\` union (not arbitrary code)
-4. Target OS: ${os} (darwin = macOS, win32 = Windows)
-5. If context shows the app is already open, skip opening steps
-6. Use screen intelligence data to find elements accurately
-7. Include retry policies and error handlers for resilience
-8. Add clarifying questions if command is ambiguous
+OUTPUT FORMAT: Return ONLY valid JSON. No markdown. No explanations. No code fences.
 
-**STEP KINDS:**
+SCHEMA:
+- Plan fields: goal (string), steps (array), retryPolicy (object), questions (array), version (number)
+- Step fields: id (string), kind (object), description (string), status (string), retry (object), onError (object), dependsOn (array)
+- Step.kind MUST have: type (enum) + type-specific fields
+- Step.id MUST be unique and match pattern: step_N
+- Step.dependsOn MUST reference existing step IDs only
 
-**UI Primitives (NutJS "hands + eyes" - use for browser/app automation):**
-- \`{ "type": "focusApp", "appName": "Google Chrome" }\`
-- \`{ "type": "openUrl", "url": "https://..." }\`
-- \`{ "type": "findAndClick", "locator": { "strategy": "vision", "description": "blue Send button in bottom right" }, "timeoutMs": 5000 }\`
-- \`{ "type": "waitForElement", "locator": { "strategy": "vision", "description": "chat input field" }, "timeoutMs": 5000 }\`
-- \`{ "type": "movePointer", "target": { "strategy": "vision", "description": "the Compose button" } }\`
-- \`{ "type": "click", "button": "left", "clickCount": 1 }\`
-- \`{ "type": "typeText", "text": "Hello", "submit": false }\`
-- \`{ "type": "pressKey", "key": "Enter", "modifiers": ["Cmd"] }\`
-- \`{ "type": "pause", "ms": 2000 }\`
-- \`{ "type": "screenshot", "tag": "after_login", "analyzeWithVision": true }\`
+ENUMS (single source of truth):
+- kind.type: focusApp | openUrl | waitForElement | findAndClick | movePointer | click | typeText | pressKey | hotkey | scroll | pause | screenshot | apiAction | notifyUser | askUser | log | end
+- locator.strategy: vision | textMatch | contains | bbox (bbox ONLY if provided by vision service, never guess)
+- onError.strategy: fail_plan | skip_step | goto_step | ask_user | replan
+- log.level: info | warn | error
+- question.type: choice | freeform
+- OS: ${os}
 
-**Domain Skills (API setup communication - NOT for execution):**
-- \`{ "type": "apiAction", "skill": "setup.homeAssistant", "params": { "action": "create_token", "service": "Home Assistant" } }\`
-- \`{ "type": "apiAction", "skill": "setup.slack", "params": { "action": "create_oauth_app", "scopes": ["chat:write"] } }\`
-- \`{ "type": "apiAction", "skill": "setup.calendar", "params": { "action": "authorize_google", "scopes": ["calendar"] } }\`
-- \`{ "type": "apiAction", "skill": "setup.n8n", "params": { "action": "get_api_key", "baseUrl": "http://localhost:5678" } }\`
-- \`{ "type": "apiAction", "skill": "notify.user", "params": { "message": "Home Assistant token copied! MCP will register skill." } }\`
+=== DECISION RULES ===
 
-**When to use apiAction:**
-- **ONLY for communicating setup completion to MCP**
-- After NutJS automation helps user set up an integration
-- To notify user that a skill is now available
-- **NOT for executing the actual task** (MCP handles that)
+NAVIGATION:
+- Web task + activeUrl matches target domain → Skip openUrl, use focusApp
+- Web task + activeUrl mismatch or missing → Use openUrl first
+- Desktop app task → Use focusApp${navigationGuidance}
 
-**Skill Setup Pattern:**
-1. User asks: "Turn on my lights"
-2. You generate NutJS plan to:
-   - Navigate to Home Assistant settings
-   - Create API token
-   - Copy to clipboard
-3. Add apiAction step: \`{ "type": "apiAction", "skill": "notify.user", "params": { "message": "Home Assistant ready! Say 'turn on lights' anytime." } }\`
-4. MCP registers homeAssistant.turnOn in DuckDB
-5. Next time user says "turn on lights" → MCP executes directly (no backend needed)
+ERROR STRATEGY:
+- Login/CAPTCHA/Permissions/Payment → ask_user (never replan)
+- UI layout change/Element not found → replan
+- Impossible task → fail_plan
 
-**Control Flow:**
-- \`{ "type": "askUser", "questionId": "q1" }\`
-- \`{ "type": "log", "level": "info", "message": "Starting..." }\`
-- \`{ "type": "end", "reason": "completed" }\`
+UI STATE CHANGES:
+- After clicking toggles/buttons that change UI → Add pause (1000-1500ms) + waitForElement to verify
+- Never assume success without verification
 
-**VISION LOCATOR STRATEGIES:**
-- \`"vision"\` - Use LLM vision to find element by natural language description
-  * Example: \`{ "strategy": "vision", "description": "the blue Send button in the bottom right corner" }\`
-  * Example: \`{ "strategy": "vision", "description": "the text input field with placeholder 'Send a message'" }\`
-  * **PREFERRED**: Use this when screenshot is available
-- \`"textMatch"\` - Exact text match (fallback when no screenshot)
-- \`"contains"\` - Partial text match (fallback when no screenshot)
-- \`"bbox"\` - Normalized coordinates [x, y, width, height] (when you know exact position)
+LOCATORS:
+- Prefer: locator.strategy = "vision" with description
+- Never invent bbox coordinates
+- bbox only allowed if provided by vision service output
 
-**ERROR HANDLERS:**
-- \`{ "strategy": "fail_plan", "message": "Critical step failed" }\`
-- \`{ "strategy": "skip_step", "message": "Optional step" }\`
-- \`{ "strategy": "goto_step", "stepId": "step_5" }\`
-- \`{ "strategy": "ask_user", "questionId": "q1", "message": "Need clarification" }\`
-- \`{ "strategy": "replan", "reason": "Unexpected UI state" }\`
+=== STEP PRIMITIVES ===
 
-**JSON STRUCTURE:**
-\`\`\`json
+Each step has: { id, kind, description, status: "pending", retry?, onError?, dependsOn? }
+
+kind.type options:
+
+1. focusApp - Switch to desktop app
+   Example: { "type": "focusApp", "appName": "Google Chrome" }
+
+2. openUrl - Navigate to URL (required for web tasks unless domain matches)
+   Example: { "type": "openUrl", "url": "https://chat.openai.com" }
+
+3. findAndClick - Vision-based click
+   Example: { "type": "findAndClick", "locator": { "strategy": "vision", "description": "blue Send button in bottom right" }, "timeoutMs": 5000 }
+
+4. waitForElement - Wait for element to appear
+   Example: { "type": "waitForElement", "locator": { "strategy": "vision", "description": "expanded sidebar" }, "timeoutMs": 3000 }
+
+5. click - Click at current pointer position
+   Example: { "type": "click", "x": 100, "y": 200 }
+
+6. typeText - Type literal text (NOT for shortcuts)
+   Example: { "type": "typeText", "text": "Hello world", "submit": false }
+
+7. pressKey - Keyboard shortcuts and special keys
+   Example: { "type": "pressKey", "key": "A", "modifiers": ["Cmd"] }
+   Example: { "type": "pressKey", "key": "Enter" }
+
+8. scroll - Scroll in direction
+   Example: { "type": "scroll", "direction": "down", "amount": 300 }
+
+9. pause - Wait milliseconds
+   Example: { "type": "pause", "ms": 1500 }
+
+10. screenshot - Capture screen
+    Example: { "type": "screenshot", "tag": "verify_state" }
+
+11. log - Log message
+    Example: { "type": "log", "level": "info", "message": "Starting task" }
+
+12. end - End execution
+    Example: { "type": "end", "reason": "completed" }
+
+CRITICAL: typeText vs pressKey
+- typeText: Literal text only (messages, filenames, search queries)
+- pressKey: Keyboard shortcuts (Cmd+A, Cmd+C, Enter, Tab, etc.)
+- WRONG: { "type": "typeText", "text": "Cmd+A" } → Types "C-m-d-+-A" literally
+- CORRECT: { "type": "pressKey", "key": "A", "modifiers": ["Cmd"] } → Selects all
+
+Modifiers: "Cmd" (macOS), "Ctrl" (Windows/Linux), "Shift", "Alt", "Option"
+
+=== EXAMPLE ===
+
+Task: "Open ChatGPT and send a message"
+
+EXAMPLE_START
 {
-  "goal": "Brief summary of what this plan accomplishes",
+  "goal": "Open ChatGPT and send a message",
+  "version": 1,
   "steps": [
     {
       "id": "step_1",
-      "kind": { "type": "focusApp", "appName": "Google Chrome" },
-      "description": "Focus the browser",
-      "status": "pending",
-      "retry": { "maxAttempts": 2, "delayMs": 1000 },
-      "onError": { "strategy": "fail_plan", "message": "Cannot focus browser" }
-    },
-    {
-      "id": "step_2",
       "kind": { "type": "openUrl", "url": "https://chat.openai.com" },
       "description": "Navigate to ChatGPT",
       "status": "pending",
-      "dependsOn": ["step_1"],
-      "retry": { "maxAttempts": 3, "delayMs": 2000 },
-      "onError": { "strategy": "replan", "reason": "URL navigation failed" }
+      "retry": { "maxAttempts": 2, "delayMs": 2000 },
+      "onError": { "strategy": "fail_plan", "message": "Cannot reach ChatGPT" }
+    },
+    {
+      "id": "step_2",
+      "kind": { "type": "pause", "ms": 2000 },
+      "description": "Wait for page load",
+      "status": "pending"
     },
     {
       "id": "step_3",
       "kind": {
         "type": "waitForElement",
-        "locator": { "strategy": "vision", "description": "the chat input field at the bottom of the page" },
+        "locator": { "strategy": "vision", "description": "chat input field at bottom" },
         "timeoutMs": 10000
       },
-      "description": "Wait for chat interface to load",
+      "description": "Wait for chat interface",
       "status": "pending",
       "retry": { "maxAttempts": 2, "delayMs": 3000 },
-      "onError": { "strategy": "ask_user", "questionId": "q1", "message": "ChatGPT not loading" }
+      "onError": { "strategy": "ask_user", "questionId": "q1", "message": "ChatGPT not loading. Please log in if needed and click Retry." }
+    },
+    {
+      "id": "step_4",
+      "kind": {
+        "type": "findAndClick",
+        "locator": { "strategy": "vision", "description": "chat input field" },
+        "timeoutMs": 5000
+      },
+      "description": "Click input field",
+      "status": "pending",
+      "retry": { "maxAttempts": 2, "delayMs": 1000 },
+      "onError": { "strategy": "skip_step" }
+    },
+    {
+      "id": "step_5",
+      "kind": { "type": "typeText", "text": "Hello, how are you?", "submit": true },
+      "description": "Type and send message",
+      "status": "pending",
+      "retry": { "maxAttempts": 1 },
+      "onError": { "strategy": "replan", "reason": "Failed to send message" }
     }
   ],
   "retryPolicy": { "maxGlobalRetries": 2 },
   "questions": [
     {
       "id": "q1",
-      "text": "ChatGPT is not loading. Would you like to try a different browser?",
-      "type": "choice",
-      "choices": ["Yes, try Safari", "No, retry Chrome", "Cancel automation"],
-      "required": true
+      "text": "ChatGPT is not loading. Please log in if needed and click Retry.",
+      "type": "freeform",
+      "required": false
     }
   ]
 }
-\`\`\`
+EXAMPLE_END
 
-**EXAMPLE: "Generate Mickey Mouse images in ChatGPT, Grok and Perplexity"**
-\`\`\`json
-{
-  "goal": "Generate Mickey Mouse images using 3 AI platforms",
-  "steps": [
-    {
-      "id": "step_1",
-      "kind": { "type": "focusApp", "appName": "Google Chrome" },
-      "description": "Focus browser",
-      "status": "pending",
-      "retry": { "maxAttempts": 2, "delayMs": 1000 },
-      "onError": { "strategy": "fail_plan" }
-    },
-    {
-      "id": "step_2",
-      "kind": { "type": "openUrl", "url": "https://chat.openai.com" },
-      "description": "Navigate to ChatGPT",
-      "status": "pending",
-      "retry": { "maxAttempts": 2, "delayMs": 2000 },
-      "onError": { "strategy": "replan", "reason": "ChatGPT unreachable" }
-    },
-    {
-      "id": "step_3",
-      "kind": {
-        "type": "findAndClick",
-        "locator": { "strategy": "vision", "description": "the chat input field at the bottom" },
-        "timeoutMs": 10000
-      },
-      "description": "Click into chat input field",
-      "status": "pending",
-      "retry": { "maxAttempts": 2 },
-      "onError": { "strategy": "skip_step" }
-    },
-    {
-      "id": "step_4",
-      "kind": { "type": "typeText", "text": "Generate an image of Mickey Mouse", "submit": true },
-      "description": "Type and send prompt to ChatGPT",
-      "status": "pending",
-      "retry": { "maxAttempts": 1 },
-      "onError": { "strategy": "replan", "reason": "Failed to send prompt" }
-    },
-    {
-      "id": "step_5",
-      "kind": { "type": "pause", "ms": 5000 },
-      "description": "Wait for image generation",
-      "status": "pending"
-    },
-    {
-      "id": "step_6",
-      "kind": { "type": "screenshot", "tag": "chatgpt_result", "analyzeWithVision": true },
-      "description": "Capture ChatGPT result for verification",
-      "status": "pending"
-    },
-    {
-      "id": "step_7",
-      "kind": { "type": "openUrl", "url": "https://grok.x.ai" },
-      "description": "Navigate to Grok",
-      "status": "pending",
-      "retry": { "maxAttempts": 2 },
-      "onError": { "strategy": "replan", "reason": "Grok unreachable" }
-    }
-  ],
-  "retryPolicy": { "maxGlobalRetries": 1 },
-  "questions": []
-}
-\`\`\`
+=== VERIFICATION PATTERN ===
 
-**IMPORTANT NOTES:**
+When opening panels/sidebars/dialogs (UI state changes):
 
-**CRITICAL: HANDLING AMBIGUOUS QUERIES**
-
-**YOU MUST ASK FOR CLARIFICATION** when the user's request contains ANY of these red flags:
-
-🚨 **MANDATORY CLARIFICATION TRIGGERS:**
-1. **Vague references**: "that project", "the thing", "something like", "I think"
-2. **Missing specifics**: Which file? Which chapter? Which app? Which project?
-3. **Unclear workflow**: Multiple steps but unclear order or dependencies
-4. **Ambiguous targets**: "my project" (which one?), "the document" (which document?)
-5. **Incomplete information**: Copy from where to where? Process which data?
-
-**DO NOT MAKE ASSUMPTIONS. DO NOT GUESS. ASK QUESTIONS INSTEAD.**
-
-**Example 1: MUST ask for clarification**
-User: "I have a project called I think bible study or something. Can you process that?"
-❌ WRONG: Generate a plan that searches for projects
-✅ CORRECT: Return clarification questions:
-
-\`\`\`json
-{
-  "needsClarification": true,
-  "clarificationQuestions": [
-    {
-      "id": "q1",
-      "text": "What is the exact name of your project?",
-      "type": "freeform",
-      "required": true
-    },
-    {
-      "id": "q2",
-      "text": "Where is this project located?",
-      "type": "choice",
-      "choices": ["ChatGPT", "Google Docs", "Notion", "Local files", "Other"],
-      "required": true
-    },
-    {
-      "id": "q3",
-      "text": "What would you like me to do with this project?",
-      "type": "freeform",
-      "required": true
-    }
-  ],
-  "partialContext": {
-    "intent": "multi_step_workflow",
-    "extractedInfo": {
-      "projectName": "bible study (approximate)",
-      "action": "process"
-    }
-  }
-}
-\`\`\`
-
-**Example 2: Clear query - NO clarification needed**
-User: "Generate an image of Mickey Mouse in ChatGPT"
-✅ CORRECT: Generate plan directly (all info is clear)
-
-**RULE: If you can't execute the task with 100% certainty about what the user wants, ASK FOR CLARIFICATION.**
-
-**INTELLIGENT DECISION TREE (Analyze FIRST, then decide):**
-
-**Step 1: ANALYZE the task**
-- Is there a service/API that could handle this?
-- **Available Services & APIs:**
-  * **Home Automation**: Home Assistant (FREE, self-hosted), SmartThings, Philips Hue
-  * **Workflow Automation**: n8n (FREE, self-hosted), Zapier (PAID), IFTTT (FREE limited, Pro $3.99/mo), Make.com
-  * **Communication**: Slack (FREE), Discord, Microsoft Teams, Telegram
-  * **Calendar**: Google Calendar (FREE), Outlook Calendar (FREE), Apple Calendar
-  * **Email**: Gmail API (FREE), Outlook API (FREE), SendGrid (PAID)
-  * **Task Management**: Todoist, Notion, Trello, Asana
-  * **Smart Home**: Home Assistant, HomeKit, Google Home, Alexa
-  * **Car**: Tesla API, BMW ConnectedDrive (varies by manufacturer)
-  * **Weather**: OpenWeatherMap (FREE tier), Weather.gov (FREE)
-  * **Finance**: Plaid (PAID), Mint (deprecated), YNAB
-  * **Social Media**: Twitter API (PAID), Reddit API (FREE), Instagram (limited)
-  * **AI/LLM**: OpenAI API (PAID), Anthropic API (PAID), local LLMs (FREE)
-  * **No Public API**: ChatGPT web UI, Amazon shopping, most consumer web apps
-
-- **Examples:**
-  * "Turn on lights" → YES (Home Assistant API - FREE)
-  * "Send Slack message" → YES (Slack API - FREE)
-  * "Set calendar reminder" → YES (Google Calendar API - FREE)
-  * "Automate workflow" → YES (n8n - FREE, or Zapier - PAID)
-  * "Generate Mickey Mouse in ChatGPT" → NO (ChatGPT image gen has no public API)
-  * "Buy winter clothes on Amazon" → NO (Amazon automation not via API)
-
-**Step 2: IF API EXISTS → Check feasibility**
-- Is it free or does user already have access?
-  * Home Assistant (self-hosted) → FREE, guide setup
-  * Slack (user's workspace) → FREE, guide OAuth setup
-  * Google Calendar → FREE, guide OAuth setup
-  * n8n (self-hosted) → FREE, guide setup
-  * IFTTT Pro → PAID, inform user of cost, ask if they want to proceed
-  * Zapier → PAID (free tier limited), inform user, ask if they want to proceed
-
-**Step 3: DECIDE approach**
-1. **API skill setup (PREFERRED if free/accessible)**
-   → Generate NutJS plan to help user set up the integration
-   → Example: "Turn on lights" → Guide to Home Assistant token creation
-   → Add \`notifyUser\` step to inform MCP of new skill
-
-2. **UI automation (if no API or user declines paid service)**
-   → Use vision-based UI primitives
-   → Example: "Generate Mickey Mouse in ChatGPT" → Navigate UI, type prompt
-   → Example: "Buy on Amazon" → Navigate, search, add to cart
-
-3. **Inform + Guide (if paid service required)**
-   → Use \`askUser\` to inform about service and cost
-   → Example: "This requires IFTTT Pro ($3.99/mo). Proceed?"
-   → If yes → Guide setup, if no → Offer UI automation alternative
-
-4. **Guide mode (if impossible to automate)**
-   → Switch to \`command_guide\` intent
-   → Provide step-by-step instructions
-
-**THINKDROP AI'S ROLE:**
-- **You are an AI assistant that guides users to the right tools**
-- Help users discover and set up ecosystem tools (IFTTT, Zapier, n8n, Home Assistant, etc.)
-- Make users aware of costs, limitations, and alternatives
-- Empower non-technical users to build their own automation ecosystem
-
-**SETUP EXAMPLES:**
-
-**Example 1: "Turn on my lights" (FREE API - Home Assistant)**
-→ Analysis: Home Assistant API exists, free, self-hosted
-→ Decision: Guide setup (PREFERRED)
-→ Plan:
-  1. Open Home Assistant settings
-  2. Navigate to API tokens
-  3. Create new token
-  4. Copy token to clipboard
-  5. notifyUser: "Home Assistant ready! Say 'turn on lights' anytime."
-
-**Example 2: "Send Slack message" (FREE API - Slack OAuth)**
-→ Analysis: Slack API exists, free for user's workspace
-→ Decision: Guide setup (PREFERRED)
-→ Plan:
-  1. Open Slack API settings
-  2. Create OAuth app
-  3. Add chat:write scope
-  4. Copy bot token
-  5. notifyUser: "Slack ready! Send messages to any channel."
-
-**Example 3: "Automate my morning routine" (PAID - IFTTT Pro)**
-→ Analysis: IFTTT API exists, but requires Pro ($3.99/mo)
-→ Decision: Inform user, ask if they want to proceed
-→ Plan:
-  1. askUser: "This works best with IFTTT Pro ($3.99/mo). Alternatives: n8n (free, self-hosted). Proceed with IFTTT?"
-  2. If yes → Guide IFTTT setup
-  3. If no → Suggest n8n alternative or UI automation
-
-**Example 4: "Generate Mickey Mouse in ChatGPT" (NO API)**
-→ Analysis: ChatGPT image generation has no public API
-→ Decision: Use UI automation (ONLY option)
-→ Plan:
-  1. Open Chrome
-  2. Navigate to ChatGPT
-  3. Find input field (vision)
-  4. Type prompt
-  5. Wait for image generation
-
-**USE UI Primitives for:**
-- Browser-based tasks (Amazon, ChatGPT, web apps)
-- Visual tasks requiring screenshots (image generation, design review)
-- One-time tasks that don't need API setup
-
-**VISION-FIRST (for UI automation):**
-- When screenshot is provided, ALWAYS use \`strategy: "vision"\` with natural language descriptions
-- Think like a human looking at the screen - describe what you see visually
-- Vision service will return X,Y coordinates from your descriptions
-- Use \`findAndClick\` to combine finding and clicking in one step (more reliable)
-- Include \`screenshot\` steps when you need to verify results or get fresh context
-- **NEVER use fixed coordinates** - always use vision-based descriptions
-
-**VISION SPEED MODES (for screenshot steps):**
-- Add \`speedMode\` field to screenshot steps to control analysis speed/accuracy trade-off
-- \`speedMode: "fast"\` - ~1-1.5s, minimal tokens (300), use for quick checks, error detection
-- \`speedMode: "balanced"\` - ~1.7-2s, moderate tokens (800), DEFAULT for most steps
-- \`speedMode: "accurate"\` - ~3-4s, max tokens (2000), use ONLY for critical OCR, precise text extraction
-- **GUIDELINES:**
-  * Use "fast" for: Checking if page loaded, detecting errors, verifying button exists
-  * Use "balanced" for: General screen analysis, UI state verification, most automation steps (DEFAULT)
-  * Use "accurate" for: Reading important text precisely, extracting data, critical decisions
-- Example: \`{ "type": "screenshot", "tag": "verify_loaded", "analyzeWithVision": true, "speedMode": "fast" }\`
-
-**ERROR HANDLING:**
-- Set appropriate \`onError\` strategies (replan for critical failures, skip for optional steps)
-- Add proactive \`questions\` if command is ambiguous
-- For replanning: analyze previous failure and adapt strategy
-
-**VISION DESCRIPTION EXAMPLES:**
-- Good: "the blue Send button in the bottom right corner"
-- Good: "the text input field with gray placeholder text"
-- Good: "the Compose button with a pencil icon in the top left"
-- Bad: "Send button" (too vague)
-- Bad: "button at coordinates 100, 200" (don't hardcode coordinates)
-
-Now generate the JSON plan for the user's command. Return ONLY the JSON object, no other text.`;
-  }
-
-  /**
-   * Build prompt for structured automation plan generation (LEGACY - kept for backward compatibility)
-   */
-  private buildStructuredPlanPrompt(command: string): string {
-    const os = process.platform === 'darwin' ? 'darwin' : 'win32';
-    
-    return `You are an expert at creating structured automation plans for desktop tasks.
-
-**USER COMMAND:** "${command}"
-
-**YOUR TASK:** Generate a detailed, step-by-step automation plan as a JSON object.
-
-**CRITICAL RULES:**
-1. Return ONLY valid JSON - no markdown, no explanations, no code fences
-2. Each step must have executable Nut.js code
-3. Use CommonJS require() syntax: const { keyboard, Key } = require('@nut-tree-fork/nut-js');
-4. Import vision service: const { findAndClick } = require('../src/services/visionSpatialService');
-5. Use vision AI (findAndClick) for ALL GUI interactions (buttons, links, fields)
-6. Use keyboard shortcuts ONLY for OS-level operations (Cmd+Space, Cmd+Tab, etc.)
-7. Include verification strategy for each step
-8. Provide alternative strategies (different labels, keyboard shortcuts)
-9. Target OS: ${os} (darwin = macOS, win32 = Windows)
-10. **DESKTOP vs WEB APP DETECTION**:
-    - If user says "desktop app", "calendar app", "mail app", "native app" → Open native macOS/Windows app (Calendar, Mail, etc.)
-    - If user says "gmail", "google calendar", "web", "online", or mentions a website → Use browser workflow
-    - For macOS Calendar: Open Spotlight → Type "Calendar" → Press Return
-    - For macOS Mail: Open Spotlight → Type "Mail" → Press Return
-11. **MANDATORY BROWSER WORKFLOW**: For web-based tasks ONLY (Gmail, Amazon, Slack, Google Calendar web):
-    - Step 1: Open Spotlight (Cmd+Space on Mac, Win key on Windows)
-    - Step 2: Type "Chrome" or "Safari" to launch browser
-    - Step 3: Press Return to open browser
-    - Step 4: Wait 2000ms for browser to open
-    - Step 5: Open new tab (Cmd+T/Ctrl+T)
-    - Step 6: Navigate to URL (Cmd+L, type URL, press Return)
-    - NEVER skip these steps - ALWAYS open browser first before any web navigation
-
-**JSON STRUCTURE:**
+PATTERN_START
 {
   "steps": [
     {
-      "id": 1,
-      "description": "Human-readable description",
-      "action": "click_button" | "fill_field" | "navigate_url" | "wait" | "press_key" | "open_app" | "focus_window",
-      "target": "Element label/text to find",
-      "role": "button" | "input" | "textbox" | "link" | "textarea",
-      "value": "Text to type (for fill_field)",
-      "url": "URL to navigate (for navigate_url)",
-      "code": "EXAMPLES:
-        - click_button: await findAndClick('Compose', 'button')
-        - fill_field: await findAndClick('Search', 'input'); await keyboard.type('search term here');
-        - press_key: await keyboard.pressKey(Key.Return); await keyboard.releaseKey(Key.Return);",
-      "verification": "compose_dialog_visible" | "element_visible" | "field_filled" | "button_enabled" | "none",
-      "alternativeLabel": "Alternative text to search for",
-      "alternativeRole": "Alternative role to try",
-      "keyboardShortcut": "await keyboard.type('c')",
-      "waitAfter": 2000,
-      "maxRetries": 3,
-      "verificationContext": {
-        "expectedText": "Text that should appear",
-        "shouldSeeElement": "Element that should be visible"
-      }
+      "id": "step_N",
+      "kind": { "type": "findAndClick", "locator": { "strategy": "vision", "description": "sidebar toggle button in top left" } },
+      "description": "Click to open sidebar",
+      "retry": { "maxAttempts": 3, "delayMs": 1000 }
+    },
+    {
+      "id": "step_N+1",
+      "kind": { "type": "pause", "ms": 1500 },
+      "description": "Wait for animation"
+    },
+    {
+      "id": "step_N+2",
+      "kind": { "type": "waitForElement", "locator": { "strategy": "vision", "description": "expanded sidebar with content visible" }, "timeoutMs": 3000 },
+      "description": "Verify sidebar opened",
+      "retry": { "maxAttempts": 1 }
     }
-  ],
-  "maxRetriesPerStep": 3,
-  "totalTimeout": 300000
+  ]
 }
+PATTERN_END
 
-**CRITICAL: For fill_field actions, ALWAYS include BOTH findAndClick() AND keyboard.type()!**
-
-**EXAMPLE FOR "Send email from Gmail about AI trends":**
-{
-  "steps": [
-    {
-      "id": 1,
-      "description": "Open Spotlight to launch browser",
-      "action": "press_key",
-      "code": "const isMac = process.platform === 'darwin'; if (isMac) { await keyboard.pressKey(Key.LeftSuper, Key.Space); await keyboard.releaseKey(Key.LeftSuper, Key.Space); } else { await keyboard.pressKey(Key.LeftWin); await keyboard.releaseKey(Key.LeftWin); }",
-      "verification": "none",
-      "waitAfter": 500,
-      "maxRetries": 1
-    },
-    {
-      "id": 2,
-      "description": "Type Chrome to open browser",
-      "action": "fill_field",
-      "value": "Chrome",
-      "code": "await keyboard.type('Chrome');",
-      "verification": "none",
-      "waitAfter": 500,
-      "maxRetries": 1
-    },
-    {
-      "id": 3,
-      "description": "Press Return to launch Chrome",
-      "action": "press_key",
-      "code": "await keyboard.pressKey(Key.Return); await keyboard.releaseKey(Key.Return);",
-      "verification": "none",
-      "waitAfter": 2000,
-      "maxRetries": 1
-    },
-    {
-      "id": 4,
-      "description": "Open new browser tab",
-      "action": "press_key",
-      "code": "const isMac = process.platform === 'darwin'; if (isMac) { await keyboard.pressKey(Key.LeftSuper, Key.T); await keyboard.releaseKey(Key.LeftSuper, Key.T); } else { await keyboard.pressKey(Key.LeftControl, Key.T); await keyboard.releaseKey(Key.LeftControl, Key.T); }",
-      "verification": "none",
-      "waitAfter": 1000,
-      "maxRetries": 1
-    },
-    {
-      "id": 5,
-      "description": "Navigate to Gmail",
-      "action": "navigate_url",
-      "url": "https://mail.google.com",
-      "code": "const isMac = process.platform === 'darwin'; if (isMac) { await keyboard.pressKey(Key.LeftSuper, Key.L); await keyboard.releaseKey(Key.LeftSuper, Key.L); } else { await keyboard.pressKey(Key.LeftControl, Key.L); await keyboard.releaseKey(Key.LeftControl, Key.L); } await new Promise(resolve => setTimeout(resolve, 500)); await keyboard.type('https://mail.google.com'); await keyboard.pressKey(Key.Return); await keyboard.releaseKey(Key.Return);",
-      "verification": "element_visible",
-      "verificationContext": {
-        "shouldSeeElement": "Compose"
-      },
-      "waitAfter": 3000,
-      "maxRetries": 2
-    },
-    {
-      "id": 6,
-      "description": "Click Compose button",
-      "action": "click_button",
-      "target": "Compose",
-      "role": "button",
-      "code": "const { findAndClick } = require('../src/services/visionSpatialService'); const composePromise = findAndClick('Compose', 'button'); const composeTimeout = new Promise((resolve) => setTimeout(() => resolve(false), 60000)); const composeSuccess = await Promise.race([composePromise, composeTimeout]); if (!composeSuccess) { const isMac = process.platform === 'darwin'; if (isMac) { await keyboard.type('g'); await new Promise(resolve => setTimeout(resolve, 200)); await keyboard.type('c'); } else { await keyboard.type('c'); } }",
-      "verification": "compose_dialog_visible",
-      "alternativeLabel": "New message",
-      "keyboardShortcut": "await keyboard.type('c')",
-      "waitAfter": 2000,
-      "maxRetries": 3
-    },
-    {
-      "id": 7,
-      "description": "Focus To field and enter recipient",
-      "action": "fill_field",
-      "target": "To",
-      "value": "EXTRACT_FROM_COMMAND",
-      "code": "await keyboard.pressKey(Key.Tab); await keyboard.releaseKey(Key.Tab); await new Promise(resolve => setTimeout(resolve, 300)); await keyboard.pressKey(Key.Tab); await keyboard.releaseKey(Key.Tab); await new Promise(resolve => setTimeout(resolve, 300)); await keyboard.type('recipient@example.com'); await keyboard.pressKey(Key.Return); await keyboard.releaseKey(Key.Return);",
-      "verification": "recipient_added",
-      "waitAfter": 500,
-      "maxRetries": 2
-    },
-    {
-      "id": 8,
-      "description": "Enter subject",
-      "action": "fill_field",
-      "target": "Subject",
-      "value": "EXTRACT_FROM_COMMAND",
-      "code": "await keyboard.type('Latest AI Trends'); await new Promise(resolve => setTimeout(resolve, 500));",
-      "verification": "field_filled",
-      "waitAfter": 500,
-      "maxRetries": 2
-    },
-    {
-      "id": 9,
-      "description": "Enter email body",
-      "action": "fill_field",
-      "target": "Body",
-      "value": "EXTRACT_FROM_COMMAND",
-      "code": "await keyboard.pressKey(Key.Tab); await keyboard.releaseKey(Key.Tab); await new Promise(resolve => setTimeout(resolve, 300)); await keyboard.type('Here are the latest trends in AI technology...'); await new Promise(resolve => setTimeout(resolve, 500));",
-      "verification": "field_filled",
-      "waitAfter": 500,
-      "maxRetries": 2
-    },
-    {
-      "id": 10,
-      "description": "Click Send button",
-      "action": "click_button",
-      "target": "Send",
-      "role": "button",
-      "code": "const sendPromise = findAndClick('Send', 'button'); const sendTimeout = new Promise((resolve) => setTimeout(() => resolve(false), 30000)); const sendSuccess = await Promise.race([sendPromise, sendTimeout]); if (!sendSuccess) { const isMac = process.platform === 'darwin'; if (isMac) { await keyboard.pressKey(Key.LeftSuper, Key.Return); await keyboard.releaseKey(Key.LeftSuper, Key.Return); } else { await keyboard.pressKey(Key.LeftControl, Key.Return); await keyboard.releaseKey(Key.LeftControl, Key.Return); } }",
-      "verification": "email_sent",
-      "keyboardShortcut": "const isMac = process.platform === 'darwin'; if (isMac) { await keyboard.pressKey(Key.LeftSuper, Key.Return); await keyboard.releaseKey(Key.LeftSuper, Key.Return); } else { await keyboard.pressKey(Key.LeftControl, Key.Return); await keyboard.releaseKey(Key.LeftControl, Key.Return); }",
-      "waitAfter": 1500,
-      "maxRetries": 2
-    }
-  ],
-  "maxRetriesPerStep": 3,
-  "totalTimeout": 300000
-}
-
-**IMPORTANT NOTES:**
-- **CRITICAL**: EVERY browser workflow MUST start with opening a new tab (Cmd+T/Ctrl+T) as Step 1
-- **NEVER** type URLs directly without opening a new tab first - this will type in the wrong field
-- **CRITICAL**: For fill_field actions, code MUST include BOTH:
-  1. await findAndClick('FieldName', 'input') - to focus the field
-  2. await keyboard.type('value to type') - to type the text
-  Example: await findAndClick('Search', 'input'); await keyboard.type('search term');
-- Extract actual values from user command (recipient email, subject, body content, search terms)
-- If user doesn't specify recipient, use placeholder and note in description
-- Use Tab navigation for Gmail fields (To, Subject, Body) - they have no labels
-- Use vision AI for buttons (Compose, Send) - they have clear labels
-- Include proper waits between steps (at least 1000ms after opening new tab)
-- Provide keyboard shortcuts as fallbacks for critical actions
-- **GOOGLE CALENDAR**: Use keyboard shortcut 'c' to create new event (more reliable than clicking Create button)
-- **GOOGLE CALENDAR**: After pressing 'c', wait 2000ms, then title field is auto-focused - just type title directly
-- **GOOGLE CALENDAR**: Date field shows current date (e.g., "Nov 12, 2025") - click this INPUT field to change date
-- **GOOGLE CALENDAR**: When clicking date, use findAndClick with the actual date text (e.g., "Nov 12, 2025", not "Date")
-- **GOOGLE CALENDAR**: After clicking date field, type the calculated date in format "12/4/2025" or "December 4, 2025"
-- **MACOS CALENDAR**: After Cmd+N, wait 1000ms, title field is auto-focused - just type title (no click needed)
-- **MACOS CALENDAR**: After typing title, press Tab to move to date/time fields
-- **DATE CALCULATION REQUIRED**: Parse natural language dates and calculate actual dates:
-  - "next month Wednesday" → Find first Wednesday of next month (e.g., today is Nov 12, 2025 → Dec 3, 2025 is first Wed)
-  - "next month on a wed" → Same as above
-  - "next week" → Add 7 days to current date
-  - Always output calculated date in MM/DD/YYYY format (e.g., "12/3/2025")
-- **CRITICAL**: NEVER put date/time info in the title - only put the event description (e.g., "Dentist Appointment")
-
-Now generate the JSON plan for the user's command. Return ONLY the JSON object, no other text.`;
+Now generate the JSON plan for the user's command. Return ONLY the JSON object.`;
   }
+
+  
 
   /**
    * STAGE 1: Check if user query needs clarification before planning
@@ -2051,8 +1719,9 @@ CLEAR (no clarification needed):
 
 **Response format:**
 
+CRITICAL: Return ONLY valid JSON. No explanations. No markdown. No extra text before or after.
+
 If AMBIGUOUS (only if IMPOSSIBLE to execute):
-\`\`\`json
 {
   "needsClarification": true,
   "clarificationQuestions": [
@@ -2067,14 +1736,11 @@ If AMBIGUOUS (only if IMPOSSIBLE to execute):
     "extractedInfo": {}
   }
 }
-\`\`\`
 
 If CLEAR (can be executed):
-\`\`\`json
 {
   "needsClarification": false
 }
-\`\`\`
 
 Analyze now:`;
 
@@ -2093,8 +1759,7 @@ Analyze now:`;
       });
 
       const rawResponse = message.content[0]?.type === 'text' ? message.content[0].text : '';
-      const cleaned = rawResponse.replace(/```(?:json)?\n?/g, '').trim();
-      const result = JSON.parse(cleaned);
+      const result = this.extractJsonFromResponse(rawResponse);
 
       if (result.needsClarification) {
         return {
@@ -2118,7 +1783,8 @@ Analyze now:`;
   /**
    * Generate context-aware structured automation plan with automatic fallback
    * Supports replanning with feedback for adaptive automation
-   * Tries Claude first, then OpenAI, then Grok (slowest)
+   * Tries OpenAI first (most reliable JSON), then Claude, then Grok
+   * Note: Gemini skipped for plan generation - generates invalid step types and has JSON parsing errors
    */
   async generatePlan(request: AutomationPlanRequest | string): Promise<AutomationPlanResponse> {
     const errors: string[] = [];
@@ -2127,6 +1793,72 @@ Analyze now:`;
     const planRequest: AutomationPlanRequest = typeof request === 'string' 
       ? { command: request, intent: 'command_automate' }
       : request;
+
+    // STAGE 0: Check if this is a partial fix plan request
+    if (planRequest.context?.requestPartialPlan && planRequest.context?.isReplanning) {
+      logger.info('Partial fix plan requested', {
+        failedStepIndex: planRequest.context.failedStepIndex,
+        hasPreviousPlan: !!planRequest.previousPlan,
+        hasFeedback: !!planRequest.feedback,
+      });
+      return await this.generatePartialFixPlan(planRequest);
+    }
+
+    // STAGE 0.5: Validate screenshot context for initial plan generation
+    const isReplanRequest = !!planRequest.previousPlan || !!planRequest.feedback;
+    
+    // Check for screenshot in multiple possible locations and formats
+    const screenshot = planRequest.context?.screenshot as any;
+    const hasScreenshot = !!(
+      screenshot && (
+        typeof screenshot === 'string' ||  // Direct base64 string
+        screenshot.base64 ||                // Object with base64 property
+        screenshot.data                     // Object with data property (alternative format)
+      )
+    );
+    
+    if (!isReplanRequest && !hasScreenshot) {
+      logger.warn('Initial plan generation requested without screenshot context', {
+        command: planRequest.command,
+        hasContext: !!planRequest.context,
+        contextKeys: planRequest.context ? Object.keys(planRequest.context) : [],
+        screenshotType: screenshot ? typeof screenshot : 'undefined',
+        screenshotKeys: screenshot && typeof screenshot === 'object' ? Object.keys(screenshot) : [],
+      });
+      
+      // Return clarification asking for screenshot
+      return {
+        success: true,
+        needsClarification: true,
+        clarificationQuestions: [
+          {
+            id: 'screenshot_required',
+            text: 'Screenshot context is required to generate an accurate automation plan. Please provide a screenshot of your current screen state.',
+            type: 'freeform',
+            required: true,
+          },
+        ],
+      };
+    }
+    
+    // Calculate screenshot size for logging
+    let screenshotSize = 0;
+    if (hasScreenshot && screenshot) {
+      if (typeof screenshot === 'string') {
+        screenshotSize = screenshot.length;
+      } else if (screenshot.base64) {
+        screenshotSize = screenshot.base64.length;
+      } else if (screenshot.data) {
+        screenshotSize = screenshot.data.length;
+      }
+    }
+    
+    logger.info('Screenshot validation passed', {
+      hasScreenshot,
+      isReplan: isReplanRequest,
+      screenshotSize,
+      screenshotFormat: typeof screenshot === 'string' ? 'string' : (screenshot?.base64 ? 'object.base64' : 'object.data'),
+    });
 
     // STAGE 1: Check if query needs clarification (unless answers already provided)
     logger.info('Checking for clarification answers', {
@@ -2165,31 +1897,31 @@ Analyze now:`;
     }
 
     // STAGE 2: Generate the actual plan
-    // Try Claude first (fastest, best for vision)
-    if (this.claudeClient) {
-      try {
-        return await this.generatePlanWithClaude(planRequest);
-      } catch (error: any) {
-        errors.push(`Claude: ${error.message}`);
-        logger.warn('Claude failed for plan generation, falling back to OpenAI', { error: error.message });
-      }
-    } else {
-      errors.push('Claude: Client not initialized (missing ANTHROPIC_API_KEY)');
-    }
-
-    // Fallback to OpenAI
+    // Try OpenAI first (Priority 1 - most reliable for JSON)
     if (this.openaiClient) {
       try {
         return await this.generatePlanWithOpenAI(planRequest);
       } catch (error: any) {
         errors.push(`OpenAI: ${error.message}`);
-        logger.warn('OpenAI failed for plan generation, falling back to Grok', { error: error.message });
+        logger.warn('OpenAI failed for plan generation, falling back to Claude', { error: error.message });
       }
     } else {
       errors.push('OpenAI: Client not initialized (missing OPENAI_API_KEY)');
     }
 
-    // Fallback to Grok (slowest)
+    // Fallback to Claude (Priority 2 - fast vision)
+    if (this.claudeClient) {
+      try {
+        return await this.generatePlanWithClaude(planRequest);
+      } catch (error: any) {
+        errors.push(`Claude: ${error.message}`);
+        logger.warn('Claude failed for plan generation, falling back to Grok', { error: error.message });
+      }
+    } else {
+      errors.push('Claude: Client not initialized (missing ANTHROPIC_API_KEY)');
+    }
+
+    // Fallback to Grok (Priority 3 - last resort)
     if (this.grokClient) {
       try {
         return await this.generatePlanWithGrok(planRequest);
@@ -2203,6 +1935,166 @@ Analyze now:`;
 
     // All providers failed
     throw new Error(`Failed to generate automation plan. Errors: ${errors.join('; ')}`);
+  }
+
+  /**
+   * Generate a partial fix plan for a failed step
+   * Returns a mini plan (2-5 steps) that resolves the immediate issue
+   */
+  private async generatePartialFixPlan(request: AutomationPlanRequest): Promise<AutomationPlanResponse> {
+    const errors: string[] = [];
+    const failedStepIndex = request.context?.failedStepIndex ?? -1;
+    const previousPlan = request.previousPlan;
+    const feedback = request.feedback?.message || 'Step failed';
+    
+    if (!previousPlan || failedStepIndex < 0) {
+      throw new Error('Partial fix plan requires previousPlan and failedStepIndex');
+    }
+
+    const failedStep = previousPlan.steps[failedStepIndex];
+    if (!failedStep) {
+      throw new Error(`Failed step at index ${failedStepIndex} not found in previous plan`);
+    }
+
+    logger.info('Generating partial fix plan', {
+      failedStepIndex,
+      failedStepDescription: failedStep.description,
+      originalGoal: previousPlan.goal,
+      feedback,
+    });
+
+    // Try OpenAI first (Priority 1 - most reliable for JSON)
+    if (this.openaiClient) {
+      try {
+        return await this.generatePartialFixPlanWithOpenAI(request, failedStep, failedStepIndex);
+      } catch (error: any) {
+        errors.push(`OpenAI: ${error.message}`);
+        logger.warn('OpenAI failed for partial fix plan, falling back to Claude', { error: error.message });
+      }
+    } else {
+      errors.push('OpenAI: Client not initialized (missing OPENAI_API_KEY)');
+    }
+
+    // Fallback to Claude (Priority 2 - fast vision)
+    if (this.claudeClient) {
+      try {
+        return await this.generatePartialFixPlanWithClaude(request, failedStep, failedStepIndex);
+      } catch (error: any) {
+        errors.push(`Claude: ${error.message}`);
+        logger.warn('Claude failed for partial fix plan, falling back to Grok', { error: error.message });
+      }
+    } else {
+      errors.push('Claude: Client not initialized (missing ANTHROPIC_API_KEY)');
+    }
+
+    // Fallback to Grok (Priority 3 - last resort)
+    if (this.grokClient) {
+      try {
+        return await this.generatePartialFixPlanWithGrok(request, failedStep, failedStepIndex);
+      } catch (error: any) {
+        errors.push(`Grok: ${error.message}`);
+        logger.error('All providers failed for partial fix plan', { errors });
+      }
+    } else {
+      errors.push('Grok: Client not initialized (missing GROK_API_KEY)');
+    }
+
+    // All providers failed
+    throw new Error(`Failed to generate partial fix plan. Errors: ${errors.join('; ')}`);
+  }
+
+  /**
+   * Generate structured plan using Gemini 3 Pro Preview with context awareness
+   */
+  private async generatePlanWithGemini(request: AutomationPlanRequest): Promise<AutomationPlanResponse> {
+    if (!this.geminiClient) {
+      throw new Error('Gemini client not initialized');
+    }
+
+    const startTime = Date.now();
+    const hasScreenshot = !!request.context?.screenshot?.base64;
+
+    try {
+      logger.info('Generating automation plan with Gemini 2.5 Pro', {
+        command: request.command,
+        hasScreenshot,
+        isReplan: !!request.previousPlan || !!request.feedback
+      });
+
+      const model = this.geminiClient.getGenerativeModel({
+        model: 'gemini-2.5-pro',
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 4096,
+          responseMimeType: 'application/json',
+        },
+        systemInstruction: 'You are a JSON-only automation planner. Return ONLY valid JSON. No markdown, no explanations, no code fences, no additional text.'
+      });
+
+      const parts: any[] = [];
+
+      // Add screenshot if provided
+      if (hasScreenshot) {
+        parts.push({
+          inlineData: {
+            mimeType: request.context!.screenshot!.mimeType || 'image/png',
+            data: request.context!.screenshot!.base64,
+          },
+        });
+      }
+
+      // Add prompt
+      parts.push({
+        text: this.buildContextAwarePlanPrompt(request),
+      });
+
+      const result = await model.generateContent({
+        contents: [{ role: 'user', parts }],
+      });
+
+      const latencyMs = Date.now() - startTime;
+      const rawResponse = result.response.text();
+
+      // Parse JSON response (extractJsonFromResponse is called internally)
+      const planData = this.parseAndValidatePlan(rawResponse, request);
+
+      // Check if this is a clarification response
+      if (planData.needsClarification) {
+        logger.info('Gemini returned clarification questions', {
+          latencyMs,
+          questionCount: planData.clarificationQuestions?.length
+        });
+
+        return {
+          success: true,
+          needsClarification: true,
+          clarificationQuestions: planData.clarificationQuestions,
+          partialContext: planData.partialContext,
+          provider: 'gemini',
+          latencyMs,
+        };
+      }
+
+      // Return successful plan
+      logger.info('Gemini 2.5 Pro plan generation successful', {
+        latencyMs,
+        stepCount: planData.steps.length
+      });
+
+      return {
+        success: true,
+        plan: planData,
+        provider: 'gemini',
+        latencyMs,
+      };
+    } catch (error: any) {
+      const latencyMs = Date.now() - startTime;
+      logger.error('Gemini plan generation failed', {
+        error: error.message,
+        latencyMs,
+      });
+      throw error;
+    }
   }
 
   /**
@@ -2526,16 +2418,248 @@ Analyze now:`;
   }
 
   /**
+   * Generate partial fix plan using Gemini 3 Pro Preview
+   */
+  private async generatePartialFixPlanWithGemini(
+    request: AutomationPlanRequest,
+    failedStep: any,
+    failedStepIndex: number
+  ): Promise<AutomationPlanResponse> {
+    if (!this.geminiClient) {
+      throw new Error('Gemini client not initialized');
+    }
+
+    const startTime = Date.now();
+    const hasScreenshot = !!request.context?.screenshot?.base64;
+    const prompt = this.buildPartialFixPlanPrompt(request, failedStep, failedStepIndex);
+
+    const model = this.geminiClient.getGenerativeModel({
+      model: 'gemini-2.5-pro',
+      generationConfig: {
+        temperature: 0.2,
+        maxOutputTokens: 2048,
+        responseMimeType: 'application/json',
+      },
+      systemInstruction: 'You are a JSON-only automation planner. Return ONLY valid JSON. No markdown, no explanations, no code fences, no additional text.'
+    });
+
+    const parts: any[] = [];
+
+    if (hasScreenshot) {
+      parts.push({
+        inlineData: {
+          mimeType: request.context!.screenshot!.mimeType || 'image/png',
+          data: request.context!.screenshot!.base64,
+        },
+      });
+    }
+
+    parts.push({
+      text: prompt,
+    });
+
+    const result = await model.generateContent({
+      contents: [{ role: 'user', parts }],
+    });
+
+    const latencyMs = Date.now() - startTime;
+    const rawResponse = result.response.text();
+    
+    // Parse JSON response (extractJsonFromResponse is called internally)
+    const fixPlan = this.parseAndValidatePartialFixPlan(rawResponse, request, failedStepIndex);
+
+    logger.info('Gemini 2.5 Pro partial fix plan generation successful', {
+      latencyMs,
+      stepCount: fixPlan.steps.length
+    });
+
+    return {
+      success: true,
+      plan: fixPlan,
+      provider: 'gemini',
+      latencyMs,
+    };
+  }
+
+  /**
+   * Generate partial fix plan using Claude
+   */
+  private async generatePartialFixPlanWithClaude(
+    request: AutomationPlanRequest,
+    failedStep: any,
+    failedStepIndex: number
+  ): Promise<AutomationPlanResponse> {
+    if (!this.claudeClient) {
+      throw new Error('Claude client not initialized');
+    }
+
+    const startTime = Date.now();
+    const hasScreenshot = !!request.context?.screenshot?.base64;
+    const prompt = this.buildPartialFixPlanPrompt(request, failedStep, failedStepIndex);
+
+    const messageContent: any[] = [{ type: 'text', text: prompt }];
+
+    if (hasScreenshot) {
+      messageContent.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: request.context!.screenshot!.mimeType || 'image/png',
+          data: request.context!.screenshot!.base64,
+        },
+      });
+    }
+
+    const message = await this.claudeClient.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 2048,
+      temperature: 0.2,
+      messages: [{ role: 'user', content: messageContent }],
+    });
+
+    const latencyMs = Date.now() - startTime;
+    const rawResponse = message.content[0]?.type === 'text' ? message.content[0].text : '';
+    const fixPlan = this.parseAndValidatePartialFixPlan(rawResponse, request, failedStepIndex);
+
+    logger.info('Claude partial fix plan generation successful', { 
+      latencyMs, 
+      stepCount: fixPlan.steps.length 
+    });
+
+    return {
+      success: true,
+      plan: fixPlan,
+      provider: 'claude',
+      latencyMs,
+    };
+  }
+
+  /**
+   * Generate partial fix plan using OpenAI
+   */
+  private async generatePartialFixPlanWithOpenAI(
+    request: AutomationPlanRequest,
+    failedStep: any,
+    failedStepIndex: number
+  ): Promise<AutomationPlanResponse> {
+    if (!this.openaiClient) {
+      throw new Error('OpenAI client not initialized');
+    }
+
+    const startTime = Date.now();
+    const hasScreenshot = !!request.context?.screenshot?.base64;
+    const prompt = this.buildPartialFixPlanPrompt(request, failedStep, failedStepIndex);
+
+    const messages: any[] = [];
+
+    if (hasScreenshot) {
+      messages.push({
+        role: 'user',
+        content: [
+          { type: 'text', text: prompt },
+          {
+            type: 'image_url',
+            image_url: {
+              url: `data:${request.context!.screenshot!.mimeType || 'image/png'};base64,${request.context!.screenshot!.base64}`,
+            },
+          },
+        ],
+      });
+    } else {
+      messages.push({ role: 'user', content: prompt });
+    }
+
+    const completion = await this.openaiClient.chat.completions.create({
+      model: 'gpt-4o',
+      messages,
+      temperature: 0.2,
+      max_tokens: 2048,
+    });
+
+    const latencyMs = Date.now() - startTime;
+    const rawResponse = completion.choices[0]?.message?.content || '';
+    const fixPlan = this.parseAndValidatePartialFixPlan(rawResponse, request, failedStepIndex);
+
+    logger.info('OpenAI partial fix plan generation successful', { 
+      latencyMs, 
+      stepCount: fixPlan.steps.length 
+    });
+
+    return {
+      success: true,
+      plan: fixPlan,
+      provider: 'openai',
+      latencyMs,
+    };
+  }
+
+  /**
+   * Generate partial fix plan using Grok
+   */
+  private async generatePartialFixPlanWithGrok(
+    request: AutomationPlanRequest,
+    failedStep: any,
+    failedStepIndex: number
+  ): Promise<AutomationPlanResponse> {
+    if (!this.grokClient) {
+      throw new Error('Grok client not initialized');
+    }
+
+    const startTime = Date.now();
+    const hasScreenshot = !!request.context?.screenshot?.base64;
+    const prompt = this.buildPartialFixPlanPrompt(request, failedStep, failedStepIndex);
+
+    const messages: any[] = [];
+
+    if (hasScreenshot) {
+      messages.push({
+        role: 'user',
+        content: [
+          { type: 'text', text: prompt },
+          {
+            type: 'image_url',
+            image_url: {
+              url: `data:${request.context!.screenshot!.mimeType || 'image/png'};base64,${request.context!.screenshot!.base64}`,
+            },
+          },
+        ],
+      });
+    } else {
+      messages.push({ role: 'user', content: prompt });
+    }
+
+    const completion = await this.grokClient.chat.completions.create({
+      model: 'grok-4',
+      messages,
+      temperature: 0.2,
+      max_tokens: 2048,
+    });
+
+    const latencyMs = Date.now() - startTime;
+    const rawResponse = completion.choices[0]?.message?.content || '';
+    const fixPlan = this.parseAndValidatePartialFixPlan(rawResponse, request, failedStepIndex);
+
+    logger.info('Grok partial fix plan generation successful', { 
+      latencyMs, 
+      stepCount: fixPlan.steps.length 
+    });
+
+    return {
+      success: true,
+      plan: fixPlan,
+      provider: 'grok',
+      latencyMs,
+    };
+  }
+
+  /**
    * Parse and validate automation plan JSON or clarification response
    */
   private parseAndValidatePlan(rawResponse: string, request: AutomationPlanRequest): AutomationPlan | any {
-    // Remove markdown code fences if present
-    let cleaned = rawResponse.replace(/```(?:json)?\n?/g, '').trim();
-
-    // Parse JSON
+    // Parse JSON with robust extraction
     let planJson: any;
     try {
-      planJson = JSON.parse(cleaned);
+      planJson = this.extractJsonFromResponse(rawResponse);
     } catch (error) {
       throw new Error(`Failed to parse plan JSON: ${error}`);
     }
@@ -2623,6 +2747,224 @@ Analyze now:`;
     if (lowerCommand.includes('calendar')) return 'calendar';
     
     return undefined;
+  }
+
+  /**
+   * Build prompt for partial fix plan generation
+   * REFACTORED: Addresses expert feedback on schema consistency, blocker detection, and verification
+   */
+  private buildPartialFixPlanPrompt(
+    request: AutomationPlanRequest,
+    failedStep: any,
+    failedStepIndex: number
+  ): string {
+    const previousPlan = request.previousPlan!;
+    const feedback = request.feedback?.message || 'Step failed after retries';
+    const hasScreenshot = !!request.context?.screenshot;
+    
+    // Additional context for better diagnosis
+    const failedStepId = failedStep.id || 'unknown';
+    const lastError = failedStep.lastError || 'No error details available';
+    const activeUrl = request.context?.activeUrl || 'unknown';
+    const activeApp = request.context?.activeApp || 'unknown';
+
+    return `You are an automation expert. One step failed and needs a minimal fix.
+
+<<ORIGINAL_GOAL>>
+${previousPlan.goal}
+<</ORIGINAL_GOAL>>
+
+<<FAILED_STEP>>
+index: ${failedStepIndex}
+id: ${failedStepId}
+description: ${failedStep.description}
+kind: ${JSON.stringify(failedStep.kind)}
+error_or_feedback: ${feedback}
+last_error: ${lastError}
+<</FAILED_STEP>>
+
+<<CURRENT_CONTEXT>>
+activeUrl: ${activeUrl}
+activeApp: ${activeApp}
+${hasScreenshot ? 'screenshot: Available - analyze it to understand current UI state' : 'screenshot: Not available'}
+<</CURRENT_CONTEXT>>
+
+TASK: Return a SHORT fix plan (2-5 steps) as JSON:
+- Fix the immediate cause of failure
+- Achieve what the failed step was trying to do
+- Do NOT include remaining original steps (frontend continues after your fix)
+
+RULES:
+1) Return ONLY valid JSON. No markdown. No code fences. No explanations.
+2) Use ONLY the step kinds listed below.
+3) Locators MUST include a strategy field:
+   - locator: { "strategy": "vision" | "textMatch" | "contains" | "bbox", "description": "..." }
+4) Prefer strategy="vision" when screenshot is available.
+5) If you perform a UI state change (open panel, navigate, expand menu), you MUST verify it:
+   - Add a short pause (500-1500ms) AND a waitForElement step that confirms the new UI is visible.
+6) Never guess coordinates. Do not output fixed coordinates unless provided externally.
+7) BLOCKER DETECTION: If screenshot shows login/captcha/permission dialog → return a fix plan with ask_user strategy (do not try to bypass).
+
+VALID STEP KINDS:
+- { "type": "focusApp", "appName": "..." }
+- { "type": "openUrl", "url": "..." }
+- { "type": "findAndClick", "locator": { "strategy": "vision", "description": "..." }, "timeoutMs": 5000 }
+- { "type": "waitForElement", "locator": { "strategy": "vision", "description": "..." }, "timeoutMs": 3000 }
+- { "type": "movePointer", "target": { "strategy": "vision", "description": "..." } }
+- { "type": "click", "button": "left", "clickCount": 1 }
+- { "type": "typeText", "text": "...", "submit": false }
+- { "type": "pressKey", "key": "Enter", "modifiers": ["Cmd"] }
+- { "type": "scroll", "direction": "up" | "down" | "left" | "right", "amount": 300 }
+- { "type": "pause", "ms": 1500 }
+- { "type": "screenshot", "tag": "verify_state", "analyzeWithVision": true }
+- { "type": "log", "level": "info" | "warn" | "error", "message": "..." }
+- { "type": "end", "reason": "completed" }
+
+COMMON FAILURE PATTERNS:
+
+Pattern 1: "project in side panel" not found
+Root Cause: Sidebar is collapsed/closed
+Fix: Open sidebar first, VERIFY it opened, then find project
+Example steps:
+  fix_1: findAndClick sidebar toggle button (retry: 3x)
+  fix_2: pause 1500ms for animation
+  fix_3: waitForElement expanded sidebar (verify opened)
+  fix_4: findAndClick target project in sidebar
+
+Pattern 2: Element not found on web page
+Root Cause: Wrong page loaded or page not fully loaded
+Fix: Navigate to correct URL first
+Example steps:
+  fix_1: openUrl to correct page
+  fix_2: pause 2000ms for page load
+  fix_3: findAndClick target element
+
+Pattern 3: Element needs scrolling to be visible
+Fix: Scroll then find element
+Example steps:
+  fix_1: scroll direction="down" amount=300
+  fix_2: pause 500ms
+  fix_3: findAndClick target element
+
+Pattern 4: Project not found in ChatGPT sidebar (after opening)
+Root Cause: Project doesn't exist, different name, or scrolled out of view
+Fix: Use ChatGPT's search feature
+Example steps:
+  fix_1: findAndClick search icon in sidebar
+  fix_2: pause 500ms
+  fix_3: typeText project name
+  fix_4: pause 1000ms for results
+  fix_5: findAndClick project from search results
+
+Pattern 5: Project scrolled in sidebar list
+Root Cause: Long list, target below visible area
+Fix: Scroll in sidebar then find
+Example steps:
+  fix_1: findAndClick sidebar list area (to focus)
+  fix_2: scroll direction="down" amount=300
+  fix_3: pause 500ms
+  fix_4: findAndClick target project
+
+OUTPUT FORMAT (ONLY THIS JSON OBJECT):
+{
+  "steps": [
+    {
+      "id": "fix_1",
+      "kind": { "type": "...", ... },
+      "description": "...",
+      "retry": { "maxAttempts": 2, "delayMs": 1000 },
+      "onError": { "strategy": "replan" | "ask_user" | "fail_plan" | "skip_step", "message": "...", "reason": "...", "questionId": "q1" }
+    }
+  ]
+}
+
+Generate the fix plan now:`;
+  }
+
+  /**
+   * Parse and validate partial fix plan JSON
+   */
+  private parseAndValidatePartialFixPlan(
+    rawResponse: string,
+    request: AutomationPlanRequest,
+    failedStepIndex: number
+  ): AutomationPlan {
+    // Parse JSON with robust extraction
+    let fixPlanJson: any;
+    try {
+      fixPlanJson = this.extractJsonFromResponse(rawResponse);
+    } catch (error) {
+      throw new Error(`Failed to parse fix plan JSON: ${error}`);
+    }
+
+    // Validate steps array
+    if (!fixPlanJson.steps || !Array.isArray(fixPlanJson.steps)) {
+      throw new Error('Fix plan must have a "steps" array');
+    }
+
+    if (fixPlanJson.steps.length === 0) {
+      throw new Error('Fix plan must have at least one step');
+    }
+
+    if (fixPlanJson.steps.length > 10) {
+      throw new Error('Fix plan should be concise (max 10 steps)');
+    }
+
+    // Validate each step
+    // NOTE: Must match frontend interpreter valid types and backend AutomationStepKind
+    const validStepTypes = [
+      'focusApp', 'openUrl', 'typeText', 'hotkey', 'click', 'scroll', 
+      'pause', 'apiAction', 'waitForElement', 'screenshot', 'findAndClick', 
+      'log', 'pressKey', 'end', 'movePointer', 'notifyUser', 'askUser'
+    ];
+    
+    for (const step of fixPlanJson.steps) {
+      if (!step.id || !step.kind || !step.description) {
+        throw new Error(`Invalid step structure: ${JSON.stringify(step)}`);
+      }
+      
+      // Validate step type
+      if (!step.kind.type || !validStepTypes.includes(step.kind.type)) {
+        throw new Error(
+          `Invalid step type: "${step.kind.type}". ` +
+          `Valid types are: ${validStepTypes.join(', ')}.`
+        );
+      }
+      
+      // Validate scroll step has required fields
+      if (step.kind.type === 'scroll') {
+        if (typeof step.kind.amount !== 'number' || step.kind.amount <= 0) {
+          throw new Error(
+            `Invalid scroll step: "amount" must be a positive number, got: ${step.kind.amount}`
+          );
+        }
+        if (!['up', 'down', 'left', 'right'].includes(step.kind.direction)) {
+          throw new Error(
+            `Invalid scroll step: "direction" must be one of: up, down, left, right, got: ${step.kind.direction}`
+          );
+        }
+      }
+    }
+
+    const previousPlan = request.previousPlan!;
+    const failedStep = previousPlan.steps[failedStepIndex];
+
+    // Build the fix plan
+    const fixPlan: AutomationPlan = {
+      planId: randomUUID(),
+      version: (previousPlan.version || 1) + 1,
+      intent: previousPlan.intent,
+      goal: `Fix: ${failedStep.description}`,
+      createdAt: new Date().toISOString(),
+      steps: fixPlanJson.steps,
+      metadata: {
+        isFixPlan: true,
+        originalPlanId: previousPlan.planId,
+        fixesStepIndex: failedStepIndex,
+      },
+    };
+
+    return fixPlan;
   }
 
   /**
@@ -3283,13 +3625,10 @@ Now generate the interactive guide JSON for the user's command. Return ONLY the 
    * Parse and validate interactive guide JSON
    */
   private parseAndValidateInteractiveGuide(rawResponse: string, request: InteractiveGuideRequest): InteractiveGuide {
-    // Remove markdown code fences if present
-    let cleaned = rawResponse.replace(/```(?:json)?\n?/g, '').trim();
-
-    // Parse JSON
+    // Parse JSON with robust extraction
     let guideJson: any;
     try {
-      guideJson = JSON.parse(cleaned);
+      guideJson = this.extractJsonFromResponse(rawResponse);
     } catch (error) {
       throw new Error(`Failed to parse interactive guide JSON: ${error}`);
     }

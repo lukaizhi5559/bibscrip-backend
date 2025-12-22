@@ -24,13 +24,30 @@ export class StreamingWebSocketServer {
 
   constructor(server: http.Server) {
     this.wss = new WebSocket.Server({
-      server,
-      path: '/ws/stream',
-      verifyClient: this.verifyClient.bind(this)
+      noServer: true
     });
 
     this.setupEventHandlers();
     this.startHeartbeat();
+  }
+
+  /**
+   * Handle upgrade request manually
+   */
+  public handleUpgrade(request: http.IncomingMessage, socket: any, head: Buffer): void {
+    // Verify client before upgrading
+    const url = new URL(request.url || '', `http://${request.headers.host}`);
+    const apiKey = url.searchParams.get('apiKey');
+    
+    if (!apiKey) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    this.wss.handleUpgrade(request, socket, head, (ws) => {
+      this.wss.emit('connection', ws, request);
+    });
   }
 
   /**

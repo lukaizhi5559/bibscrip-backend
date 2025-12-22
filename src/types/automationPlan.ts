@@ -53,6 +53,11 @@ export type OcrLocator = VisionLocator;
 /**
  * Discriminated union of all possible step types
  * LLM must emit one of these - no arbitrary code execution
+ * 
+ * NOTE: Must match frontend interpreter valid types:
+ * ['focusApp', 'openUrl', 'typeText', 'hotkey', 'click', 'scroll', 
+ *  'pause', 'apiAction', 'waitForElement', 'screenshot', 'findAndClick', 
+ *  'log', 'pressKey', 'end']
  */
 export type AutomationStepKind =
   // UI Primitives (NutJS "hands + eyes")
@@ -61,9 +66,11 @@ export type AutomationStepKind =
   | { type: 'waitForElement'; locator: VisionLocator; timeoutMs: number }
   | { type: 'findAndClick'; locator: VisionLocator; timeoutMs?: number }
   | { type: 'movePointer'; target: VisionLocator | { x: number; y: number } }
-  | { type: 'click'; button?: 'left' | 'right'; clickCount?: 1 | 2 }
+  | { type: 'click'; x?: number; y?: number }  // Frontend uses x, y directly (not coordinates object)
   | { type: 'typeText'; text: string; submit?: boolean }
   | { type: 'pressKey'; key: string; modifiers?: string[] }
+  | { type: 'hotkey'; keys: string[] }  // Frontend uses keys array, not key + modifiers
+  | { type: 'scroll'; direction: 'up' | 'down' | 'left' | 'right'; amount: number }
   | { type: 'pause'; ms: number }
   | { type: 'screenshot'; tag?: string; analyzeWithVision?: boolean }
   
@@ -238,6 +245,12 @@ export interface AutomationPlan {
     generationTimeMs?: number;
     targetOS?: 'darwin' | 'win32' | 'linux';
     targetApp?: string;
+    /** Indicates this is a partial fix plan for a failed step */
+    isFixPlan?: boolean;
+    /** Original plan ID this fix plan is for */
+    originalPlanId?: string;
+    /** Index of the step this fix plan addresses */
+    fixesStepIndex?: number;
     [key: string]: any;
   };
 }
@@ -292,6 +305,15 @@ export interface AutomationPlanRequest {
     
     /** Previous attempts or history */
     history?: any;
+    
+    /** Request a partial fix plan instead of full plan (for step failures) */
+    requestPartialPlan?: boolean;
+    
+    /** Indicates this is a replanning request */
+    isReplanning?: boolean;
+    
+    /** Index of the failed step (for partial fix plans) */
+    failedStepIndex?: number;
   };
   
   /** Previous plan (for replanning) */

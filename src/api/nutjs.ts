@@ -191,7 +191,7 @@ router.post('/', authenticate, async (req: Request, res: Response): Promise<void
  */
 router.post('/plan', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
-    const { command, intent, context, previousPlan, feedback, clarificationAnswers } = req.body;
+    const { command, intent, context, previousPlan, feedback, clarificationAnswers, screenshot } = req.body;
 
     // Validate request
     if (!command || typeof command !== 'string' || command.trim().length === 0) {
@@ -211,10 +211,18 @@ router.post('/plan', authenticate, async (req: Request, res: Response): Promise<
       return;
     }
 
+    // Normalize screenshot location: frontend may send at top level or in context
+    const normalizedContext = context || {};
+    if (screenshot && !normalizedContext.screenshot) {
+      normalizedContext.screenshot = screenshot;
+    }
+
     logger.info('Automation plan generation request received', {
       command,
       intent: intent || 'command_automate',
-      hasContext: !!context,
+      hasContext: !!normalizedContext,
+      hasScreenshot: !!(screenshot || normalizedContext.screenshot),
+      screenshotLocation: screenshot ? 'top-level' : (normalizedContext.screenshot ? 'context' : 'none'),
       hasPreviousPlan: !!previousPlan,
       hasFeedback: !!feedback,
       hasClarificationAnswers: !!clarificationAnswers,
@@ -226,7 +234,7 @@ router.post('/plan', authenticate, async (req: Request, res: Response): Promise<
     const result = await nutjsCodeGenerator.generatePlan({
       command,
       intent: intent || 'command_automate',
-      context,
+      context: normalizedContext,
       previousPlan,
       feedback,
       clarificationAnswers,

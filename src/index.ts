@@ -5,6 +5,7 @@ import morgan from 'morgan';
 import swaggerJSDoc from 'swagger-jsdoc';
 import swaggerUi from 'swagger-ui-express';
 import http from 'http';
+import WebSocket from 'ws';
 import router from './api';
 import automationAnalyticsRouter from './api/automationAnalytics';
 import aiMemoryRouter from './routes/aiMemory';
@@ -13,6 +14,7 @@ import { logger } from './utils/logger';
 import { vectorDbService } from './services/vectorDbService';
 import { fetchBibleIds } from './utils/bible';
 import { setupStreamingWebSocket } from './websocket';
+import { handleComputerUseWebSocket } from './api/computerUseWebSocket';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -167,10 +169,46 @@ initializeServices().then(() => {
   // Setup WebSocket streaming server (non-disruptive to REST APIs)
   const wsServer = setupStreamingWebSocket(server);
   
+  // Setup Computer Use WebSocket server with noServer option
+  const computerUseWss = new WebSocket.Server({ 
+    noServer: true
+  });
+  
+  computerUseWss.on('connection', (ws, req) => {
+    logger.info('🌐 [COMPUTER-USE] New WebSocket connection');
+    handleComputerUseWebSocket(ws, req);
+  });
+  
+  computerUseWss.on('error', (error) => {
+    logger.error('❌ [COMPUTER-USE] WebSocket server error:', error);
+  });
+  
+  // Handle upgrade requests - route to appropriate WebSocket server
+  server.on('upgrade', (request, socket, head) => {
+    const pathname = new URL(request.url || '', `http://${request.headers.host}`).pathname;
+    
+    logger.info(`🔄 [WEBSOCKET] Upgrade request for path: ${pathname}`);
+    
+    if (pathname === '/computer-use') {
+      logger.info('🌐 [COMPUTER-USE] Routing to Computer Use WebSocket');
+      computerUseWss.handleUpgrade(request, socket, head, (ws) => {
+        computerUseWss.emit('connection', ws, request);
+      });
+    } else if (pathname === '/ws/stream') {
+      logger.info('📡 [STREAMING] Routing to Streaming WebSocket');
+      // Let the streaming server handle it - it's already set up with noServer
+      wsServer.handleUpgrade(request, socket, head);
+    } else {
+      logger.warn(`⚠️ [WEBSOCKET] Unknown WebSocket path: ${pathname}`);
+      socket.destroy();
+    }
+  });
+  
   // Start server
   server.listen(PORT, () => {
     logger.info(`Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
     logger.info(`WebSocket streaming server available at ws://localhost:${PORT}/ws/stream`);
+    logger.info(`Computer Use WebSocket server available at ws://localhost:${PORT}/computer-use`);
     logger.info(`REST APIs remain unchanged and fully functional`);
   });
   
@@ -178,6 +216,9 @@ initializeServices().then(() => {
   process.on('SIGTERM', () => {
     logger.info('Received SIGTERM, shutting down gracefully...');
     wsServer.shutdown();
+    computerUseWss.close(() => {
+      logger.info('Computer Use WebSocket server closed');
+    });
     server.close(() => {
       logger.info('Server closed');
       process.exit(0);
@@ -187,6 +228,9 @@ initializeServices().then(() => {
   process.on('SIGINT', () => {
     logger.info('Received SIGINT, shutting down gracefully...');
     wsServer.shutdown();
+    computerUseWss.close(() => {
+      logger.info('Computer Use WebSocket server closed');
+    });
     server.close(() => {
       logger.info('Server closed');
       process.exit(0);
