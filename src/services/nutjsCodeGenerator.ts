@@ -1406,6 +1406,192 @@ Now generate the code for: ${command}`;
    * - Conditional openUrl based on domain match
    * - 272 lines vs 800+ (66% reduction)
    */
+  /**
+   * Build prompt for INTENT-BASED plans (hybrid plan + computer-use execution)
+   * Generates high-level intents instead of rigid actions
+   */
+  private buildIntentBasedPlanPrompt(request: AutomationPlanRequest): string {
+    const os = request.context?.os || (process.platform === 'darwin' ? 'darwin' : 'win32');
+    const userCommand = `<<USER_COMMAND>>\n${request.command}\n<</USER_COMMAND>>`;
+    
+    let contextSection = '';
+    if (request.context) {
+      contextSection = '\n\n=== CONTEXT ===';
+      if (request.context.screenshot) {
+        contextSection += '\n- Screenshot: Available (analyze for UI state)';
+      }
+      if (request.context.activeApp) {
+        contextSection += `\n- Active App: ${request.context.activeApp}`;
+      }
+      if (request.context.activeUrl) {
+        contextSection += `\n- Active URL: ${request.context.activeUrl}`;
+      }
+      contextSection += `\n- OS: ${os}`;
+    }
+
+    return `You are an automation planner for a HYBRID system. Generate INTENT-BASED plans.
+
+${userCommand}${contextSection}
+
+=== CRITICAL - INTENT-BASED PLANNING ===
+
+**DO NOT generate rigid action steps with coordinates or specific UI elements.**
+**INSTEAD, generate HIGH-LEVEL INTENTS that describe WHAT to accomplish, not HOW.**
+
+The computer-use LLM will examine screenshots and adaptively decide HOW to execute each intent.
+
+=== OUTPUT FORMAT ===
+
+Return ONLY valid JSON. No markdown. No explanations. No code fences.
+
+SCHEMA:
+{
+  "goal": "string - overall goal",
+  "version": 1,
+  "steps": [
+    {
+      "id": "string - step_1, step_2, etc.",
+      "intent": "enum - navigate|search|click_element|type_text|capture|compare|wait|custom",
+      "description": "string - human-readable WHAT to accomplish",
+      "target": "string - optional, for navigate: URL, for click_element: element description",
+      "query": "string - optional, for search/type_text: text to enter",
+      "element": "string - optional, for click_element: natural language element description",
+      "successCriteria": "string - how to verify step is complete",
+      "maxAttempts": number - default 3,
+      "status": "pending"
+    }
+  ]
+}
+
+=== INTENT TYPES ===
+
+1. **navigate** - Navigate to a URL or application
+   Fields: target (URL), successCriteria
+   Example: {
+     "intent": "navigate",
+     "target": "https://perplexity.ai",
+     "description": "Go to Perplexity website",
+     "successCriteria": "Perplexity homepage visible with search interface"
+   }
+
+2. **search** - Enter a search query and submit
+   Fields: query (text), successCriteria
+   Example: {
+     "intent": "search",
+     "query": "best runners",
+     "description": "Search for best runners",
+     "successCriteria": "Query submitted and results loading or displayed"
+   }
+
+3. **click_element** - Click on a UI element (natural language description)
+   Fields: element (description), successCriteria
+   Example: {
+     "intent": "click_element",
+     "element": "search input field",
+     "description": "Click the search field to focus it",
+     "successCriteria": "Input field is focused and ready for typing"
+   }
+
+4. **type_text** - Type text into a focused field
+   Fields: query (text), successCriteria
+   Example: {
+     "intent": "type_text",
+     "query": "best runners",
+     "description": "Type search query",
+     "successCriteria": "Text entered in field"
+   }
+
+5. **capture** - Take a screenshot
+   Fields: successCriteria
+   Example: {
+     "intent": "capture",
+     "description": "Capture search results",
+     "successCriteria": "Screenshot taken with results visible"
+   }
+
+6. **compare** - Compare results from multiple sources
+   Fields: successCriteria
+   Example: {
+     "intent": "compare",
+     "description": "Compare ChatGPT vs Perplexity results",
+     "successCriteria": "Comparison summary generated"
+   }
+
+7. **wait** - Wait for something to appear or change
+   Fields: element (what to wait for), successCriteria
+   Example: {
+     "intent": "wait",
+     "element": "search results",
+     "description": "Wait for results to load",
+     "successCriteria": "Results visible on page"
+   }
+
+8. **custom** - Any other high-level goal
+   Fields: description, successCriteria
+   Example: {
+     "intent": "custom",
+     "description": "Copy code from file",
+     "successCriteria": "Code copied to clipboard"
+   }
+
+=== SUCCESS CRITERIA EXAMPLES ===
+
+- "Perplexity homepage visible with search interface"
+- "Search query entered in input field"
+- "Search results displayed on page"
+- "Screenshot captured with results visible"
+- "ChatGPT response received"
+- "File opened in editor"
+- "Code copied to clipboard"
+
+=== EXAMPLE PLAN ===
+
+Task: "Search for 'best runners' on Perplexity"
+
+{
+  "goal": "Search for 'best runners' on Perplexity",
+  "version": 1,
+  "steps": [
+    {
+      "id": "step_1",
+      "intent": "navigate",
+      "description": "Go to Perplexity website",
+      "target": "https://perplexity.ai",
+      "successCriteria": "Perplexity homepage visible with search interface",
+      "maxAttempts": 2,
+      "status": "pending"
+    },
+    {
+      "id": "step_2",
+      "intent": "search",
+      "description": "Enter and submit search query for best runners",
+      "query": "best runners",
+      "successCriteria": "Query submitted and results loading or displayed",
+      "maxAttempts": 3,
+      "status": "pending"
+    },
+    {
+      "id": "step_3",
+      "intent": "capture",
+      "description": "Capture search results",
+      "successCriteria": "Screenshot taken with results visible",
+      "maxAttempts": 1,
+      "status": "pending"
+    }
+  ]
+}
+
+=== IMPORTANT NOTES ===
+
+- Keep steps HIGH-LEVEL (3-7 steps typical)
+- Computer-use LLM will break down each intent into tactical actions
+- LLM examines screenshots and adapts to actual UI state
+- LLM can retry with different approaches if first attempt fails
+- successCriteria tells LLM when to signal "STEP_COMPLETE"
+
+Now generate the intent-based JSON plan. Return ONLY the JSON object.`;
+  }
+
   private buildContextAwarePlanPrompt(request: AutomationPlanRequest): string {
     // Single source of truth for OS
     const os = request.context?.os || (process.platform === 'darwin' ? 'darwin' : 'win32');
@@ -1684,23 +1870,22 @@ Now generate the JSON plan for the user's command. Return ONLY the JSON object.`
 
 ${contextInfo}
 
-**CRITICAL: Ask for clarification if the request has IMPORTANT missing information or ambiguity.**
+**CRITICAL: ONLY ask for clarification if the request is IMPOSSIBLE to execute due to missing information.**
 
-🚨 **MUST ask for clarification if:**
-- **Vague references**: "that project", "the thing", "something like", "I think", "maybe"
-- **Missing critical target**: "open the file" (which file?), "check that project" (which project?)
-- **Ambiguous actions**: "save it" (where?), "send to my team" (who specifically?), "update the numbers" (which numbers? to what?)
-- **Impossible to identify what to automate**: "do that thing I mentioned"
-
-⚠️ **SHOULD ask for clarification if:**
-- **Important user preferences**: Save location, recipient lists, specific file paths
-- **Ambiguous scope**: "top 3 articles" (from where? saved where?)
-- **Missing context that affects outcome**: Which document? Which meeting? Which chapter?
+🚨 **MUST ask for clarification ONLY if:**
+- **Vague references with NO context**: "that project" (with no prior mention), "the thing", "do that thing I mentioned"
+- **Missing critical target with NO reasonable default**: "open the file" (which file?), "check that project" (which project?)
+- **Ambiguous actions with NO obvious intent**: "save it" (where? what?), "update the numbers" (which numbers? to what?)
+- **Completely unclear request**: "do something", "fix it", "handle that"
 
 ✅ **DO NOT ask for clarification if:**
-- **Minor styling preferences**: Color, font size, exact wording (can use reasonable defaults)
-- **The request is fully specific**: "Generate Mickey Mouse in ChatGPT", "Create calendar event for dentist next Tuesday at 2pm"
-- **Reasonable defaults exist and are obvious**: Search engine (Google), browser (Chrome), date format (MM/DD/YYYY)
+- **Request is specific and executable**: "Generate Mickey Mouse in ChatGPT", "Create calendar event for dentist next Tuesday at 2pm"
+- **Reasonable defaults exist**: Search engine (Google), browser (Chrome), date format (MM/DD/YYYY)
+- **Web automation with clear target**: "Goto perplexity and search for X", "Go to chatgpt and ask Y", "Navigate to google and lookup Z"
+- **Minor details can be inferred**: Exact wording, styling preferences, wait times
+- **User preferences can use sensible defaults**: Save location (Downloads), file format (PDF), etc.
+
+🎯 **BIAS TOWARD EXECUTION**: If the request CAN be executed with reasonable assumptions, DO NOT ask for clarification. Only ask if execution is IMPOSSIBLE.
 
 **Examples:**
 
@@ -1716,6 +1901,10 @@ CLEAR (no clarification needed):
 - "Send email to john@example.com about meeting" → Clear recipient and topic
 - "Create calendar event for dentist next Tuesday at 2pm" → Clear task and time
 - "Search Google for Python tutorials" → Clear task, obvious defaults (Google, browser)
+- "Goto perplexity and search for X" → Clear website and search query
+- "Go to chatgpt and ask about Y" → Clear website and query
+- "Navigate to google and lookup Z" → Clear website and search term
+- "Open perplexity and find information about A" → Clear website and topic
 
 **Response format:**
 
@@ -2045,7 +2234,7 @@ Analyze now:`;
 
       // Add prompt
       parts.push({
-        text: this.buildContextAwarePlanPrompt(request),
+        text: this.buildIntentBasedPlanPrompt(request),
       });
 
       const result = await model.generateContent({
@@ -2141,14 +2330,14 @@ Analyze now:`;
             },
             {
               type: 'text',
-              text: this.buildContextAwarePlanPrompt(request),
+              text: this.buildIntentBasedPlanPrompt(request),
             },
           ],
         });
       } else {
         messages.push({
           role: 'user',
-          content: this.buildContextAwarePlanPrompt(request),
+          content: this.buildIntentBasedPlanPrompt(request),
         });
       }
 
@@ -2231,7 +2420,7 @@ Analyze now:`;
       const messageContent: any[] = [
         {
           type: 'text',
-          text: this.buildContextAwarePlanPrompt(request),
+          text: this.buildIntentBasedPlanPrompt(request),
         },
       ];
 
@@ -2351,14 +2540,14 @@ Analyze now:`;
             },
             {
               type: 'text',
-              text: this.buildContextAwarePlanPrompt(request),
+              text: this.buildIntentBasedPlanPrompt(request),
             },
           ],
         });
       } else {
         messages.push({
           role: 'user',
-          content: this.buildContextAwarePlanPrompt(request),
+          content: this.buildIntentBasedPlanPrompt(request),
         });
       }
 
@@ -2688,8 +2877,13 @@ Analyze now:`;
 
     // Validate each step has required fields
     for (const step of planJson.steps) {
-      if (!step.id || !step.description || !step.kind) {
-        throw new Error(`Invalid step: missing required fields (id, description, kind)`);
+      // For intent-based steps: require id, description, and intent
+      // For action-based steps: require id, description, and kind
+      if (!step.id || !step.description) {
+        throw new Error(`Invalid step: missing required fields (id, description)`);
+      }
+      if (!step.intent && !step.kind) {
+        throw new Error(`Invalid step: must have either 'intent' (for intent-based) or 'kind' (for action-based)`);
       }
       // Ensure status is set
       if (!step.status) {

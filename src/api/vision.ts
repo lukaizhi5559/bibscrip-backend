@@ -4,6 +4,7 @@ import { logger } from '../utils/logger';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { guiActorClient } from '../services/guiActorClient';
 
 const router = Router();
 
@@ -49,7 +50,7 @@ const grokClient = process.env.GROK_API_KEY
  */
 router.post('/locate', authenticate, async (req: Request, res: Response): Promise<void> => {
   try {
-    const { screenshot, description, role, screenInfo } = req.body;
+    const { screenshot, description, role, screenInfo, windowBounds } = req.body;
 
     // Validate request
     if (!screenshot?.base64 || !description) {
@@ -70,20 +71,129 @@ router.post('/locate', authenticate, async (req: Request, res: Response): Promis
         height: screenInfo.height,
         scaleFactor: screenInfo.scaleFactor,
       } : undefined,
+      hasWindowBounds: !!windowBounds,
+      windowBounds: windowBounds ? {
+        x: windowBounds.x,
+        y: windowBounds.y,
+        width: windowBounds.width,
+        height: windowBounds.height,
+      } : undefined,
       userId: (req as any).user?.id,
     });
 
     const startTime = Date.now();
 
-    // Try OpenAI first (best for precise coordinate location)
+    // Try GUI-Actor first (highest accuracy for UI grounding - 75-85% vs OpenAI's 16%)
+    if (guiActorClient.isEnabled()) {
+      try {
+        const result = await guiActorClient.locate(screenshot, description, screenInfo);
+        const latencyMs = Date.now() - startTime;
+
+        // Apply window bounds offset if provided
+        const finalCoordinates = windowBounds ? {
+          x: result.coordinates.x + windowBounds.x,
+          y: result.coordinates.y + windowBounds.y,
+        } : result.coordinates;
+
+        logger.info('Vision locate successful with GUI-Actor', {
+          description,
+          coordinates: finalCoordinates,
+          rawCoordinates: result.coordinates,
+          windowOffset: windowBounds ? { x: windowBounds.x, y: windowBounds.y } : null,
+          confidence: result.confidence,
+          latencyMs,
+          isZeroCoordinates: result.coordinates.x === 0 && result.coordinates.y === 0,
+          isLowConfidence: result.confidence < 0.3,
+        });
+        
+        // Log warning if returning (0,0) coordinates
+        if (result.coordinates.x === 0 && result.coordinates.y === 0) {
+          logger.warn('⚠️ GUI-Actor returned (0,0) coordinates - element likely not found', {
+            description,
+            confidence: result.confidence,
+            provider: 'gui-actor',
+          });
+        }
+
+        res.status(200).json({
+          success: true,
+          coordinates: finalCoordinates,
+          confidence: result.confidence,
+          provider: 'gui-actor',
+          latencyMs,
+        });
+        return;
+      } catch (error: any) {
+        logger.warn('GUI-Actor vision locate failed, falling back to OpenAI', {
+          error: error.message,
+        });
+      }
+    }
+
+    // Try Gemini (Priority 2 - best bounding box accuracy, returns normalized 0-1000 coordinates)
+    if (geminiClient) {
+      try {
+        const result = await locateWithGemini(screenshot, description, role, screenInfo);
+        const latencyMs = Date.now() - startTime;
+
+        // Apply window bounds offset if provided
+        const finalCoordinates = windowBounds ? {
+          x: result.coordinates.x + windowBounds.x,
+          y: result.coordinates.y + windowBounds.y,
+        } : result.coordinates;
+
+        logger.info('Vision locate successful with Gemini', {
+          description,
+          coordinates: finalCoordinates,
+          rawCoordinates: result.coordinates,
+          windowOffset: windowBounds ? { x: windowBounds.x, y: windowBounds.y } : null,
+          confidence: result.confidence,
+          latencyMs,
+          isZeroCoordinates: result.coordinates.x === 0 && result.coordinates.y === 0,
+          isLowConfidence: result.confidence < 0.3,
+        });
+        
+        // Log warning if returning (0,0) coordinates
+        if (result.coordinates.x === 0 && result.coordinates.y === 0) {
+          logger.warn('⚠️ Gemini returned (0,0) coordinates - element likely not found', {
+            description,
+            confidence: result.confidence,
+            provider: 'gemini',
+          });
+        }
+
+        res.status(200).json({
+          success: true,
+          coordinates: finalCoordinates,
+          confidence: result.confidence,
+          provider: 'gemini',
+          latencyMs,
+        });
+        return;
+      } catch (error: any) {
+        logger.warn('Gemini vision locate failed, falling back to OpenAI', {
+          error: error.message,
+        });
+      }
+    }
+
+    // Try OpenAI (Priority 3 - general vision model)
     if (openaiClient) {
       try {
         const result = await locateWithOpenAI(screenshot, description, role, screenInfo);
         const latencyMs = Date.now() - startTime;
 
+        // Apply window bounds offset if provided
+        const finalCoordinates = windowBounds ? {
+          x: result.coordinates.x + windowBounds.x,
+          y: result.coordinates.y + windowBounds.y,
+        } : result.coordinates;
+
         logger.info('Vision locate successful with OpenAI', {
           description,
-          coordinates: result.coordinates,
+          coordinates: finalCoordinates,
+          rawCoordinates: result.coordinates,
+          windowOffset: windowBounds ? { x: windowBounds.x, y: windowBounds.y } : null,
           confidence: result.confidence,
           latencyMs,
           isZeroCoordinates: result.coordinates.x === 0 && result.coordinates.y === 0,
@@ -101,7 +211,8 @@ router.post('/locate', authenticate, async (req: Request, res: Response): Promis
 
         res.status(200).json({
           success: true,
-          ...result,
+          coordinates: finalCoordinates,
+          confidence: result.confidence,
           provider: 'openai',
           latencyMs,
         });
@@ -119,16 +230,25 @@ router.post('/locate', authenticate, async (req: Request, res: Response): Promis
         const result = await locateWithClaude(screenshot, description, role, screenInfo);
         const latencyMs = Date.now() - startTime;
 
+        // Apply window bounds offset if provided
+        const finalCoordinates = windowBounds ? {
+          x: result.coordinates.x + windowBounds.x,
+          y: result.coordinates.y + windowBounds.y,
+        } : result.coordinates;
+
         logger.info('Vision locate successful with Claude', {
           description,
-          coordinates: result.coordinates,
+          coordinates: finalCoordinates,
+          rawCoordinates: result.coordinates,
+          windowOffset: windowBounds ? { x: windowBounds.x, y: windowBounds.y } : null,
           confidence: result.confidence,
           latencyMs,
         });
 
         res.status(200).json({
           success: true,
-          ...result,
+          coordinates: finalCoordinates,
+          confidence: result.confidence,
           provider: 'claude',
           latencyMs,
         });
@@ -146,16 +266,25 @@ router.post('/locate', authenticate, async (req: Request, res: Response): Promis
         const result = await locateWithGrok(screenshot, description, role, screenInfo);
         const latencyMs = Date.now() - startTime;
 
+        // Apply window bounds offset if provided
+        const finalCoordinates = windowBounds ? {
+          x: result.coordinates.x + windowBounds.x,
+          y: result.coordinates.y + windowBounds.y,
+        } : result.coordinates;
+
         logger.info('Vision locate successful with Grok', {
           description,
-          coordinates: result.coordinates,
+          coordinates: finalCoordinates,
+          rawCoordinates: result.coordinates,
+          windowOffset: windowBounds ? { x: windowBounds.x, y: windowBounds.y } : null,
           confidence: result.confidence,
           latencyMs,
         });
 
         res.status(200).json({
           success: true,
-          ...result,
+          coordinates: finalCoordinates,
+          confidence: result.confidence,
           provider: 'grok',
           latencyMs,
         });
@@ -1378,6 +1507,131 @@ Required format:
   return {
     coordinates: { x: result.x, y: result.y },
     confidence: result.confidence,
+  };
+}
+
+async function locateWithGemini(
+  screenshot: { base64: string; mimeType: string },
+  description: string,
+  role?: string,
+  screenInfo?: { width: number; height: number; scaleFactor: number }
+): Promise<{ coordinates: { x: number; y: number }; confidence: number }> {
+  if (!geminiClient) {
+    throw new Error('Gemini client not initialized');
+  }
+
+  const roleHint = role ? ` (a ${role} element)` : '';
+  const screenDimensions = screenInfo 
+    ? `\n\n**SCREEN DIMENSIONS:**\n- Width: ${screenInfo.width}px\n- Height: ${screenInfo.height}px\n- Scale: ${screenInfo.scaleFactor}x`
+    : '';
+  
+  const prompt = `You are a precise UI element locator with superior bounding box detection capabilities.
+
+**TASK:** Locate "${description}"${roleHint} in this screenshot and return its bounding box.${screenDimensions}
+
+**CRITICAL INSTRUCTIONS:**
+1. Analyze the screenshot to find the UI element matching the description
+2. Return bounding box coordinates in the format: [ymin, xmin, ymax, xmax]
+3. Coordinates MUST be normalized to a 0-1000 scale (NOT pixels)
+4. The coordinate system is: [top, left, bottom, right]
+5. Return the center point for clicking: x = (xmin + xmax) / 2, y = (ymin + ymax) / 2
+
+**COORDINATE FORMAT:**
+- ymin: Top edge (0 = top of image, 1000 = bottom)
+- xmin: Left edge (0 = left of image, 1000 = right)
+- ymax: Bottom edge
+- xmax: Right edge
+
+**CONFIDENCE LEVELS:**
+- 0.9-1.0: Element clearly visible and precisely located
+- 0.7-0.8: Element visible but position slightly uncertain
+- 0.4-0.6: Element might be present but very uncertain
+- 0.0-0.3: Element not found or wrong context
+
+**RESPONSE FORMAT (JSON only, no markdown):**
+{
+  "boundingBox": [ymin, xmin, ymax, xmax],
+  "confidence": 0.95,
+  "elementType": "button|input|link|icon|etc"
+}
+
+If element not found:
+{
+  "boundingBox": [0, 0, 0, 0],
+  "confidence": 0.0,
+  "elementType": "not_found"
+}
+
+Return ONLY the JSON object. No explanations. No markdown code blocks.`;
+
+  const model = geminiClient.getGenerativeModel({ 
+    model: 'gemini-2.0-flash-exp',
+    generationConfig: {
+      temperature: 0.1,
+      maxOutputTokens: 300,
+    },
+  });
+
+  const result = await model.generateContent([
+    {
+      inlineData: {
+        mimeType: screenshot.mimeType || 'image/png',
+        data: screenshot.base64,
+      },
+    },
+    { text: prompt },
+  ]);
+
+  const response = result.response.text();
+  const cleaned = response.replace(/```(?:json)?\n?/g, '').trim();
+  
+  logger.debug('Gemini vision raw response', {
+    description,
+    rawResponse: response.substring(0, 500),
+    cleanedResponse: cleaned.substring(0, 500),
+  });
+  
+  const parsed = JSON.parse(cleaned);
+  
+  // Convert normalized 0-1000 coordinates to pixel coordinates
+  const bbox = parsed.boundingBox || [0, 0, 0, 0];
+  const [ymin, xmin, ymax, xmax] = bbox;
+  
+  // Calculate center point in normalized space (0-1000)
+  const centerX = (xmin + xmax) / 2;
+  const centerY = (ymin + ymax) / 2;
+  
+  // Convert to pixel coordinates if screen dimensions provided
+  let pixelX = 0;
+  let pixelY = 0;
+  
+  if (screenInfo && centerX > 0 && centerY > 0) {
+    // Convert from 0-1000 scale to pixel coordinates
+    pixelX = Math.round((centerX / 1000) * screenInfo.width);
+    pixelY = Math.round((centerY / 1000) * screenInfo.height);
+  }
+  
+  const confidence = parsed.confidence || 0.0;
+  
+  // Enhanced logging for (0,0) coordinates
+  if (pixelX === 0 && pixelY === 0) {
+    logger.warn('⚠️ Gemini returned (0,0) coordinates', {
+      description,
+      role,
+      confidence,
+      boundingBox: bbox,
+      normalizedCenter: { x: centerX, y: centerY },
+      rawResponse: response.substring(0, 1000),
+      screenInfo,
+      interpretation: confidence === 0 
+        ? 'Element not found (expected behavior)'
+        : 'Possible bug - high confidence but (0,0) coordinates',
+    });
+  }
+
+  return {
+    coordinates: { x: pixelX, y: pixelY },
+    confidence,
   };
 }
 

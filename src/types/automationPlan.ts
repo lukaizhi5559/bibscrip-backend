@@ -152,8 +152,11 @@ export interface AutomationStep {
   /** Unique step identifier (e.g., "step_1", "step_2") */
   id: string;
   
-  /** Low-level action to perform */
-  kind: AutomationStepKind;
+  /** Low-level action to perform (for action-based plans) */
+  kind?: AutomationStepKind;
+  
+  /** High-level intent (for intent-based plans with computer-use execution) */
+  intent?: 'navigate' | 'search' | 'click_element' | 'type_text' | 'capture' | 'compare' | 'wait' | 'custom';
   
   /** Human-readable description */
   description: string;
@@ -172,6 +175,29 @@ export interface AutomationStep {
   
   /** What to do if this step fails after all retries */
   onError?: AutomationErrorHandler;
+  
+  // ========== INTENT-BASED FIELDS (for hybrid plan + computer-use) ==========
+  
+  /** Target URL for navigate intent, or element description for click_element */
+  target?: string;
+  
+  /** Query text for search/type_text intents */
+  query?: string;
+  
+  /** Element description for click_element intent (natural language) */
+  element?: string;
+  
+  /** How to verify this step is complete (for computer-use LLM) */
+  successCriteria?: string;
+  
+  /** Maximum attempts for this step (for computer-use adaptive execution) */
+  maxAttempts?: number;
+  
+  /** Expected duration estimate */
+  expectedDuration?: string;
+  
+  /** Additional notes or context for the computer-use LLM */
+  notes?: string;
 }
 
 // ============================================================================

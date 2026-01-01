@@ -40,3 +40,6 @@ coverage/
 
 eng.traineddata
 thinkdrop-vision-agent-798a1dc876a9.json
+
+# OmniParser
+services/omniparser/venv

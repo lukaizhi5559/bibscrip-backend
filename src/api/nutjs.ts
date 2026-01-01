@@ -216,6 +216,31 @@ router.post('/plan', authenticate, async (req: Request, res: Response): Promise<
     if (screenshot && !normalizedContext.screenshot) {
       normalizedContext.screenshot = screenshot;
     }
+    
+    // Sanitize base64 screenshot data - strip data URL prefix if present
+    if (normalizedContext.screenshot?.base64) {
+      let base64Data = normalizedContext.screenshot.base64;
+      
+      // Check if it has data URL prefix (e.g., "data:image/png;base64,")
+      if (base64Data.includes('data:image')) {
+        const base64Match = base64Data.match(/^data:image\/[a-z]+;base64,(.+)$/);
+        if (base64Match && base64Match[1]) {
+          base64Data = base64Match[1];
+          logger.info('Stripped data URL prefix from screenshot', {
+            originalLength: normalizedContext.screenshot.base64.length,
+            strippedLength: base64Data.length,
+          });
+        }
+      }
+      
+      // Update with sanitized base64
+      normalizedContext.screenshot.base64 = base64Data;
+      
+      // Ensure mimeType is set
+      if (!normalizedContext.screenshot.mimeType) {
+        normalizedContext.screenshot.mimeType = 'image/png';
+      }
+    }
 
     logger.info('Automation plan generation request received', {
       command,
