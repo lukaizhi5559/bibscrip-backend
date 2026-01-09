@@ -14,22 +14,42 @@ import { logger } from '../utils/logger';
 import { intentExecutionEngine } from '../services/intentExecutionEngine';
 import { IntentExecutionRequest, IntentType } from '../types/intentTypes';
 
+interface IntentSession {
+  sessionId: string;
+  isPaused: boolean;
+  currentStep: number;
+  ws: WebSocket;
+  createdAt: number;
+  pendingClarification?: {
+    stepId: string;
+    request: IntentExecutionRequest;
+    requestId?: string;
+  };
+}
+
 interface IntentWebSocketMessage {
-  type: 'execute_intent' | 'ping';
+  type: 'execute_intent' | 'pause' | 'resume' | 'stop' | 'clarification_answer' | 'ping';
+  sessionId?: string;
   requestId?: string;
+  stepId?: string;
   data?: IntentExecutionRequest;
+  answers?: Record<string, string>;
 }
 
 interface IntentWebSocketResponse {
-  type: 'intent_result' | 'error' | 'pong';
+  type: 'intent_result' | 'clarification_needed' | 'paused' | 'resumed' | 'stopped' | 'error' | 'pong';
   requestId?: string;
+  sessionId?: string;
+  stepId?: string;
   data?: any;
+  questions?: any[];
   error?: string;
 }
 
 export class IntentWebSocketServer {
   private wss: WebSocketServer | null = null;
   private clients: Set<WebSocket> = new Set();
+  private sessions: Map<string, IntentSession> = new Map();
 
   initialize(server: Server) {
     this.wss = new WebSocketServer({ 
@@ -102,7 +122,23 @@ export class IntentWebSocketServer {
           return;
         }
 
-        await this.executeIntent(ws, data, requestId);
+        await this.executeIntent(ws, data, requestId, message.sessionId);
+        break;
+
+      case 'pause':
+        this.handlePause(ws, message.sessionId, requestId);
+        break;
+
+      case 'resume':
+        this.handleResume(ws, message.sessionId, requestId);
+        break;
+
+      case 'stop':
+        this.handleStop(ws, message.sessionId, requestId);
+        break;
+
+      case 'clarification_answer':
+        await this.handleClarificationAnswer(ws, message, requestId);
         break;
 
       default:
@@ -117,7 +153,8 @@ export class IntentWebSocketServer {
   private async executeIntent(
     ws: WebSocket,
     request: IntentExecutionRequest,
-    requestId?: string
+    requestId?: string,
+    sessionId?: string
   ) {
     try {
       logger.info('Executing intent via WebSocket', {
@@ -129,13 +166,74 @@ export class IntentWebSocketServer {
       // Validate request
       this.validateIntentRequest(request);
 
+      // Create or update session
+      if (sessionId) {
+        const session = this.sessions.get(sessionId);
+        if (session && session.isPaused) {
+          logger.info('Session is paused, queuing intent execution', { sessionId });
+          this.sendMessage(ws, {
+            type: 'error',
+            requestId,
+            sessionId,
+            error: 'Session is paused. Resume to continue.'
+          });
+          return;
+        }
+
+        // Update or create session
+        this.sessions.set(sessionId, {
+          sessionId,
+          isPaused: false,
+          currentStep: (session?.currentStep || 0) + 1,
+          ws,
+          createdAt: session?.createdAt || Date.now()
+        });
+      }
+
       // Execute intent using IntentExecutionEngine
       const result = await intentExecutionEngine.executeIntent(request);
+
+      // Check if clarification is needed
+      if (result.status === 'clarification_needed') {
+        // Store pending clarification in session
+        if (sessionId) {
+          const session = this.sessions.get(sessionId);
+          if (session) {
+            session.pendingClarification = {
+              stepId: request.stepData.id,
+              request,
+              requestId,
+            };
+          }
+        }
+
+        // Send clarification request to frontend
+        this.sendMessage(ws, {
+          type: 'clarification_needed',
+          requestId,
+          sessionId,
+          stepId: request.stepData.id,
+          questions: result.clarificationQuestions,
+          data: {
+            actionsExecuted: result.actions.length,
+            executionTimeMs: result.executionTimeMs,
+          },
+        });
+
+        logger.info('Clarification requested', {
+          intentType: request.intentType,
+          stepId: request.stepData.id,
+          questionCount: result.clarificationQuestions?.length || 0,
+        });
+
+        return;
+      }
 
       // Send result back to client
       this.sendMessage(ws, {
         type: 'intent_result',
         requestId,
+        sessionId,
         data: result
       });
 
@@ -202,6 +300,225 @@ export class IntentWebSocketServer {
 
     if (!validIntents.includes(request.intentType)) {
       throw new Error(`Invalid intent type: ${request.intentType}`);
+    }
+  }
+
+  private handlePause(ws: WebSocket, sessionId?: string, requestId?: string) {
+    if (!sessionId) {
+      this.sendMessage(ws, {
+        type: 'error',
+        requestId,
+        error: 'Missing sessionId for pause'
+      });
+      return;
+    }
+
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      this.sendMessage(ws, {
+        type: 'error',
+        requestId,
+        sessionId,
+        error: 'Session not found'
+      });
+      return;
+    }
+
+    session.isPaused = true;
+    logger.info('Session paused', { sessionId });
+
+    this.sendMessage(ws, {
+      type: 'paused',
+      requestId,
+      sessionId,
+      data: { currentStep: session.currentStep }
+    });
+  }
+
+  private handleResume(ws: WebSocket, sessionId?: string, requestId?: string) {
+    if (!sessionId) {
+      this.sendMessage(ws, {
+        type: 'error',
+        requestId,
+        error: 'Missing sessionId for resume'
+      });
+      return;
+    }
+
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      this.sendMessage(ws, {
+        type: 'error',
+        requestId,
+        sessionId,
+        error: 'Session not found'
+      });
+      return;
+    }
+
+    session.isPaused = false;
+    logger.info('Session resumed', { sessionId });
+
+    this.sendMessage(ws, {
+      type: 'resumed',
+      requestId,
+      sessionId,
+      data: { currentStep: session.currentStep }
+    });
+  }
+
+  private handleStop(ws: WebSocket, sessionId?: string, requestId?: string) {
+    if (!sessionId) {
+      this.sendMessage(ws, {
+        type: 'error',
+        requestId,
+        error: 'Missing sessionId for stop'
+      });
+      return;
+    }
+
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      this.sessions.delete(sessionId);
+      logger.info('Session stopped and removed', { sessionId });
+    }
+
+    this.sendMessage(ws, {
+      type: 'stopped',
+      requestId,
+      sessionId,
+      data: { message: 'Session stopped successfully' }
+    });
+  }
+
+  private async handleClarificationAnswer(
+    ws: WebSocket,
+    message: IntentWebSocketMessage,
+    requestId?: string
+  ) {
+    const { sessionId, stepId, answers } = message;
+
+    if (!sessionId) {
+      this.sendMessage(ws, {
+        type: 'error',
+        requestId,
+        error: 'Missing sessionId for clarification answer'
+      });
+      return;
+    }
+
+    if (!stepId) {
+      this.sendMessage(ws, {
+        type: 'error',
+        requestId,
+        sessionId,
+        error: 'Missing stepId for clarification answer'
+      });
+      return;
+    }
+
+    if (!answers) {
+      this.sendMessage(ws, {
+        type: 'error',
+        requestId,
+        sessionId,
+        error: 'Missing answers for clarification'
+      });
+      return;
+    }
+
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      this.sendMessage(ws, {
+        type: 'error',
+        requestId,
+        sessionId,
+        error: 'Session not found'
+      });
+      return;
+    }
+
+    if (!session.pendingClarification || session.pendingClarification.stepId !== stepId) {
+      this.sendMessage(ws, {
+        type: 'error',
+        requestId,
+        sessionId,
+        error: 'No pending clarification for this step'
+      });
+      return;
+    }
+
+    logger.info('Clarification answers received', {
+      sessionId,
+      stepId,
+      answerCount: Object.keys(answers).length,
+    });
+
+    // Re-execute intent with clarification answers
+    try {
+      const { request } = session.pendingClarification;
+      const result = await intentExecutionEngine.executeIntent(request, answers);
+
+      // Clear pending clarification
+      session.pendingClarification = undefined;
+
+      // Check if more clarification is needed
+      if (result.status === 'clarification_needed') {
+        session.pendingClarification = {
+          stepId: request.stepData.id,
+          request,
+          requestId,
+        };
+
+        this.sendMessage(ws, {
+          type: 'clarification_needed',
+          requestId,
+          sessionId,
+          stepId: request.stepData.id,
+          questions: result.clarificationQuestions,
+          data: {
+            actionsExecuted: result.actions.length,
+            executionTimeMs: result.executionTimeMs,
+          },
+        });
+
+        logger.info('Additional clarification requested', {
+          intentType: request.intentType,
+          stepId: request.stepData.id,
+          questionCount: result.clarificationQuestions?.length || 0,
+        });
+
+        return;
+      }
+
+      // Send result back to client
+      this.sendMessage(ws, {
+        type: 'intent_result',
+        requestId,
+        sessionId,
+        data: result,
+      });
+
+      logger.info('Intent execution completed after clarification', {
+        intentType: request.intentType,
+        stepId: request.stepData.id,
+        status: result.status,
+        actionsExecuted: result.actions.length,
+        executionTimeMs: result.executionTimeMs,
+      });
+    } catch (error: any) {
+      logger.error('Intent execution failed after clarification', {
+        sessionId,
+        stepId,
+        error: error.message,
+      });
+
+      this.sendMessage(ws, {
+        type: 'error',
+        requestId,
+        sessionId,
+        error: error.message,
+      });
     }
   }
 

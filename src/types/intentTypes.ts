@@ -197,11 +197,21 @@ export interface IntentExecutionRequest {
 }
 
 /**
+ * Clarification question for user input
+ */
+export interface ClarificationQuestion {
+  id: string;
+  question: string;
+  type?: 'text' | 'choice' | 'confirm';
+  choices?: string[];
+}
+
+/**
  * Result of executing a single intent step
  */
 export interface IntentExecutionResult {
   /** Execution status */
-  status: 'step_complete' | 'step_failed' | 'needs_user_input';
+  status: 'step_complete' | 'step_failed' | 'clarification_needed' | 'needs_user_input';
   
   /** Intent type executed */
   intentType: IntentType;
@@ -235,6 +245,9 @@ export interface IntentExecutionResult {
   
   /** LLM reasoning/explanation */
   reasoning?: string;
+  
+  /** Clarification questions (if status is clarification_needed) */
+  clarificationQuestions?: ClarificationQuestion[];
 }
 
 /**

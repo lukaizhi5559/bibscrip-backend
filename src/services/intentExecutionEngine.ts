@@ -17,7 +17,8 @@ import {
   IntentExecutionRequest, 
   IntentExecutionResult,
   ActionType,
-  INTENT_AVAILABLE_ACTIONS 
+  INTENT_AVAILABLE_ACTIONS,
+  ClarificationQuestion
 } from '../types/intentTypes';
 import { intentPromptBuilder } from './intentPromptBuilder';
 
@@ -61,10 +62,13 @@ export class IntentExecutionEngine {
   }
 
   /**
-   * Execute a single intent step
+   * Execute a single intent step with retry logic and timeout
    * Returns when step is complete (all actions executed)
    */
-  async executeIntent(request: IntentExecutionRequest): Promise<IntentExecutionResult> {
+  async executeIntent(
+    request: IntentExecutionRequest,
+    clarificationAnswers?: Record<string, string>
+  ): Promise<IntentExecutionResult> {
     const startTime = Date.now();
     const { intentType, stepData, context } = request;
 
@@ -86,14 +90,23 @@ export class IntentExecutionEngine {
     let isComplete = false;
     let attemptCount = 0;
     const maxAttempts = stepData.maxAttempts || 10; // Max actions per intent
+    const intentTimeout = 30000; // 30 seconds max per intent
+    const intentStartTime = Date.now();
+    let retryCount = 0;
+    const maxRetries = 3;
 
     try {
       // Execute actions until 'end' action or max attempts
       while (!isComplete && attemptCount < maxAttempts) {
+        // Check timeout
+        if (Date.now() - intentStartTime > intentTimeout) {
+          throw new Error(`Intent execution timeout after ${intentTimeout}ms`);
+        }
+
         attemptCount++;
 
-        // Build intent-specific prompt with current screenshot
-        const prompt = intentPromptBuilder.buildPrompt({
+        // Build intent-specific prompt with current screenshot and clarification answers
+        let prompt = intentPromptBuilder.buildPrompt({
           ...request,
           context: {
             ...context,
@@ -102,11 +115,63 @@ export class IntentExecutionEngine {
           },
         });
 
-        // Get next action from LLM
-        const action = await this.getNextAction(prompt, currentScreenshot, availableActions);
+        // Append clarification answers if provided
+        if (clarificationAnswers && Object.keys(clarificationAnswers).length > 0) {
+          prompt += '\n\n## User Clarification Answers:\n';
+          for (const [questionId, answer] of Object.entries(clarificationAnswers)) {
+            prompt += `- ${questionId}: ${answer}\n`;
+          }
+        }
+
+        // Get next action from LLM with retry logic
+        let action = null;
+        let llmError = null;
+
+        for (let retry = 0; retry <= maxRetries; retry++) {
+          try {
+            action = await this.getNextAction(prompt, currentScreenshot, availableActions);
+            
+            // Check for clarification request
+            if (action.type === 'clarification_needed' || action.needsClarification) {
+              const questions = this.extractClarificationQuestions(action);
+              if (questions.length > 0) {
+                logger.info('Clarification needed', {
+                  intentType,
+                  stepId: stepData.id,
+                  questionCount: questions.length,
+                });
+
+                return {
+                  status: 'clarification_needed',
+                  intentType,
+                  stepId: stepData.id,
+                  actions: executedActions,
+                  outputScreenshot: currentScreenshot,
+                  data: storedData,
+                  executionTimeMs: Date.now() - startTime,
+                  clarificationQuestions: questions,
+                };
+              }
+            }
+
+            if (action) break; // Success
+          } catch (error: any) {
+            llmError = error;
+            retryCount++;
+            logger.warn(`LLM call failed, retry ${retry + 1}/${maxRetries}`, {
+              error: error.message,
+              intentType,
+              stepId: stepData.id,
+            });
+            
+            if (retry < maxRetries) {
+              await this.delay(1000 * (retry + 1)); // Exponential backoff
+            }
+          }
+        }
 
         if (!action) {
-          throw new Error('LLM failed to return valid action');
+          throw new Error(`LLM failed after ${maxRetries} retries: ${llmError?.message}`);
         }
 
         logger.info('Executing action', {
@@ -139,9 +204,38 @@ export class IntentExecutionEngine {
           });
         }
 
-        // Safety check: if action failed and it's critical, stop
-        if (!actionResult.success && this.isCriticalAction(action.type)) {
-          throw new Error(`Critical action failed: ${action.type} - ${actionResult.error}`);
+        // Safety check: if action failed, retry or request clarification
+        if (!actionResult.success) {
+          retryCount++;
+          logger.warn('Action failed', {
+            actionType: action.type,
+            error: actionResult.error,
+            retryCount,
+          });
+
+          if (retryCount >= maxRetries) {
+            // After max retries, request clarification
+            return {
+              status: 'clarification_needed',
+              intentType,
+              stepId: stepData.id,
+              actions: executedActions,
+              outputScreenshot: currentScreenshot,
+              data: storedData,
+              executionTimeMs: Date.now() - startTime,
+              clarificationQuestions: [
+                {
+                  id: 'retry_failed',
+                  question: `Action '${action.type}' failed after ${maxRetries} attempts. Error: ${actionResult.error}. How should I proceed?`,
+                  type: 'choice',
+                  choices: ['Retry with different approach', 'Skip this step', 'Stop automation'],
+                },
+              ],
+            };
+          }
+        } else {
+          // Reset retry count on success
+          retryCount = 0;
         }
       }
 
@@ -335,6 +429,42 @@ export class IntentExecutionEngine {
   }
 
   /**
+   * Extract clarification questions from LLM response
+   */
+  private extractClarificationQuestions(action: any): ClarificationQuestion[] {
+    const questions: ClarificationQuestion[] = [];
+
+    // Check if action has clarification questions
+    if (action.questions && Array.isArray(action.questions)) {
+      return action.questions.map((q: any, idx: number) => ({
+        id: q.id || `q${idx + 1}`,
+        question: q.question || q.text || String(q),
+        type: q.type || 'text',
+        choices: q.choices,
+      }));
+    }
+
+    // Check if action has a single question
+    if (action.question) {
+      questions.push({
+        id: 'q1',
+        question: action.question,
+        type: action.questionType || 'text',
+        choices: action.choices,
+      });
+    }
+
+    return questions;
+  }
+
+  /**
+   * Delay helper for retry backoff
+   */
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
    * Parse action JSON from LLM response
    */
   private parseActionFromResponse(response: string): any {
@@ -347,8 +477,29 @@ export class IntentExecutionEngine {
 
       const action = JSON.parse(jsonMatch[0]);
 
+      // Check for clarification markers in response text
+      const lowerResponse = response.toLowerCase();
+      if (
+        lowerResponse.includes('clarification_needed') ||
+        lowerResponse.includes('need clarification') ||
+        lowerResponse.includes('unclear') ||
+        lowerResponse.includes('which one') ||
+        lowerResponse.includes('should i')
+      ) {
+        // Extract questions from response
+        const questionMatch = response.match(/(?:question|unclear|which|should i)[:\s]+([^\n]+)/gi);
+        if (questionMatch) {
+          action.needsClarification = true;
+          action.questions = questionMatch.map((q, idx) => ({
+            id: `q${idx + 1}`,
+            question: q.trim(),
+            type: 'text',
+          }));
+        }
+      }
+
       // Validate action has required fields
-      if (!action.type) {
+      if (!action.type && !action.needsClarification) {
         throw new Error('Action missing "type" field');
       }
 
