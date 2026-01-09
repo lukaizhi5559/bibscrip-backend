@@ -73,6 +73,13 @@ export type AutomationStepKind =
   | { type: 'scroll'; direction: 'up' | 'down' | 'left' | 'right'; amount: number }
   | { type: 'pause'; ms: number }
   | { type: 'screenshot'; tag?: string; analyzeWithVision?: boolean }
+  | { type: 'clickAndDrag'; fromLocator: VisionLocator; toLocator: VisionLocator }
+  | { type: 'zoom'; zoomDirection: 'in' | 'out'; zoomLevel?: number }
+  
+  // Data Operations (for intent-driven automation)
+  | { type: 'ocr'; region?: { x: number; y: number; width: number; height: number } }  // Extract text from screenshot
+  | { type: 'store'; key: string; value: any }  // Store data for later steps
+  | { type: 'retrieve'; key: string }  // Retrieve stored data
   
   // Domain Skills (API setup communication - NOT for execution, MCP handles that)
   | { type: 'apiAction'; skill: string; params: Record<string, any>; description?: string }
@@ -156,7 +163,12 @@ export interface AutomationStep {
   kind?: AutomationStepKind;
   
   /** High-level intent (for intent-based plans with computer-use execution) */
-  intent?: 'navigate' | 'search' | 'click_element' | 'type_text' | 'capture' | 'compare' | 'wait' | 'custom';
+  intent?: 'navigate' | 'switch_app' | 'close_app' | 'click_element' | 'type_text' | 'search' | 'select' | 'drag' | 'scroll' 
+    | 'capture' | 'extract' | 'copy' | 'paste' | 'store' | 'retrieve' 
+    | 'wait' | 'verify' | 'compare' | 'check' 
+    | 'upload' | 'download' | 'open_file' | 'save_file' 
+    | 'zoom' | 'authenticate' | 'form_fill' | 'multi_select' 
+    | 'custom';
   
   /** Human-readable description */
   description: string;
@@ -252,6 +264,7 @@ export interface AutomationPlan {
     activeUrl?: string;
     os?: string;
     timestamp?: string;
+    storedData?: Record<string, any>;  // Data passed between steps (frontend manages)
   };
   
   /** Ordered list of steps to execute */
@@ -340,6 +353,9 @@ export interface AutomationPlanRequest {
     
     /** Index of the failed step (for partial fix plans) */
     failedStepIndex?: number;
+    
+    /** Data stored from previous steps (frontend manages, passed between steps) */
+    storedData?: Record<string, any>;
   };
   
   /** Previous plan (for replanning) */

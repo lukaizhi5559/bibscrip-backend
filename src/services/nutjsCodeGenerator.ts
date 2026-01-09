@@ -1451,7 +1451,7 @@ SCHEMA:
   "steps": [
     {
       "id": "string - step_1, step_2, etc.",
-      "intent": "enum - navigate|search|click_element|type_text|capture|compare|wait|custom",
+      "intent": "enum - navigate|switch_app|close_app|click_element|type_text|search|select|drag|scroll|capture|extract|copy|paste|store|retrieve|wait|verify|compare|check|upload|download|open_file|save_file|zoom|authenticate|form_fill|multi_select|custom",
       "description": "string - human-readable WHAT to accomplish",
       "target": "string - optional, for navigate: URL, for click_element: element description",
       "query": "string - optional, for search/type_text: text to enter",
@@ -1463,76 +1463,61 @@ SCHEMA:
   ]
 }
 
-=== INTENT TYPES ===
+=== INTENT TYPES (27 Total) ===
 
-1. **navigate** - Navigate to a URL or application
-   Fields: target (URL), successCriteria
-   Example: {
-     "intent": "navigate",
-     "target": "https://perplexity.ai",
-     "description": "Go to Perplexity website",
-     "successCriteria": "Perplexity homepage visible with search interface"
-   }
+**Navigation & App Control**
+1. **navigate** - Go to URL or focus app (target: URL/app name)
+2. **switch_app** - Switch between applications (target: app name)
+3. **close_app** - Close application or tab
 
-2. **search** - Enter a search query and submit
-   Fields: query (text), successCriteria
-   Example: {
-     "intent": "search",
-     "query": "best runners",
-     "description": "Search for best runners",
-     "successCriteria": "Query submitted and results loading or displayed"
-   }
+**UI Interaction**
+4. **click_element** - Click on UI element (element: description)
+5. **type_text** - Type text into field (query: text)
+6. **search** - Find and search (query: search text)
+7. **select** - Select from dropdown/menu (element: dropdown, query: option)
+8. **drag** - Drag and drop (element: source, target: destination)
+9. **scroll** - Scroll page/element (query: direction)
 
-3. **click_element** - Click on a UI element (natural language description)
-   Fields: element (description), successCriteria
-   Example: {
-     "intent": "click_element",
-     "element": "search input field",
-     "description": "Click the search field to focus it",
-     "successCriteria": "Input field is focused and ready for typing"
-   }
+**Data Operations**
+10. **capture** - Screenshot + OCR + store data
+11. **extract** - Extract specific data (element: what to extract)
+12. **copy** - Copy text/data (element: what to copy)
+13. **paste** - Paste from clipboard (element: where to paste)
+14. **store** - Store data for later (query: data to store)
+15. **retrieve** - Retrieve stored data (query: data key)
 
-4. **type_text** - Type text into a focused field
-   Fields: query (text), successCriteria
-   Example: {
-     "intent": "type_text",
-     "query": "best runners",
-     "description": "Type search query",
-     "successCriteria": "Text entered in field"
-   }
+**Verification & Control**
+16. **wait** - Wait for element/condition (element: what to wait for)
+17. **verify** - Verify state/condition (successCriteria: what to verify)
+18. **compare** - Compare multiple sources
+19. **check** - Check if condition met (successCriteria: condition)
 
-5. **capture** - Take a screenshot
-   Fields: successCriteria
-   Example: {
-     "intent": "capture",
-     "description": "Capture search results",
-     "successCriteria": "Screenshot taken with results visible"
-   }
+**File Operations**
+20. **upload** - Upload file (target: file path)
+21. **download** - Download file (element: download button)
+22. **open_file** - Open file in app (target: file path)
+23. **save_file** - Save file (target: save path)
 
-6. **compare** - Compare results from multiple sources
-   Fields: successCriteria
-   Example: {
-     "intent": "compare",
-     "description": "Compare ChatGPT vs Perplexity results",
-     "successCriteria": "Comparison summary generated"
-   }
+**Advanced**
+24. **zoom** - Zoom in/out (query: in/out)
+25. **authenticate** - Handle login/auth
+26. **form_fill** - Fill form with multiple fields
+27. **multi_select** - Select multiple items (element: items)
 
-7. **wait** - Wait for something to appear or change
-   Fields: element (what to wait for), successCriteria
-   Example: {
-     "intent": "wait",
-     "element": "search results",
-     "description": "Wait for results to load",
-     "successCriteria": "Results visible on page"
-   }
+**Fallback**
+28. **custom** - Complex multi-action intent
 
-8. **custom** - Any other high-level goal
-   Fields: description, successCriteria
-   Example: {
-     "intent": "custom",
-     "description": "Copy code from file",
-     "successCriteria": "Code copied to clipboard"
-   }
+=== INTENT SELECTION GUIDE ===
+
+- **navigate**: Opening URLs, focusing apps (Jira, Chrome, Windsurf, Warp)
+- **capture**: Taking screenshots with OCR for data extraction
+- **type_text**: Entering text into chat windows, forms, search fields
+- **click_element**: Clicking buttons, links, icons, menu items
+- **search**: Searching for tickets, files, or web queries
+- **extract**: Getting specific data from screen (ticket IDs, error messages)
+- **wait**: Waiting for pages to load, elements to appear
+- **verify**: Checking if action succeeded
+- **store/retrieve**: Passing data between steps
 
 === SUCCESS CRITERIA EXAMPLES ===
 
@@ -1859,6 +1844,12 @@ Now generate the JSON plan for the user's command. Return ONLY the JSON object.`
     // Build context including any previous answers
     let contextInfo = `User request: "${request.command}"`;
     
+    // Check if screenshot is available
+    const hasScreenshot = !!(request.context?.screenshot?.base64);
+    if (hasScreenshot) {
+      contextInfo += `\n\n**IMPORTANT: Screenshot context is available** - You can see the current screen state, including any open applications, logged-in accounts, and visible UI elements.`;
+    }
+    
     if (request.clarificationAnswers && Object.keys(request.clarificationAnswers).length > 0) {
       contextInfo += `\n\nPrevious clarification answers provided:\n`;
       for (const [questionId, answer] of Object.entries(request.clarificationAnswers)) {
@@ -1882,6 +1873,8 @@ ${contextInfo}
 - **Request is specific and executable**: "Generate Mickey Mouse in ChatGPT", "Create calendar event for dentist next Tuesday at 2pm"
 - **Reasonable defaults exist**: Search engine (Google), browser (Chrome), date format (MM/DD/YYYY)
 - **Web automation with clear target**: "Goto perplexity and search for X", "Go to chatgpt and ask Y", "Navigate to google and lookup Z"
+- **Screenshot context is available**: You can see the screen, so you can access visible apps, logged-in accounts, and UI elements
+- **Account/app access with screenshot**: "Goto my n8n account" (screenshot shows n8n is open/accessible), "Access my Gmail" (screenshot shows browser)
 - **Minor details can be inferred**: Exact wording, styling preferences, wait times
 - **User preferences can use sensible defaults**: Save location (Downloads), file format (PDF), etc.
 
@@ -1905,6 +1898,8 @@ CLEAR (no clarification needed):
 - "Go to chatgpt and ask about Y" → Clear website and query
 - "Navigate to google and lookup Z" → Clear website and search term
 - "Open perplexity and find information about A" → Clear website and topic
+- "Goto my n8n account and setup a new space" (WITH screenshot) → Can see screen state, can access visible apps/accounts
+- "Access my Gmail and send an email" (WITH screenshot) → Can see browser/apps, can navigate to Gmail
 
 **Response format:**
 
@@ -2073,7 +2068,12 @@ Analyze now:`;
         if (clarificationCheck.needsClarification === true) {
           logger.info('Query needs clarification', { 
             command: planRequest.command,
-            questionCount: clarificationCheck.clarificationQuestions?.length 
+            questionCount: clarificationCheck.clarificationQuestions?.length,
+            questions: clarificationCheck.clarificationQuestions?.map((q: any) => ({
+              id: q.id,
+              text: q.text,
+              type: q.type
+            }))
           });
           return clarificationCheck;
         }
@@ -2251,7 +2251,12 @@ Analyze now:`;
       if (planData.needsClarification) {
         logger.info('Gemini returned clarification questions', {
           latencyMs,
-          questionCount: planData.clarificationQuestions?.length
+          questionCount: planData.clarificationQuestions?.length,
+          questions: planData.clarificationQuestions?.map((q: any) => ({
+            id: q.id,
+            text: q.text,
+            type: q.type
+          }))
         });
 
         return {
@@ -2360,7 +2365,12 @@ Analyze now:`;
       if (planData.needsClarification) {
         logger.info('Grok returned clarification questions', { 
           latencyMs, 
-          questionCount: planData.clarificationQuestions?.length 
+          questionCount: planData.clarificationQuestions?.length,
+          questions: planData.clarificationQuestions?.map((q: any) => ({
+            id: q.id,
+            text: q.text,
+            type: q.type
+          }))
         });
         
         return {
@@ -2462,7 +2472,12 @@ Analyze now:`;
       if (planData.needsClarification) {
         logger.info('Claude returned clarification questions', { 
           latencyMs, 
-          questionCount: planData.clarificationQuestions?.length 
+          questionCount: planData.clarificationQuestions?.length,
+          questions: planData.clarificationQuestions?.map((q: any) => ({
+            id: q.id,
+            text: q.text,
+            type: q.type
+          }))
         });
         
         return {
@@ -2568,7 +2583,12 @@ Analyze now:`;
       if (planData.needsClarification) {
         logger.info('OpenAI returned clarification questions', { 
           latencyMs, 
-          questionCount: planData.clarificationQuestions?.length 
+          questionCount: planData.clarificationQuestions?.length,
+          questions: planData.clarificationQuestions?.map((q: any) => ({
+            id: q.id,
+            text: q.text,
+            type: q.type
+          }))
         });
         
         return {

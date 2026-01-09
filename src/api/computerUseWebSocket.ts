@@ -5,6 +5,7 @@ import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { uiDetectionService } from '../services/uiDetectionService';
+import { omniParserService } from '../services/omniParserService';
 
 // Session persistence across WebSocket reconnections
 const sessionStore = new Map<string, any>();
@@ -14,22 +15,116 @@ const anthropicClient = process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: 
 const geminiClient = process.env.GEMINI_API_KEY ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY) : null;
 
 /**
- * Call hybrid UI detection (OmniParser + OCR + Vision API fallback)
+ * Call hybrid UI detection (OmniParser + Vision API fallback)
+ * OmniParser is used for findAndClick and clickAndDrag actions for higher accuracy
  */
+/**
+ * Determine if element description suggests a simple (text-based) or complex (icon/spatial) element
+ */
+function isSimpleElement(description: string): boolean {
+  const simplePatterns = [
+    // Text-based buttons
+    /button.*(?:submit|login|sign|search|send|save|cancel|close|ok|yes|no|next|back|continue)/i,
+    // Input fields with labels/placeholders
+    /(?:input|field|box).*(?:placeholder|label|text)/i,
+    /(?:search|email|password|username|name).*(?:input|field|box)/i,
+    // Links with text
+    /link.*(?:with text|labeled|saying)/i,
+    // Standard UI patterns with text
+    /(?:menu item|tab|option).*(?:labeled|text|saying)/i,
+  ];
+  
+  const complexPatterns = [
+    // Icon-only elements
+    /icon(?!.*text)/i,
+    /hamburger menu/i,
+    /three dots/i,
+    /gear icon/i,
+    // Spatial/positional descriptions
+    /(?:top|bottom|left|right).*(?:corner|edge)/i,
+    // Drag and drop
+    /drag|drop/i,
+    // Dense UIs
+    /among many|multiple similar|grid of/i,
+  ];
+  
+  // Check for complex patterns first (higher priority)
+  if (complexPatterns.some(pattern => pattern.test(description))) {
+    return false;
+  }
+  
+  // Check for simple patterns
+  if (simplePatterns.some(pattern => pattern.test(description))) {
+    return true;
+  }
+  
+  // Default: treat as complex for safety (use OmniParser)
+  return false;
+}
+
 async function callVisionAPI(
   screenshot: { base64: string; mimeType: string },
   description: string,
-  context: any
+  context: any,
+  actionType?: string
 ): Promise<{ coordinates: { x: number; y: number }; confidence: number }> {
-  // Use spatial-aware hybrid detection
+  // Hybrid strategy: Try OmniParser FIRST for better caching, fall back to Vision API
+  // OmniParser provides consistent element detection that caches well across page changes
+  const useOmniParser = (actionType === 'findAndClick' || actionType === 'clickAndDrag');
+  
+  logger.info('🔍 [HYBRID-STRATEGY] Element detection strategy', {
+    description,
+    willTryOmniParserFirst: useOmniParser,
+    actionType,
+    reason: useOmniParser ? 'omniparser_first_for_caching' : 'vision_api_only',
+  });
+  
+  if (useOmniParser && omniParserService.isAvailable()) {
+    try {
+      logger.info('🎯 [COMPUTER-USE] Using OmniParser for element detection', {
+        actionType,
+        description,
+      });
+      
+      const result = await omniParserService.detectElement(screenshot, description, context);
+      
+      logger.info('✅ [COMPUTER-USE] Element detected via OmniParser', {
+        method: result.method,
+        coordinates: result.coordinates,
+        confidence: result.confidence,
+        selectedElement: result.selectedElement,
+        cacheHit: result.cacheHit,
+      });
+
+      return {
+        coordinates: result.coordinates,
+        confidence: result.confidence,
+      };
+    } catch (error: any) {
+      logger.warn('⚠️ [COMPUTER-USE] OmniParser failed, falling back to Vision API', {
+        error: error.message,
+        actionType,
+      });
+      // Fall through to vision API fallback
+    }
+  }
+  
+  // Use Vision API (as fallback when OmniParser fails or for non-click actions)
+  logger.info('🔍 [COMPUTER-USE] Using Vision API', {
+    actionType,
+    reason: useOmniParser ? 'omniparser_failed_fallback' : 'non_click_action',
+  });
+  
   const result = await uiDetectionService.detectElement(screenshot, description, context);
   
-  logger.info('✅ [COMPUTER-USE] Element detected via hybrid system', {
+  logger.info('✅ [COMPUTER-USE] Element detected via Vision API', {
     method: result.method,
     coordinates: result.coordinates,
     confidence: result.confidence,
     selectedElement: result.selectedElement,
   });
+
+  // No retry logic needed - we already tried OmniParser first if applicable
 
   return {
     coordinates: result.coordinates,
@@ -54,15 +149,18 @@ interface ComputerAction {
   amount?: number;
   ms?: number;
   locator?: {
-    strategy: 'text' | 'image' | 'element' | 'vision' | 'textMatch' | 'contains' | 'bbox';
+    strategy: 'text' | 'image' | 'element' | 'vision' | 'textMatch' | 'contains' | 'bbox' | 'omniparser';
     // Nut.js native strategies (preferred)
     value?: string;           // Text to find, image name, or element title
-    context?: string;         // Optional hint: "dock icon", "button", "menu item"
-    role?: string;            // For element strategy: "button", "menuItem", "textField"
-    // Legacy Vision API (fallback)
+    context?: string;         // Context for search (e.g., "button", "menu", "dock")
+    role?: string;            // Accessibility role (for element strategy)
+    // Vision API fallback (legacy)
     description?: string;     // Natural language description for Vision API
-    text?: string;            // For textMatch strategy
-    bbox?: [number, number, number, number];
+    // OmniParser strategy (LLM-driven element selection)
+    elementId?: number;       // OmniParser element ID for direct lookup
+    // Advanced strategies
+    text?: string;            // For textMatch/contains
+    bbox?: [number, number, number, number]; // For bbox strategy
   };
   timeoutMs?: number;
   tag?: string;
@@ -86,6 +184,8 @@ interface ComputerAction {
     text?: string;
     bbox?: [number, number, number, number];
   };
+  fromCoordinates?: { x: number; y: number };
+  toCoordinates?: { x: number; y: number };
   // zoom fields
   zoomDirection?: 'in' | 'out';
   zoomLevel?: number;  // For specific zoom levels (e.g., 150%)
@@ -268,11 +368,18 @@ async function handleStart(
         previousActions: [] as ComputerAction[],
         iteration: 0,
         maxIterations: message.maxIterations || 20,
-        provider: message.provider || 'gemini',
+        provider: message.provider || 'anthropic',
         waitingForClarification: false,
         clarificationAnswers: {} as Record<string, string>,
         conversationHistory: [] as Array<{ timestamp: number; goal: string; completed: boolean }>,
         completedMilestones: new Set<string>(), // Track completed milestones
+        // OmniParser cache metadata
+        omniParserCache: {
+          lastScreenshotHash: null,
+          lastUrl: null,
+          lastCacheHit: false,
+          cacheInvalidatedAt: null,
+        },
       };
       
       logger.info('📝 [COMPUTER-USE] Created new session', {
@@ -291,10 +398,18 @@ async function handleStart(
       sessionState.goal = message.goal;
       sessionState.context = context;
       sessionState.maxIterations = message.maxIterations || 20;
-      sessionState.provider = message.provider || 'gemini';
+      sessionState.provider = message.provider || 'anthropic';
       sessionState.iteration = 0;
       sessionState.previousActions = [];
       sessionState.completedMilestones = sessionState.completedMilestones || [];
+      
+      // Preserve OmniParser cache metadata
+      sessionState.omniParserCache = sessionState.omniParserCache || {
+        lastScreenshotHash: null,
+        lastUrl: null,
+        lastCacheHit: false,
+        cacheInvalidatedAt: null,
+      };
     }
     
     // Add current goal to conversation history
@@ -401,7 +516,7 @@ async function handleStartWithPlan(
       previousActions: [] as ComputerAction[],
       iteration: 0,
       maxIterations: message.maxIterations || 50, // More iterations for plan-based execution
-      provider: message.provider || 'gemini',
+      provider: message.provider || 'anthropic',
       waitingForClarification: false,
       clarificationAnswers: {} as Record<string, string>,
       conversationHistory: [] as Array<{ timestamp: number; goal: string; completed: boolean }>,
@@ -461,6 +576,97 @@ async function handleStartWithPlan(
       error: `Failed to start plan-based session: ${error.message}`,
     } as ServerMessage));
     return state;
+  }
+}
+
+/**
+ * Validate screenshot context before executing action
+ * Detects modals, overlays, or context mismatches
+ */
+async function validateScreenshotContext(
+  action: ComputerAction,
+  screenshot: { base64: string; mimeType: string },
+  goal: string,
+  previousActions: ComputerAction[]
+): Promise<{
+  isValid: boolean;
+  hasModal: boolean;
+  issue?: string;
+  suggestion?: string;
+}> {
+  try {
+    // Quick heuristic checks first (no LLM call needed)
+    
+    // Check 1: If trying to click "search input" but previous action was also "search input"
+    // AND the coordinates are the same (actually stuck, not just retrying with better element detection)
+    if (action.type === 'findAndClick' && action.locator?.value?.toLowerCase().includes('search')) {
+      const recentSearchClicks = previousActions.slice(-5).filter(a => 
+        a.type === 'findAndClick' && 
+        a.locator?.value?.toLowerCase().includes('search') &&
+        a.coordinates // Only count clicks that actually executed
+      );
+      
+      // Check if clicking the EXACT SAME coordinates repeatedly (stuck)
+      if (recentSearchClicks.length >= 3) {
+        const uniqueCoords = new Set(
+          recentSearchClicks.map(a => `${a.coordinates?.x},${a.coordinates?.y}`)
+        );
+        
+        // Only trigger if clicking same spot 3+ times
+        if (uniqueCoords.size === 1) {
+          logger.warn('⚠️ [PRE-ACTION] Clicking same search coordinates repeatedly', {
+            count: recentSearchClicks.length,
+            coordinates: recentSearchClicks[0].coordinates,
+          });
+          
+          return {
+            isValid: false,
+            hasModal: true,
+            issue: 'Clicking same search input coordinates repeatedly without progress',
+            suggestion: 'Close modal/overlay first',
+          };
+        }
+      }
+    }
+    
+    // Check 2: If goal mentions specific site but we're clicking generic elements repeatedly
+    // DISABLED - Too aggressive, prevents normal retries with improved element detection
+    // const goalLower = goal.toLowerCase();
+    // if ((goalLower.includes('perplexity') || goalLower.includes('chatgpt') || goalLower.includes('youtube')) &&
+    //     action.type === 'findAndClick') {
+    //   const recentClicks = previousActions.slice(-5).filter(a => a.type === 'findAndClick');
+    //   
+    //   if (recentClicks.length >= 4) {
+    //     logger.warn('⚠️ [PRE-ACTION] Many clicks without progress on specific site', {
+    //       goal,
+    //       recentClickCount: recentClicks.length,
+    //     });
+    //     
+    //     return {
+    //       isValid: false,
+    //       hasModal: true,
+    //       issue: 'Multiple clicks without progress suggests modal/overlay blocking target',
+    //       suggestion: 'Close modal/overlay first',
+    //     };
+    //   }
+    // }
+    
+    // If no issues detected, action is valid
+    return {
+      isValid: true,
+      hasModal: false,
+    };
+    
+  } catch (error: any) {
+    logger.error('❌ [PRE-ACTION] Context validation failed', {
+      error: error.message,
+    });
+    
+    // On error, allow action to proceed
+    return {
+      isValid: true,
+      hasModal: false,
+    };
   }
 }
 
@@ -543,6 +749,10 @@ async function handleScreenshot(
     unchangedCount: state.unchangedCount || 0,
   });
 
+  // Store screenshot for later OmniParser calls (only fetch when needed for findAndClick/clickAndDrag)
+  state.currentScreenshot = message.screenshot;
+  state.currentScreenshotHash = currentScreenshotHash;
+
   // Analyze screenshot and decide next action
   let nextAction: ComputerAction;
   try {
@@ -553,7 +763,7 @@ async function handleScreenshot(
       previousActionsCount: state.previousActions.length,
     });
 
-    // Enrich context with UI change detection
+    // Enrich context with UI change detection (no OmniParser elements yet - fetch on-demand)
     const enrichedContext = {
       ...state.context,
       ...message.context,  // Merge in context from screenshot message
@@ -608,6 +818,156 @@ async function handleScreenshot(
       error: `LLM analysis failed: ${error.message}`,
     } as ServerMessage));
     return;
+  }
+
+  // ========== ACTION LOOP DETECTION ==========
+  // Detect if same action is repeating without progress (stuck in loop)
+  const recentActions = state.previousActions.slice(-5);
+  const sameActionCount = recentActions.filter((a: ComputerAction) => {
+    if (a.type !== nextAction.type) return false;
+    
+    // For findAndClick, check if targeting same element
+    if (a.type === 'findAndClick' && nextAction.type === 'findAndClick') {
+      const sameLocator = a.locator?.value === nextAction.locator?.value;
+      return sameLocator;
+    }
+    
+    // For typeText, check if typing same text
+    if (a.type === 'typeText' && nextAction.type === 'typeText') {
+      return a.text === nextAction.text;
+    }
+    
+    return a.type === nextAction.type;
+  }).length;
+
+  // If same action repeated 3+ times AND UI hasn't changed in last 2 iterations
+  if (sameActionCount >= 3 && state.unchangedCount >= 2) {
+    logger.error('❌ [LOOP DETECTED] Same action repeated without progress', {
+      service: 'bibscrip-backend',
+      iteration: state.iteration,
+      actionType: nextAction.type,
+      locator: nextAction.locator,
+      repeatedCount: sameActionCount,
+      unchangedCount: state.unchangedCount,
+      reasoning: 'Action is not having the expected effect. System is stuck in a loop.',
+    });
+    
+    // Send error to frontend with helpful message
+    ws.send(JSON.stringify({
+      type: 'error',
+      error: `Action loop detected: "${nextAction.type}" repeated ${sameActionCount} times without progress. The action may be targeting the wrong element or a modal/overlay may be blocking it. Please check the screenshot and provide guidance.`,
+      iteration: state.iteration,
+    } as ServerMessage));
+    return;
+  }
+
+  // ========== PRE-ACTION SCREENSHOT CONTEXT VALIDATION ==========
+  // Validate screenshot context before executing action to detect modals/overlays
+  if (nextAction.type === 'findAndClick' || nextAction.type === 'typeText') {
+    const contextValidation = await validateScreenshotContext(
+      nextAction,
+      message.screenshot,
+      state.goal,
+      state.previousActions
+    );
+    
+    if (!contextValidation.isValid) {
+      logger.warn('⚠️ [PRE-ACTION] Screenshot context mismatch detected', {
+        service: 'bibscrip-backend',
+        iteration: state.iteration,
+        actionType: nextAction.type,
+        issue: contextValidation.issue,
+        suggestion: contextValidation.suggestion,
+      });
+      
+      // If a modal/overlay is detected, auto-correct to close it first
+      if (contextValidation.hasModal && contextValidation.suggestion) {
+        logger.info('🔄 [PRE-ACTION] Auto-correcting action to close modal first', {
+          service: 'bibscrip-backend',
+          originalAction: nextAction.type,
+          correctedAction: 'findAndClick close button',
+        });
+        
+        nextAction = {
+          type: 'findAndClick',
+          locator: {
+            strategy: 'vision',
+            value: 'close button',
+            description: 'Close modal/overlay to access underlying content',
+          },
+          reasoning: `Detected modal/overlay blocking target element. Closing it first. Original intent: ${nextAction.reasoning}`,
+        } as ComputerAction;
+      }
+    }
+  }
+
+  // ========== PROGRAMMATIC VALIDATION: REJECT INVALID typeText ==========
+  // STRICT RULE: typeText MUST be preceded by successful findAndClick - NO OVERRIDES
+  if (nextAction.type === 'typeText') {
+    const lastAction = state.previousActions[state.previousActions.length - 1];
+    
+    // Find the most recent openUrl action
+    const lastOpenUrlIndex = state.previousActions.map((a: ComputerAction) => a.type).lastIndexOf('openUrl');
+    
+    // If there was an openUrl, check if there's been a successful findAndClick since then
+    if (lastOpenUrlIndex !== -1) {
+      const actionsSinceOpenUrl = state.previousActions.slice(lastOpenUrlIndex + 1);
+      
+      // Check for successful findAndClick with OmniParser/Vision (coordinates present and not (0,0))
+      const successfulFindAndClick = actionsSinceOpenUrl.find((a: ComputerAction) => 
+        a.type === 'findAndClick' && 
+        a.coordinates && 
+        !(a.coordinates.x === 0 && a.coordinates.y === 0)
+      );
+      
+      // REJECT typeText if no successful findAndClick or if last action was openUrl
+      if (!successfulFindAndClick || lastAction?.type === 'openUrl') {
+        logger.error('❌ [VALIDATION] REJECTED typeText - input not focused', {
+          iteration: state.iteration,
+          lastAction: lastAction?.type,
+          lastOpenUrlIndex,
+          actionsSinceOpenUrl: actionsSinceOpenUrl.map((a: ComputerAction) => a.type),
+          hasSuccessfulFindAndClick: !!successfulFindAndClick,
+          reasoning: 'CRITICAL: Must click input field BEFORE typing. LLM violated protocol.',
+        });
+        
+        // Send error back to frontend and STOP
+        ws.send(JSON.stringify({
+          type: 'error',
+          error: 'Invalid action sequence: typeText requires findAndClick first. Input fields must be clicked to focus before typing.',
+          iteration: state.iteration,
+        } as ServerMessage));
+        return;
+      }
+    }
+    
+    // Also check for repeated typeText (typing the EXACT SAME text multiple times)
+    const recentTypeTextActions = state.previousActions
+      .slice(-5) // Check last 5 actions
+      .filter((a: ComputerAction) => a.type === 'typeText');
+    
+    // Only reject if typing the EXACT SAME text 2+ times (actual loop)
+    if (recentTypeTextActions.length >= 2) {
+      const sameTextActions = recentTypeTextActions.filter((a: ComputerAction) => 
+        a.text === nextAction.text
+      );
+      
+      if (sameTextActions.length >= 1) {
+        logger.error('❌ [VALIDATION] REJECTED repeated typeText with same text', {
+          iteration: state.iteration,
+          text: nextAction.text,
+          previousOccurrences: sameTextActions.length,
+          reasoning: 'CRITICAL: Typing the same text multiple times. This is a loop.',
+        });
+        
+        ws.send(JSON.stringify({
+          type: 'error',
+          error: `Invalid action sequence: Already typed "${nextAction.text}" in a previous action. This appears to be a loop. If you need to type in a different field, use findAndClick first.`,
+          iteration: state.iteration,
+        } as ServerMessage));
+        return;
+      }
+    }
   }
 
   state.previousActions.push(nextAction);
@@ -827,7 +1187,7 @@ async function handleScreenshot(
   const sessionKey = `${state.context.userId || 'default'}_${state.context.sessionId || 'default'}`;
   sessionStore.set(sessionKey, state);
 
-  // Proactive UI state verification (every 3 iterations or when stuck)
+  // Proactive UI state verification (check for misalignment every 3 iterations)
   if (state.iteration % 3 === 0 || state.iteration > 5) {
     const verification = await verifyUIStateAlignment(
       state.goal,
@@ -836,31 +1196,32 @@ async function handleScreenshot(
       state.previousActions,
       state.iteration
     );
-
-    if (!verification.aligned && verification.needsClarification) {
+    
+    if (verification.needsClarification) {
       logger.warn('⚠️ [COMPUTER-USE] UI state misalignment detected', {
         reason: verification.reason,
         confidence: verification.confidence,
       });
-
-      logger.info('🤔 [COMPUTER-USE] Generating clarification questions...');
+      
+      logger.info('🤔 [COMPUTER-USE] Generating clarification questions...', {});
+      
       const questions = await generateClarificationQuestions(
         state.goal,
         message.screenshot,
         state.context,
         verification.reason
       );
-
-      logger.info('📋 [COMPUTER-USE] Clarification questions generated', {
-        count: questions.length,
-        questions: questions.map(q => q.question),
-      });
-
+      
       if (questions.length > 0) {
-        state.waitingForClarification = true;
+        logger.info('📋 [COMPUTER-USE] Clarification questions generated', {
+          count: questions.length,
+          questions: questions.map(q => q.question),
+        });
+        
         logger.info('📤 [COMPUTER-USE] Sending clarification to frontend', {
           questionsCount: questions.length,
         });
+        
         ws.send(JSON.stringify({
           type: 'clarification',
           questions,
@@ -932,17 +1293,159 @@ async function handleScreenshot(
       return;
     }
     
+    // OmniParser strategy - lookup element by ID OR auto-fetch if vision strategy used
+    if (strategy === 'omniparser' || strategy === 'vision') {
+      // Fetch OmniParser elements on-demand for this screenshot (with caching)
+      let omniParserElements: any[] = [];
+      const screenshotHash = state.currentScreenshotHash?.split('-')[2] || '';
+      
+      if (state.cachedOmniParserElements && state.cachedOmniParserHash === screenshotHash) {
+        omniParserElements = state.cachedOmniParserElements;
+        logger.info('✅ [OMNIPARSER] Using cached elements', {
+          elementCount: omniParserElements.length,
+        });
+      } else {
+        try {
+          logger.info('🔍 [OMNIPARSER] Fetching elements on-demand for findAndClick', {
+            iteration: state.iteration,
+          });
+          
+          const enrichedContext = {
+            ...state.context,
+            ...message.context,
+          };
+
+          const omniResult = await omniParserService.detectElement(
+            state.currentScreenshot!,
+            'fetch_all_elements',
+            enrichedContext
+          );
+          
+          if (omniResult.allElements) {
+            omniParserElements = omniResult.allElements;
+            state.cachedOmniParserElements = omniParserElements;
+            state.cachedOmniParserHash = screenshotHash;
+            
+            logger.info('✅ [OMNIPARSER] Elements fetched on-demand', {
+              elementCount: omniParserElements.length,
+              interactive: omniParserElements.filter((e: any) => e.interactivity).length,
+            });
+          }
+        } catch (error: any) {
+          logger.warn('⚠️ [OMNIPARSER] Failed to fetch elements', {
+            error: error.message,
+          });
+        }
+      }
+      
+      // OPTION A: Programmatic enforcement - convert vision strategy to element lookup
+      if (strategy === 'vision' && omniParserElements.length > 0) {
+        logger.info('🔄 [OPTION-A] Converting vision strategy to OmniParser element lookup', {
+          searchText: nextAction.locator?.value || nextAction.locator?.description,
+        });
+        
+        const searchText = (nextAction.locator?.value || nextAction.locator?.description || '').toLowerCase();
+        
+        // Search for matching element by content
+        const matchingElement = omniParserElements.find((e: any) => 
+          e.interactivity && e.content.toLowerCase().includes(searchText)
+        );
+        
+        if (matchingElement) {
+          logger.info('✅ [OPTION-A] Found matching element, using OmniParser', {
+            elementId: matchingElement.id,
+            content: matchingElement.content,
+          });
+          
+          // Override to use OmniParser element
+          nextAction.locator!.strategy = 'omniparser';
+          nextAction.locator!.elementId = matchingElement.id;
+        } else {
+          logger.warn('⚠️ [OPTION-A] No matching element found, falling back to Vision API', {
+            searchText,
+            availableElements: omniParserElements.slice(0, 5).map((e: any) => e.content),
+          });
+        }
+      }
+      
+      // If we have elementId, look it up
+      if (nextAction.locator?.elementId !== undefined) {
+        logger.info('🎯 [COMPUTER-USE] Looking up element by OmniParser ID', {
+          elementId: nextAction.locator.elementId,
+        });
+
+        const elements = omniParserElements;
+        const element = elements.find((e: any) => e.id === nextAction.locator!.elementId);
+
+        if (!element) {
+          logger.error('❌ [COMPUTER-USE] Element ID not found', {
+            elementId: nextAction.locator.elementId,
+            availableIds: elements.map((e: any) => e.id),
+          });
+
+          ws.send(JSON.stringify({
+            type: 'action',
+            action: {
+              type: 'log',
+              level: 'error',
+              message: `Element ID ${nextAction.locator.elementId} not found in OmniParser results`,
+              reasoning: 'Invalid element ID - check available elements',
+            },
+            iteration: state.iteration,
+          } as ServerMessage));
+          return;
+        }
+
+        // Calculate center coordinates from bbox
+        const coordinates = {
+          x: Math.round((element.bbox.x1 + element.bbox.x2) / 2),
+          y: Math.round((element.bbox.y1 + element.bbox.y2) / 2),
+        };
+
+        logger.info('✅ [COMPUTER-USE] Element found by ID', {
+          elementId: element.id,
+          content: element.content,
+          coordinates,
+        });
+
+        // Send findAndClick with resolved coordinates
+        ws.send(JSON.stringify({
+          type: 'action',
+          action: {
+            type: 'findAndClick',
+            coordinates,
+            reasoning: nextAction.reasoning,
+          },
+          iteration: state.iteration,
+        } as ServerMessage));
+
+        logger.info('📤 [TIMING] Action sent to frontend', {
+          iteration: state.iteration,
+          actionType: 'findAndClick',
+          method: 'omniparser_id_lookup',
+        });
+
+        return;
+      }
+    }
+    
     // Legacy Vision API strategy - resolve coordinates on backend (fallback)
     if (strategy === 'vision') {
+      // Prefer locator.value (exact text from LLM) over description (generic label)
+      const searchText = nextAction.locator.value || nextAction.locator.description;
+      
       logger.info('🔍 [COMPUTER-USE] Handling findAndClick with Vision API (fallback)', {
         description: nextAction.locator.description,
+        value: nextAction.locator.value,
+        searchText,
       });
 
       try {
         const visionResult = await callVisionAPI(
           message.screenshot,
-          nextAction.locator.description!,
-          state.context
+          searchText!,
+          state.context,
+          'findAndClick'
         );
 
         // Check if coordinates are (0, 0) which indicates element not found
@@ -979,6 +1482,9 @@ async function handleScreenshot(
           reasoning: nextAction.reasoning,
         };
 
+        // CRITICAL: Add action to previousActions BEFORE sending to frontend
+        state.previousActions.push(findAndClickAction);
+
         ws.send(JSON.stringify({
           type: 'action',
           action: findAndClickAction,
@@ -998,9 +1504,128 @@ async function handleScreenshot(
         return;
       }
     }
+  } // Close findAndClick handler
+
+  // Handle clickAndDrag action
+  if (nextAction.type === 'clickAndDrag' && nextAction.fromLocator && nextAction.toLocator) {
+    const fromStrategy = nextAction.fromLocator.strategy;
+    const toStrategy = nextAction.toLocator.strategy;
+    
+    // If either locator uses vision strategy, detect on backend
+    if (fromStrategy === 'vision' || toStrategy === 'vision') {
+      logger.info('🎯 [COMPUTER-USE] Handling clickAndDrag with Vision API', {
+        fromDescription: nextAction.fromLocator.description,
+        toDescription: nextAction.toLocator.description,
+      });
+
+      try {
+        // Detect FROM element
+        let fromCoordinates = null;
+        if (fromStrategy === 'vision' && nextAction.fromLocator.description) {
+          const fromSearchText = nextAction.fromLocator.value || nextAction.fromLocator.description;
+          const fromResult = await callVisionAPI(
+            message.screenshot,
+            fromSearchText,
+            state.context,
+            'clickAndDrag'
+          );
+          fromCoordinates = fromResult.coordinates;
+          
+          logger.info('✅ [COMPUTER-USE] FROM element located', {
+            description: nextAction.fromLocator.description,
+            coordinates: fromCoordinates,
+          });
+        }
+
+        // Detect TO element
+        let toCoordinates = null;
+        if (toStrategy === 'vision' && nextAction.toLocator.description) {
+          const toSearchText = nextAction.toLocator.value || nextAction.toLocator.description;
+          const toResult = await callVisionAPI(
+            message.screenshot,
+            toSearchText,
+            state.context,
+            'clickAndDrag'
+          );
+          toCoordinates = toResult.coordinates;
+          
+          logger.info('✅ [COMPUTER-USE] TO element located', {
+            description: nextAction.toLocator.description,
+            coordinates: toCoordinates,
+          });
+        }
+
+        // Check if either detection failed (0, 0)
+        if (fromCoordinates && fromCoordinates.x === 0 && fromCoordinates.y === 0) {
+          logger.warn('⚠️ [COMPUTER-USE] FROM element not found', {
+            description: nextAction.fromLocator.description,
+          });
+          ws.send(JSON.stringify({
+            type: 'action',
+            action: {
+              type: 'log',
+              level: 'warn',
+              message: `Could not locate FROM element: "${nextAction.fromLocator.description}"`,
+            },
+            iteration: state.iteration,
+          } as ServerMessage));
+          return;
+        }
+
+        if (toCoordinates && toCoordinates.x === 0 && toCoordinates.y === 0) {
+          logger.warn('⚠️ [COMPUTER-USE] TO element not found', {
+            description: nextAction.toLocator.description,
+          });
+          ws.send(JSON.stringify({
+            type: 'action',
+            action: {
+              type: 'log',
+              level: 'warn',
+              message: `Could not locate TO element: "${nextAction.toLocator.description}"`,
+            },
+            iteration: state.iteration,
+          } as ServerMessage));
+          return;
+        }
+
+        // Send clickAndDrag with resolved coordinates
+        const clickAndDragAction: ComputerAction = {
+          type: 'clickAndDrag',
+          fromLocator: nextAction.fromLocator,
+          toLocator: nextAction.toLocator,
+          fromCoordinates: fromCoordinates || undefined,
+          toCoordinates: toCoordinates || undefined,
+          reasoning: nextAction.reasoning,
+        };
+
+        logger.info('✅ [COMPUTER-USE] clickAndDrag action ready', {
+          fromCoordinates,
+          toCoordinates,
+        });
+
+        ws.send(JSON.stringify({
+          type: 'action',
+          action: clickAndDragAction,
+          iteration: state.iteration,
+        } as ServerMessage));
+        return;
+      } catch (error: any) {
+        logger.error('❌ [COMPUTER-USE] clickAndDrag detection error', {
+          error: error.message,
+          fromDescription: nextAction.fromLocator?.description,
+          toDescription: nextAction.toLocator?.description,
+        });
+
+        ws.send(JSON.stringify({
+          type: 'error',
+          error: `clickAndDrag detection error: ${error.message}`,
+        } as ServerMessage));
+        return;
+      }
+    }
   }
 
-  // Send next action (for non-findAndClick actions)
+  // Send next action (for non-findAndClick/clickAndDrag actions)
   const actionSentTime = Date.now();
   const totalHandleTime = actionSentTime - handleStartTime;
   const timeSinceLastAction = state.lastActionTime ? (Date.now() - state.lastActionTime) : 0;
@@ -1663,6 +2288,9 @@ function buildPrompt(
     milestonesSection = `\n\n=== COMPLETED MILESTONES ===\nDo not redo: ${Array.from(completedMilestones).join(', ')}`;
   }
 
+  // Note: OmniParser elements are now fetched on-demand after LLM decision (Option A)
+  // LLM uses vision strategy, backend automatically converts to OmniParser if elements match
+
   // Assemble prompt
   return `You are a desktop automation agent controlling a computer via actions.
 
@@ -1692,16 +2320,41 @@ ${userGoal}${historySection}${contextSection}${clarificationSection}${previousAc
 **2. Interact: Choose based on what you need to do**
    🚨 CRITICAL: Check PREVIOUS ACTIONS before repeating! Don't type the same text twice or click the same element repeatedly.
    
+   🚨 **BEFORE USING typeText - MANDATORY CHECK:**
+   - Want to type in search box/input field?
+     🚨 🚨 🚨 ABSOLUTE RULE: typeText is FORBIDDEN after openUrl without findAndClick! 🚨 🚨 🚨
+     🚨 CRITICAL: openUrl NEVER EVER focuses inputs! After openUrl, you MUST send findAndClick!
+     
+     **STEP-BY-STEP CHECK (DO THIS EVERY TIME):**
+     1. Check PREVIOUS ACTIONS - what was the LAST action?
+        * Last action = openUrl? → STOP! You MUST send findAndClick FIRST! typeText is FORBIDDEN!
+        * Last action = findAndClick? → Go to step 2
+        * Last action = something else? → Check if findAndClick exists after last openUrl (step 3)
+     
+     2. Look at the SCREENSHOT - do you see a BLINKING CURSOR inside the input field?
+        * YES (cursor visible) → Field IS focused! Use typeText NOW (don't click again!)
+        * NO (no cursor visible) → Field should be focused (cursor may appear after typing), use typeText NOW
+     
+     3. Find the most recent openUrl in PREVIOUS ACTIONS - is there a findAndClick AFTER it?
+        * YES → Use typeText NOW
+        * NO → STOP! You MUST send findAndClick FIRST! typeText is FORBIDDEN!
+        * No openUrl found? → Use typeText NOW
+     
+     4. Did I already type this exact text before?
+        * YES → DON'T type again! Wait or proceed to next task
+        * NO → Proceed with typeText
+     
+     🚨 NEVER ASSUME INPUT IS FOCUSED AFTER openUrl - YOU MUST ALWAYS SEND findAndClick FIRST!
+     🚨 If last action was openUrl → Send findAndClick NOW, NOT typeText!
+   
+   **Other actions:**
    - Element not visible? → scroll (up/down to reveal it) THEN findAndClick
-   - Need to click button/link/input? → findAndClick (prefer "text", use "vision" if no text)
-   - Input already focused/has text? → typeText OR pressKey "Enter" (don't click again)
-   - Need to type? → Check PREVIOUS ACTIONS first:
-     * Already typed this text? → DON'T type again! Either wait for results or proceed to next action
-     * Not typed yet? → typeText (set submit:true to auto-press Enter)
+   - Need to click button/link/input? → findAndClick with strategy "vision" (ALWAYS use "vision" - it uses OmniParser for accuracy)
+   - 🚨 CRITICAL: NEVER use strategy "text" for input fields, search boxes, or placeholder text!
+   - Only use strategy "text" for clickable button labels with unique text (e.g., "Submit", "Login", "Save")
    - Need keyboard action? → pressKey (Enter, Backspace, Cmd+A, etc.)
    - Need to drag element? → clickAndDrag (for map markers, canvas elements, sliders, n8n nodes)
    - Need to zoom? → scroll with Cmd (maps, images) OR use zoom controls
-   - After typing with submit:true → WAIT for results (use waitForElement or pause), DON'T type again!
 
 **3. Wait: Let UI respond (if needed)**
    - After submit/click that loads content → waitForElement OR pause (500-2000ms)
@@ -1709,6 +2362,15 @@ ${userGoal}${historySection}${contextSection}${clarificationSection}${previousAc
    - Check next screenshot to verify change before proceeding
 
 **4. Complete: End or continue to next part**
+   🚨 **CRITICAL - SEARCH QUERY COMPLETION:**
+   - If you just typed a search query with submit=true → **TASK IS COMPLETE!**
+   - Example: typeText "Strip API integration" with submit=true → Search submitted → Send END action NOW!
+   - **DO NOT** wait for results to load
+   - **DO NOT** try to type the same query again
+   - **DO NOT** keep clicking the search box
+   - ✅ **CORRECT**: { "type": "end", "reason": "Goal achieved", "reasoning": "Successfully searched for 'X' on [site]" }
+   
+   **Other completion scenarios:**
    - Current task done, more tasks remain → Go back to step 1 (switch app/site for next task)
    - Plan step done → log "STEP_COMPLETE" then go back to step 1 for next step
    - ALL tasks done → end "Goal achieved: [summary]"
@@ -3090,6 +3752,12 @@ function parseActionFromResponse(response: string): ComputerAction {
     if (jsonMatch) {
       cleaned = jsonMatch[0];
     }
+    
+    // Fix unescaped newlines in string values (Claude formatting issue)
+    // Replace literal newlines within quoted strings with escaped \n
+    cleaned = cleaned.replace(/"([^"]*?)"/g, (match, content) => {
+      return '"' + content.replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t') + '"';
+    });
     
     // Remove trailing commas before closing braces/brackets (common LLM mistake)
     cleaned = cleaned.replace(/,(\s*[}\]])/g, '$1');

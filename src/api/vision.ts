@@ -4,7 +4,7 @@ import { logger } from '../utils/logger';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { guiActorClient } from '../services/guiActorClient';
+import { omniParserService } from '../services/omniParserService';
 
 const router = Router();
 
@@ -83,54 +83,53 @@ router.post('/locate', authenticate, async (req: Request, res: Response): Promis
 
     const startTime = Date.now();
 
-    // Try GUI-Actor first (highest accuracy for UI grounding - 75-85% vs OpenAI's 16%)
-    if (guiActorClient.isEnabled()) {
+    // Try OmniParser first (Priority 1 - highest accuracy with caching)
+    if (omniParserService.isAvailable()) {
       try {
-        const result = await guiActorClient.locate(screenshot, description, screenInfo);
+        logger.info('🎯 [VISION-API] Trying OmniParser for element detection', {
+          description,
+        });
+
+        const context = {
+          screenWidth: screenInfo?.width,
+          screenHeight: screenInfo?.height,
+          screenshotWidth: screenInfo?.width,
+          screenshotHeight: screenInfo?.height,
+          windowBounds,
+          url: (req as any).body?.url || 'unknown',
+        };
+
+        const result = await omniParserService.detectElement(screenshot, description, context);
         const latencyMs = Date.now() - startTime;
 
-        // Apply window bounds offset if provided
-        const finalCoordinates = windowBounds ? {
-          x: result.coordinates.x + windowBounds.x,
-          y: result.coordinates.y + windowBounds.y,
-        } : result.coordinates;
-
-        logger.info('Vision locate successful with GUI-Actor', {
+        logger.info('✅ [VISION-API] OmniParser successful', {
           description,
-          coordinates: finalCoordinates,
-          rawCoordinates: result.coordinates,
-          windowOffset: windowBounds ? { x: windowBounds.x, y: windowBounds.y } : null,
+          coordinates: result.coordinates,
           confidence: result.confidence,
+          method: result.method,
+          cacheHit: result.cacheHit,
           latencyMs,
-          isZeroCoordinates: result.coordinates.x === 0 && result.coordinates.y === 0,
-          isLowConfidence: result.confidence < 0.3,
         });
-        
-        // Log warning if returning (0,0) coordinates
-        if (result.coordinates.x === 0 && result.coordinates.y === 0) {
-          logger.warn('⚠️ GUI-Actor returned (0,0) coordinates - element likely not found', {
-            description,
-            confidence: result.confidence,
-            provider: 'gui-actor',
-          });
-        }
 
         res.status(200).json({
           success: true,
-          coordinates: finalCoordinates,
+          coordinates: result.coordinates,
           confidence: result.confidence,
-          provider: 'gui-actor',
+          provider: 'omniparser',
+          method: result.method,
+          cacheHit: result.cacheHit,
           latencyMs,
         });
         return;
       } catch (error: any) {
-        logger.warn('GUI-Actor vision locate failed, falling back to OpenAI', {
+        logger.warn('⚠️ [VISION-API] OmniParser failed, falling back to vision APIs', {
           error: error.message,
         });
+        // Fall through to vision API fallback
       }
     }
 
-    // Try Gemini (Priority 2 - best bounding box accuracy, returns normalized 0-1000 coordinates)
+    // Fallback to Gemini (Priority 2 - best bounding box accuracy, returns normalized 0-1000 coordinates)
     if (geminiClient) {
       try {
         const result = await locateWithGemini(screenshot, description, role, screenInfo);
@@ -354,7 +353,34 @@ router.post('/verify', authenticate, async (req: Request, res: Response): Promis
 
     const startTime = Date.now();
 
-    // Try OpenAI first (best for vision verification)
+    // Try Gemini first (Priority 1 - best overall)
+    if (geminiClient) {
+      try {
+        const result = await verifyWithGemini(screenshot, description);
+        const latencyMs = Date.now() - startTime;
+
+        logger.info('Vision verify successful with Gemini', {
+          description,
+          exists: result.exists,
+          confidence: result.confidence,
+          latencyMs,
+        });
+
+        res.status(200).json({
+          success: true,
+          ...result,
+          provider: 'gemini',
+          latencyMs,
+        });
+        return;
+      } catch (error: any) {
+        logger.warn('Gemini vision verify failed, falling back to OpenAI', {
+          error: error.message,
+        });
+      }
+    }
+
+    // Fallback to OpenAI (Priority 2)
     if (openaiClient) {
       try {
         const result = await verifyWithOpenAI(screenshot, description);
@@ -381,7 +407,7 @@ router.post('/verify', authenticate, async (req: Request, res: Response): Promis
       }
     }
 
-    // Fallback to Claude
+    // Fallback to Claude (Priority 3)
     if (claudeClient) {
       try {
         const result = await verifyWithClaude(screenshot, description);
@@ -408,7 +434,7 @@ router.post('/verify', authenticate, async (req: Request, res: Response): Promis
       }
     }
 
-    // Fallback to Grok (slowest)
+    // Fallback to Grok (Priority 4 - last resort)
     if (grokClient) {
       try {
         const result = await verifyWithGrok(screenshot, description);
@@ -1632,6 +1658,47 @@ Return ONLY the JSON object. No explanations. No markdown code blocks.`;
   return {
     coordinates: { x: pixelX, y: pixelY },
     confidence,
+  };
+}
+
+async function verifyWithGemini(
+  screenshot: { base64: string; mimeType: string },
+  description: string
+): Promise<{ exists: boolean; confidence: number }> {
+  if (!geminiClient) {
+    throw new Error('Gemini client not initialized');
+  }
+
+  const model = geminiClient.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
+
+  const prompt = `You are a vision AI that verifies if UI elements exist in screenshots.
+
+Does this element exist: "${description}"?
+
+Analyze the screenshot and return ONLY a JSON object:
+
+{
+  "exists": <true or false>,
+  "confidence": <0.0 to 1.0>
+}`;
+
+  const result = await model.generateContent([
+    prompt,
+    {
+      inlineData: {
+        data: screenshot.base64,
+        mimeType: screenshot.mimeType || 'image/png',
+      },
+    },
+  ]);
+
+  const response = result.response.text();
+  const cleaned = response.replace(/```(?:json)?\n?/g, '').trim();
+  const parsed = JSON.parse(cleaned);
+
+  return {
+    exists: parsed.exists,
+    confidence: parsed.confidence,
   };
 }
 

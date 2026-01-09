@@ -276,13 +276,34 @@ router.post('/plan', authenticate, async (req: Request, res: Response): Promise<
       hasQuestions: !!result.plan?.questions && result.plan.questions.length > 0,
       needsClarification: result.needsClarification || false,
       clarificationQuestionCount: result.clarificationQuestions?.length || 0,
+      clarificationQuestions: result.clarificationQuestions?.map((q: any) => ({
+        id: q.id,
+        text: q.text,
+        type: q.type
+      }))
     });
 
     // Return full result including clarification fields
-    res.status(200).json({
+    const response = {
       ...result, // Spread all fields from result (plan, needsClarification, clarificationQuestions, etc.)
+      clarificationQuestions: result.clarificationQuestions?.map((q: any) => ({
+        ...q,
+        question: q.text,
+      })),
       success: true, // Ensure success is always true for 200 responses
-    });
+    };
+
+    // Log the actual response being sent to frontend for debugging
+    if (result.needsClarification) {
+      logger.info('Sending clarification response to frontend', {
+        needsClarification: response.needsClarification,
+        clarificationQuestionCount: response.clarificationQuestions?.length,
+        responseKeys: Object.keys(response),
+        fullClarificationQuestions: JSON.stringify(response.clarificationQuestions)
+      });
+    }
+
+    res.status(200).json(response);
   } catch (error: any) {
     logger.error('Automation plan generation failed', {
       error: error.message,

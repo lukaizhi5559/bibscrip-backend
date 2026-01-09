@@ -10,11 +10,14 @@ import router from './api';
 import automationAnalyticsRouter from './api/automationAnalytics';
 import aiMemoryRouter from './routes/aiMemory';
 import smartPromptRouter from './routes/smartPrompt';
+import intentRouter from './api/intentRoutes';
 import { logger } from './utils/logger';
 import { vectorDbService } from './services/vectorDbService';
 import { fetchBibleIds } from './utils/bible';
 import { setupStreamingWebSocket } from './websocket';
 import { handleComputerUseWebSocket } from './api/computerUseWebSocket';
+import { intentWebSocketServer } from './api/intentWebSocket';
+import { omniParserWarmup } from './services/omniParserWarmup';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -118,6 +121,7 @@ app.use('/api', router);
 app.use('/api/automation-analytics', automationAnalyticsRouter);
 app.use('/api/memory', aiMemoryRouter);
 app.use('/api/smart-prompt', smartPromptRouter);
+app.use('/api/intent', intentRouter);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -150,8 +154,8 @@ async function initializeServices() {
 
     // UI Indexer Daemon removed - desktop automation moved to Electron client
 
-    // Add other service initializations here as needed
-    // ...
+    // Start OmniParser warmup service to prevent cold boots
+    omniParserWarmup.start();
     
     return true;
   } catch (error) {
@@ -169,13 +173,13 @@ initializeServices().then(() => {
   // Setup WebSocket streaming server (non-disruptive to REST APIs)
   const wsServer = setupStreamingWebSocket(server);
   
-  // Setup Computer Use WebSocket server with noServer option
+  // Setup Computer Use WebSocket server with noServer option (DEPRECATED - use /intent-use)
   const computerUseWss = new WebSocket.Server({ 
     noServer: true
   });
   
   computerUseWss.on('connection', (ws, req) => {
-    logger.info('🌐 [COMPUTER-USE] New WebSocket connection');
+    logger.info('🌐 [COMPUTER-USE] New WebSocket connection (DEPRECATED)');
     handleComputerUseWebSocket(ws, req);
   });
   
@@ -183,14 +187,21 @@ initializeServices().then(() => {
     logger.error('❌ [COMPUTER-USE] WebSocket server error:', error);
   });
   
+  // Setup Intent WebSocket server (NEW - intent-driven automation)
+  intentWebSocketServer.initialize(server);
+  
   // Handle upgrade requests - route to appropriate WebSocket server
   server.on('upgrade', (request, socket, head) => {
     const pathname = new URL(request.url || '', `http://${request.headers.host}`).pathname;
     
     logger.info(`🔄 [WEBSOCKET] Upgrade request for path: ${pathname}`);
     
-    if (pathname === '/computer-use') {
-      logger.info('🌐 [COMPUTER-USE] Routing to Computer Use WebSocket');
+    if (pathname === '/intent-use') {
+      logger.info('🎯 [INTENT] Routing to Intent WebSocket (NEW)');
+      // Intent WebSocket handles its own upgrade via ws library
+      return;
+    } else if (pathname === '/computer-use') {
+      logger.info('🌐 [COMPUTER-USE] Routing to Computer Use WebSocket (DEPRECATED)');
       computerUseWss.handleUpgrade(request, socket, head, (ws) => {
         computerUseWss.emit('connection', ws, request);
       });
@@ -215,6 +226,7 @@ initializeServices().then(() => {
   // Graceful shutdown
   process.on('SIGTERM', () => {
     logger.info('Received SIGTERM, shutting down gracefully...');
+    omniParserWarmup.stop();
     wsServer.shutdown();
     computerUseWss.close(() => {
       logger.info('Computer Use WebSocket server closed');
@@ -227,6 +239,7 @@ initializeServices().then(() => {
   
   process.on('SIGINT', () => {
     logger.info('Received SIGINT, shutting down gracefully...');
+    omniParserWarmup.stop();
     wsServer.shutdown();
     computerUseWss.close(() => {
       logger.info('Computer Use WebSocket server closed');

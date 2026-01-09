@@ -2705,6 +2705,7 @@ __metadata:
     bullmq: ^5.53.2
     clipboardy: ^4.0.0
     cors: ^2.8.5
+    crypto: ^1.0.1
     dotenv: ^16.5.0
     express: ^4.18.2
     express-async-handler: ^1.2.0
@@ -3355,6 +3356,13 @@ __metadata:
     shebang-command: ^2.0.0
     which: ^2.0.1
   checksum: 8d306efacaf6f3f60e0224c287664093fa9185680b2d195852ba9a863f85d02dcc737094c6e512175f8ee0161f9b87c73c6826034c2422e39de7d6569cf4503b
+  languageName: node
+  linkType: hard
+
+"crypto@npm:^1.0.1":
+  version: 1.0.1
+  resolution: "crypto@npm:1.0.1"
+  checksum: 087fe3165bd94c333a49e6ed66a0193911f63eac38a24f379b3001a5fe260a59c413646e53a0f67875ba13902b2686d81dc703cb2c147a4ec727dcdc04e5645e
   languageName: node
   linkType: hard
 
