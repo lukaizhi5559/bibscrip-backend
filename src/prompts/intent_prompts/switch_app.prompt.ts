@@ -1,6 +1,6 @@
 import { IntentExecutionRequest } from '../../types/intentTypes';
 
-export function buildSwitchAppPrompt(request: IntentExecutionRequest): string {
+export function buildSwitchAppPrompt(request: IntentExecutionRequest, actionHistory?: any[]): string {
   const { stepData, context } = request;
   
   return `You are executing a SWITCH_APP intent. Your goal: ${stepData.description}
@@ -35,6 +35,30 @@ OS: ${context.os || 'darwin'}
 - Use exact application names (e.g., "Google Chrome", "Warp", "Windsurf")
 - Always end with screenshot → end
 - If app doesn't exist, still call end (don't loop forever)
+
+
+${actionHistory && actionHistory.length > 0 ? `
+=== PREVIOUS ACTIONS IN THIS STEP ===
+You have already attempted ${actionHistory.length} action(s) in this step:
+
+${actionHistory.map((action: any, idx: number) => `${idx + 1}. ${action.actionType}
+   - Success: ${action.success}
+   ${action.error ? `- Error: ${action.error}` : ''}
+   ${action.metadata?.reasoning ? `- Your reasoning: ${action.metadata.reasoning}` : ''}
+`).join('')}
+=== SELF-CORRECTION INSTRUCTIONS ===
+
+**CRITICAL: Learn from previous attempts!**
+
+1. **Analyze Failures** - If an action failed, WHY? Wrong element? Wrong timing? Wrong action type?
+2. **Adjust Your Approach** - Be more specific, add waits, try different actions
+3. **Avoid Repeating Mistakes** - DO NOT repeat failed actions with same parameters
+4. **Progressive Refinement** - Each attempt should be smarter than the last
+5. **When to Give Up** - After 3 identical failures → try different approach; After 5 total failures → end with explanation
+
+**Remember: You are in an iterative loop. Use feedback from previous attempts to improve!**
+` : ''}
+
 
 === OUTPUT FORMAT ===
 Return ONLY valid JSON with this structure:

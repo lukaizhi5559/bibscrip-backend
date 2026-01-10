@@ -25,25 +25,61 @@ interface IntentSession {
     request: IntentExecutionRequest;
     requestId?: string;
   };
+  // Streaming execution state
+  currentExecution?: {
+    stepId: string;
+    intentType: IntentType;
+    request: IntentExecutionRequest;
+    requestId?: string;
+    actionHistory: any[];
+    startTime: number;
+  };
 }
 
 interface IntentWebSocketMessage {
-  type: 'execute_intent' | 'pause' | 'resume' | 'stop' | 'clarification_answer' | 'ping';
+  type: 'execute_intent' | 'action_complete' | 'pause' | 'resume' | 'stop' | 'clarification_answer' | 'ping';
   sessionId?: string;
   requestId?: string;
   stepId?: string;
   data?: IntentExecutionRequest;
   answers?: Record<string, string>;
+  // For action_complete
+  actionResult?: {
+    actionType: string;
+    success: boolean;
+    error?: string;
+    metadata?: any;
+  };
+  screenshot?: {
+    base64: string;
+    mimeType: string;
+  };
 }
 
 interface IntentWebSocketResponse {
-  type: 'intent_result' | 'clarification_needed' | 'paused' | 'resumed' | 'stopped' | 'error' | 'pong';
+  type: 'execute_action' | 'intent_complete' | 'clarification_needed' | 'paused' | 'resumed' | 'stopped' | 'error' | 'pong';
   requestId?: string;
   sessionId?: string;
   stepId?: string;
   data?: any;
   questions?: any[];
   error?: string;
+  // For execute_action
+  action?: {
+    type: string;
+    coordinates?: { x: number; y: number };
+    fromCoordinates?: { x: number; y: number };
+    toCoordinates?: { x: number; y: number };
+    text?: string;
+    key?: string;
+    ms?: number;
+    reasoning?: string;
+    confidence?: number;
+    detectionMethod?: string;
+    [key: string]: any;
+  };
+  // For intent_complete
+  result?: any;
 }
 
 export class IntentWebSocketServer {
@@ -141,6 +177,10 @@ export class IntentWebSocketServer {
         await this.handleClarificationAnswer(ws, message, requestId);
         break;
 
+      case 'action_complete':
+        await this.handleActionComplete(ws, message, requestId);
+        break;
+
       default:
         this.sendMessage(ws, {
           type: 'error',
@@ -157,41 +197,104 @@ export class IntentWebSocketServer {
     sessionId?: string
   ) {
     try {
-      logger.info('Executing intent via WebSocket', {
+      logger.info('Starting streaming intent execution', {
         intentType: request.intentType,
         stepId: request.stepData.id,
-        requestId
+        requestId,
+        sessionId
       });
 
       // Validate request
       this.validateIntentRequest(request);
 
-      // Create or update session
-      if (sessionId) {
-        const session = this.sessions.get(sessionId);
-        if (session && session.isPaused) {
-          logger.info('Session is paused, queuing intent execution', { sessionId });
-          this.sendMessage(ws, {
-            type: 'error',
-            requestId,
-            sessionId,
-            error: 'Session is paused. Resume to continue.'
-          });
-          return;
-        }
-
-        // Update or create session
-        this.sessions.set(sessionId, {
-          sessionId,
-          isPaused: false,
-          currentStep: (session?.currentStep || 0) + 1,
-          ws,
-          createdAt: session?.createdAt || Date.now()
-        });
+      // Create or update session with streaming execution state
+      if (!sessionId) {
+        sessionId = `session-${Date.now()}`;
       }
 
-      // Execute intent using IntentExecutionEngine
-      const result = await intentExecutionEngine.executeIntent(request);
+      const session = this.sessions.get(sessionId);
+      if (session && session.isPaused) {
+        logger.info('Session is paused', { sessionId });
+        this.sendMessage(ws, {
+          type: 'error',
+          requestId,
+          sessionId,
+          error: 'Session is paused. Resume to continue.'
+        });
+        return;
+      }
+
+      // Initialize streaming execution state
+      this.sessions.set(sessionId, {
+        sessionId,
+        isPaused: false,
+        currentStep: (session?.currentStep || 0) + 1,
+        ws,
+        createdAt: session?.createdAt || Date.now(),
+        currentExecution: {
+          stepId: request.stepData.id,
+          intentType: request.intentType,
+          request,
+          requestId,
+          actionHistory: [],
+          startTime: Date.now()
+        }
+      });
+
+      logger.info('Session initialized for streaming execution', {
+        sessionId,
+        stepId: request.stepData.id
+      });
+
+      // Get first action from IntentExecutionEngine
+      await this.executeNextAction(ws, sessionId, request);
+
+    } catch (error: any) {
+      logger.error('Intent execution failed', {
+        intentType: request.intentType,
+        stepId: request.stepData.id,
+        error: error.message,
+      });
+
+      this.sendMessage(ws, {
+        type: 'error',
+        requestId,
+        sessionId,
+        error: error.message,
+      });
+
+      // Clean up session execution state
+      if (sessionId) {
+        const session = this.sessions.get(sessionId);
+        if (session) {
+          session.currentExecution = undefined;
+        }
+      }
+    }
+  }
+
+  /**
+   * Execute next action in streaming mode
+   */
+  private async executeNextAction(
+    ws: WebSocket,
+    sessionId: string,
+    request: IntentExecutionRequest
+  ) {
+    const session = this.sessions.get(sessionId);
+    if (!session || !session.currentExecution) {
+      logger.error('No active execution for session', { sessionId });
+      return;
+    }
+
+    try {
+      const { actionHistory, requestId } = session.currentExecution;
+
+      // Get next action from engine (passing action history for context)
+      const result = await intentExecutionEngine.getNextActionStreaming(
+        request,
+        actionHistory
+      );
 
       // Check if clarification is needed
       if (result.status === 'clarification_needed') {
@@ -229,36 +332,156 @@ export class IntentWebSocketServer {
         return;
       }
 
-      // Send result back to client
-      this.sendMessage(ws, {
-        type: 'intent_result',
-        requestId,
-        sessionId,
-        data: result
-      });
+      // Check if step is complete
+      if (result.status === 'step_complete') {
+        logger.info('Intent execution complete', {
+          sessionId,
+          stepId: request.stepData.id,
+          totalActions: actionHistory.length,
+          executionTimeMs: Date.now() - session.currentExecution.startTime
+        });
 
-      logger.info('Intent execution completed', {
-        intentType: request.intentType,
-        stepId: request.stepData.id,
-        status: result.status,
-        actionsExecuted: result.actions.length,
-        executionTimeMs: result.executionTimeMs
-      });
+        // Send completion message
+        this.sendMessage(ws, {
+          type: 'intent_complete',
+          requestId,
+          sessionId,
+          stepId: request.stepData.id,
+          result: {
+            status: 'step_complete',
+            intentType: request.intentType,
+            stepId: request.stepData.id,
+            actions: actionHistory,
+            outputScreenshot: result.outputScreenshot,
+            data: result.data,
+            executionTimeMs: Date.now() - session.currentExecution.startTime
+          }
+        });
+
+        // Clean up execution state
+        session.currentExecution = undefined;
+        return;
+      }
+
+      // Check if step failed
+      if (result.status === 'step_failed') {
+        logger.error('Intent execution failed', {
+          sessionId,
+          stepId: request.stepData.id,
+          error: result.error
+        });
+
+        this.sendMessage(ws, {
+          type: 'error',
+          requestId,
+          sessionId,
+          error: result.error || 'Intent execution failed'
+        });
+
+        // Clean up execution state
+        session.currentExecution = undefined;
+        return;
+      }
+
+      // Send action to frontend for execution
+      if (result.action) {
+        logger.info('Sending action to frontend', {
+          sessionId,
+          actionType: result.action.type,
+          actionNumber: actionHistory.length + 1
+        });
+
+        this.sendMessage(ws, {
+          type: 'execute_action',
+          requestId,
+          sessionId,
+          stepId: request.stepData.id,
+          action: result.action
+        });
+      }
 
     } catch (error: any) {
-      logger.error('Intent execution failed', {
-        intentType: request.intentType,
+      logger.error('Failed to execute next action', {
+        sessionId,
         stepId: request.stepData?.id,
-        error: error.message,
-        requestId
+        error: error.message
       });
 
       this.sendMessage(ws, {
         type: 'error',
-        requestId,
+        requestId: session.currentExecution?.requestId,
+        sessionId,
         error: error.message
       });
+
+      // Clean up execution state
+      session.currentExecution = undefined;
     }
+  }
+
+  /**
+   * Handle action completion from frontend
+   */
+  private async handleActionComplete(
+    ws: WebSocket,
+    message: IntentWebSocketMessage,
+    requestId?: string
+  ) {
+    const { sessionId, stepId, actionResult, screenshot } = message;
+
+    if (!sessionId) {
+      this.sendMessage(ws, {
+        type: 'error',
+        requestId,
+        error: 'Missing sessionId for action_complete'
+      });
+      return;
+    }
+
+    const session = this.sessions.get(sessionId);
+    if (!session || !session.currentExecution) {
+      this.sendMessage(ws, {
+        type: 'error',
+        requestId,
+        sessionId,
+        error: 'No active execution for this session'
+      });
+      return;
+    }
+
+    if (session.currentExecution.stepId !== stepId) {
+      this.sendMessage(ws, {
+        type: 'error',
+        requestId,
+        sessionId,
+        error: 'Step ID mismatch'
+      });
+      return;
+    }
+
+    logger.info('Action completed by frontend', {
+      sessionId,
+      stepId,
+      actionType: actionResult?.actionType,
+      success: actionResult?.success,
+      actionNumber: session.currentExecution.actionHistory.length + 1
+    });
+
+    // Add action result to history
+    if (actionResult) {
+      session.currentExecution.actionHistory.push({
+        ...actionResult,
+        timestamp: Date.now()
+      });
+    }
+
+    // Update request with new screenshot
+    if (screenshot) {
+      session.currentExecution.request.context.screenshot = screenshot;
+    }
+
+    // Execute next action
+    await this.executeNextAction(ws, sessionId, session.currentExecution.request);
   }
 
   private validateIntentRequest(request: IntentExecutionRequest) {
@@ -491,12 +714,13 @@ export class IntentWebSocketServer {
         return;
       }
 
-      // Send result back to client
+      // Send completion result back to client
       this.sendMessage(ws, {
-        type: 'intent_result',
+        type: 'intent_complete',
         requestId,
         sessionId,
-        data: result,
+        stepId: request.stepData.id,
+        result: result,
       });
 
       logger.info('Intent execution completed after clarification', {

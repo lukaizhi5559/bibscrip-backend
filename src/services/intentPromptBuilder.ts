@@ -35,99 +35,155 @@ import { buildAuthenticatePrompt } from '../prompts/intent_prompts/authenticate.
 import { buildFormFillPrompt } from '../prompts/intent_prompts/form_fill.prompt';
 import { buildMultiSelectPrompt } from '../prompts/intent_prompts/multi_select.prompt';
 import { buildCustomPrompt } from '../prompts/intent_prompts/custom.prompt';
+// File Operations (Phase 4)
+import { buildReadFilePrompt } from '../prompts/intent_prompts/read_file.prompt';
+import { buildWriteFilePrompt } from '../prompts/intent_prompts/write_file.prompt';
+import { buildCopyFilePrompt } from '../prompts/intent_prompts/copy_file.prompt';
+import { buildMoveFilePrompt } from '../prompts/intent_prompts/move_file.prompt';
+import { buildDeleteFilePrompt } from '../prompts/intent_prompts/delete_file.prompt';
+import { buildListFilesPrompt } from '../prompts/intent_prompts/list_files.prompt';
+import { buildSearchFilesPrompt } from '../prompts/intent_prompts/search_files.prompt';
+import { buildCreateFolderPrompt } from '../prompts/intent_prompts/create_folder.prompt';
+import { buildDeleteFolderPrompt } from '../prompts/intent_prompts/delete_folder.prompt';
+import { buildFileInfoPrompt } from '../prompts/intent_prompts/file_info.prompt';
+import { buildModifyPermissionsPrompt } from '../prompts/intent_prompts/modify_permissions.prompt';
+import { buildCompressPrompt } from '../prompts/intent_prompts/compress.prompt';
+import { buildDecompressPrompt } from '../prompts/intent_prompts/decompress.prompt';
 
 export class IntentPromptBuilder {
   /**
    * Build intent-specific prompt
    * Routes to appropriate prompt builder based on intent type
+   * @param request - Intent execution request
+   * @param actionHistory - Previous actions in this step (for iterative refinement)
    */
-  buildPrompt(request: IntentExecutionRequest): string {
+  buildPrompt(request: IntentExecutionRequest, actionHistory?: any[]): string {
     const { intentType } = request;
 
     switch (intentType) {
       case 'navigate':
-        return buildNavigatePrompt(request);
+        return buildNavigatePrompt(request, actionHistory);
       
       case 'capture':
-        return buildCapturePrompt(request);
+        return buildCapturePrompt(request, actionHistory);
       
       case 'type_text':
-        return buildTypeTextPrompt(request);
+        return buildTypeTextPrompt(request, actionHistory);
       
       case 'click_element':
-        return buildClickElementPrompt(request);
+        return buildClickElementPrompt(request, actionHistory);
       
       case 'search':
-        return buildSearchPrompt(request);
+        return buildSearchPrompt(request, actionHistory);
       
       case 'wait':
-        return buildWaitPrompt(request);
+        return buildWaitPrompt(request, actionHistory);
       
       case 'switch_app':
-        return buildSwitchAppPrompt(request);
+        return buildSwitchAppPrompt(request, actionHistory);
       
       case 'close_app':
-        return buildCloseAppPrompt(request);
+        return buildCloseAppPrompt(request, actionHistory);
       
       case 'select':
-        return buildSelectPrompt(request);
+        return buildSelectPrompt(request, actionHistory);
       
       case 'drag':
-        return buildDragPrompt(request);
+        return buildDragPrompt(request, actionHistory);
       
       case 'scroll':
-        return buildScrollPrompt(request);
+        return buildScrollPrompt(request, actionHistory);
       
       case 'extract':
-        return buildExtractPrompt(request);
+        return buildExtractPrompt(request, actionHistory);
       
       case 'copy':
-        return buildCopyPrompt(request);
+        return buildCopyPrompt(request, actionHistory);
       
       case 'paste':
-        return buildPastePrompt(request);
+        return buildPastePrompt(request, actionHistory);
       
       case 'store':
-        return buildStorePrompt(request);
+        return buildStorePrompt(request, actionHistory);
       
       case 'retrieve':
-        return buildRetrievePrompt(request);
+        return buildRetrievePrompt(request, actionHistory);
       
       case 'verify':
-        return buildVerifyPrompt(request);
+        return buildVerifyPrompt(request, actionHistory);
       
       case 'compare':
-        return buildComparePrompt(request);
+        return buildComparePrompt(request, actionHistory);
       
       case 'check':
-        return buildCheckPrompt(request);
+        return buildCheckPrompt(request, actionHistory);
       
       case 'upload':
-        return buildUploadPrompt(request);
+        return buildUploadPrompt(request, actionHistory);
       
       case 'download':
-        return buildDownloadPrompt(request);
+        return buildDownloadPrompt(request, actionHistory);
       
       case 'open_file':
-        return buildOpenFilePrompt(request);
+        return buildOpenFilePrompt(request, actionHistory);
       
       case 'save_file':
-        return buildSaveFilePrompt(request);
+        return buildSaveFilePrompt(request, actionHistory);
       
       case 'zoom':
-        return buildZoomPrompt(request);
+        return buildZoomPrompt(request, actionHistory);
       
       case 'authenticate':
-        return buildAuthenticatePrompt(request);
+        return buildAuthenticatePrompt(request, actionHistory);
       
       case 'form_fill':
-        return buildFormFillPrompt(request);
+        return buildFormFillPrompt(request, actionHistory);
       
       case 'multi_select':
-        return buildMultiSelectPrompt(request);
+        return buildMultiSelectPrompt(request, actionHistory);
       
       case 'custom':
-        return buildCustomPrompt(request);
+        return buildCustomPrompt(request, actionHistory);
+      
+      // File Operations (Phase 4)
+      case 'read_file':
+        return buildReadFilePrompt(request, actionHistory);
+      
+      case 'write_file':
+        return buildWriteFilePrompt(request, actionHistory);
+      
+      case 'copy_file':
+        return buildCopyFilePrompt(request, actionHistory);
+      
+      case 'move_file':
+        return buildMoveFilePrompt(request, actionHistory);
+      
+      case 'delete_file':
+        return buildDeleteFilePrompt(request, actionHistory);
+      
+      case 'list_files':
+        return buildListFilesPrompt(request, actionHistory);
+      
+      case 'search_files':
+        return buildSearchFilesPrompt(request, actionHistory);
+      
+      case 'create_folder':
+        return buildCreateFolderPrompt(request, actionHistory);
+      
+      case 'delete_folder':
+        return buildDeleteFolderPrompt(request, actionHistory);
+      
+      case 'file_info':
+        return buildFileInfoPrompt(request, actionHistory);
+      
+      case 'modify_permissions':
+        return buildModifyPermissionsPrompt(request, actionHistory);
+      
+      case 'compress':
+        return buildCompressPrompt(request, actionHistory);
+      
+      case 'decompress':
+        return buildDecompressPrompt(request, actionHistory);
       
       default:
         throw new Error(`Unknown intent type: ${intentType}`);

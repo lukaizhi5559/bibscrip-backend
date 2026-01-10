@@ -6,7 +6,7 @@
 
 import { IntentExecutionRequest } from '../../types/intentTypes';
 
-export function buildTypeTextPrompt(request: IntentExecutionRequest): string {
+export function buildTypeTextPrompt(request: IntentExecutionRequest, actionHistory?: any[]): string {
   const { stepData, context } = request;
   const os = context.os || 'darwin';
   const cmdKey = os === 'darwin' ? 'Cmd' : 'Ctrl';
@@ -108,9 +108,49 @@ IF need to submit after typing:
 === CONTEXT ===
 - OS: ${os}
 - Active App: ${context.activeApp || 'Unknown'}
-- Max Attempts: ${stepData.maxAttempts || 3}
+- Max Attempts: ${stepData.maxAttempts || 10}
 - Stored Data: ${context.storedData ? Object.keys(context.storedData).join(', ') : 'None'}
 
+${actionHistory && actionHistory.length > 0 ? `
+=== PREVIOUS ACTIONS IN THIS STEP ===
+You have already attempted ${actionHistory.length} action(s):
+
+${actionHistory.map((action: any, idx: number) => `${idx + 1}. ${action.actionType}
+   - Success: ${action.success}
+   ${action.error ? `- Error: ${action.error}` : ''}
+   ${action.metadata?.reasoning ? `- Your reasoning: ${action.metadata.reasoning}` : ''}
+`).join('')}
+=== SELF-CORRECTION INSTRUCTIONS ===
+
+**CRITICAL: Learn from previous attempts!**
+
+1. **Analyze Failures**
+   - If findAndClick failed, is the field description accurate?
+   - If typeText failed, was the field focused?
+   - If text didn't appear, did you use typeText vs pressKey correctly?
+
+2. **Adjust Your Approach**
+   - If field not focused → Click field first
+   - If typeText failed → Verify field is ready, try again
+   - If wrong action type → Use typeText for literal text, pressKey for shortcuts
+
+3. **Avoid Repeating Mistakes**
+   - DO NOT repeat failed actions with same parameters
+   - DO NOT confuse typeText (literal) with pressKey (shortcuts)
+   - After 3+ failures → End with clear explanation
+
+4. **Progressive Refinement**
+   - Each attempt should be smarter
+   - Verify field focus before typing
+   - Check screenshot to confirm text entry
+
+5. **When to Give Up**
+   - After 3 identical failures → Try different approach
+   - After 5 total failures → End with explanation
+   - If field doesn't exist → End immediately
+
+**Remember: You are in an iterative loop. Use feedback from previous attempts to improve!**
+` : ''}
 === OUTPUT FORMAT ===
 Return ONE action as JSON:
 {

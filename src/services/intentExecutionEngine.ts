@@ -21,6 +21,8 @@ import {
   ClarificationQuestion
 } from '../types/intentTypes';
 import { intentPromptBuilder } from './intentPromptBuilder';
+import { omniParserService } from './omniParserService';
+import { uiDetectionService } from './uiDetectionService';
 
 interface ActionExecutionResult {
   type: ActionType;
@@ -58,6 +60,140 @@ export class IntentExecutionEngine {
 
     if (!this.openaiClient && !this.claudeClient && !this.geminiClient) {
       logger.warn('IntentExecutionEngine: No LLM clients available');
+    }
+  }
+
+  /**
+   * Get next action in streaming mode (for WebSocket streaming execution)
+   * Returns single action instead of executing full intent
+   */
+  async getNextActionStreaming(
+    request: IntentExecutionRequest,
+    actionHistory: any[],
+    clarificationAnswers?: Record<string, string>
+  ): Promise<any> {
+    const { intentType, stepData, context } = request;
+
+    logger.info('Getting next action (streaming mode)', {
+      intentType,
+      stepId: stepData.id,
+      actionHistoryLength: actionHistory.length,
+    });
+
+    // Validate intent has available actions
+    const availableActions = INTENT_AVAILABLE_ACTIONS[intentType];
+    if (!availableActions || availableActions.length === 0) {
+      return {
+        status: 'step_failed',
+        error: `No available actions defined for intent type: ${intentType}`,
+      };
+    }
+
+    // Check if max attempts reached
+    const maxAttempts = stepData.maxAttempts || 10;
+    if (actionHistory.length >= maxAttempts) {
+      return {
+        status: 'step_failed',
+        error: `Max attempts (${maxAttempts}) reached`,
+      };
+    }
+
+    try {
+      // Build prompt with action history context
+      let prompt = intentPromptBuilder.buildPrompt({
+        ...request,
+        context: {
+          ...context,
+          storedData: context.storedData || {},
+        },
+      });
+
+      // Add action history context
+      if (actionHistory.length > 0) {
+        prompt += '\n\n## Previous Actions in This Step:\n';
+        prompt += `You have already attempted ${actionHistory.length} action(s):\n\n`;
+        actionHistory.forEach((action, idx) => {
+          prompt += `${idx + 1}. ${action.actionType}\n`;
+          prompt += `   - Success: ${action.success}\n`;
+          if (action.error) {
+            prompt += `   - Error: ${action.error}\n`;
+          }
+          if (action.metadata?.reasoning) {
+            prompt += `   - Reasoning: ${action.metadata.reasoning}\n`;
+          }
+          prompt += '\n';
+        });
+        prompt += 'IMPORTANT: Learn from these previous attempts. If an action failed, try a different approach.\n';
+      }
+
+      // Append clarification answers if provided
+      if (clarificationAnswers && Object.keys(clarificationAnswers).length > 0) {
+        prompt += '\n\n## User Clarification Answers:\n';
+        for (const [questionId, answer] of Object.entries(clarificationAnswers)) {
+          prompt += `- ${questionId}: ${answer}\n`;
+        }
+      }
+
+      // Get next action from LLM
+      const action = await this.getNextAction(prompt, context.screenshot, availableActions);
+
+      // Check for clarification request
+      if (action.type === 'clarification_needed' || action.needsClarification) {
+        const questions = this.extractClarificationQuestions(action);
+        if (questions.length > 0) {
+          return {
+            status: 'clarification_needed',
+            clarificationQuestions: questions,
+          };
+        }
+      }
+
+      // Check if step is complete
+      if (action.type === 'end') {
+        return {
+          status: 'step_complete',
+          outputScreenshot: context.screenshot,
+          data: context.storedData || {},
+        };
+      }
+
+      // Enrich action with coordinates if needed (Phase 2: OmniParser Integration)
+      let enrichedAction = await this.enrichActionWithCoordinates(
+        action,
+        {
+          base64: context.screenshot.base64,
+          mimeType: context.screenshot.mimeType || 'image/png'
+        },
+        request
+      );
+
+      // Enrich action with OCR data if needed (Phase 2: OmniParser Integration)
+      enrichedAction = await this.enrichActionWithOCR(
+        enrichedAction,
+        {
+          base64: context.screenshot.base64,
+          mimeType: context.screenshot.mimeType || 'image/png'
+        },
+        request
+      );
+
+      // Return enriched action for frontend execution
+      return {
+        status: 'action_ready',
+        action: enrichedAction,
+      };
+
+    } catch (error: any) {
+      logger.error('Failed to get next action', {
+        intentType,
+        stepId: stepData.id,
+        error: error.message,
+      });
+
+      return {
+        status: 'step_failed',
+        error: error.message,
+      };
     }
   }
 
@@ -455,6 +591,272 @@ export class IntentExecutionEngine {
     }
 
     return questions;
+  }
+
+  /**
+   * Enrich action with coordinates using OmniParser/Vision API (Phase 2)
+   * Actions that need coordinates: findAndClick, clickAndDrag, waitForElement
+   */
+  private async enrichActionWithCoordinates(
+    action: any,
+    screenshot: { base64: string; mimeType: string },
+    request: IntentExecutionRequest
+  ): Promise<any> {
+    const actionsNeedingCoordinates = ['findAndClick', 'clickAndDrag', 'waitForElement'];
+    
+    if (!actionsNeedingCoordinates.includes(action.type)) {
+      // Action doesn't need coordinates (e.g., typeText, pressKey, scroll, pause, end)
+      return action;
+    }
+
+    try {
+      logger.info('Enriching action with coordinates', {
+        actionType: action.type,
+        element: action.element || action.description,
+      });
+
+      // Hybrid strategy: Try OmniParser first, fall back to Vision API
+      const useOmniParser = omniParserService.isAvailable();
+      let detectionResult;
+
+      if (useOmniParser) {
+        try {
+          logger.info('Attempting OmniParser detection');
+          detectionResult = await omniParserService.detectElement(
+            screenshot,
+            action.element || action.description,
+            {
+              intentType: request.intentType,
+              stepDescription: request.stepData.description,
+              activeApp: request.context.activeApp,
+              activeUrl: request.context.activeUrl,
+            }
+          );
+
+          logger.info('OmniParser detection successful', {
+            method: detectionResult.method,
+            confidence: detectionResult.confidence,
+            cacheHit: detectionResult.cacheHit,
+          });
+        } catch (error: any) {
+          logger.warn('OmniParser detection failed, falling back to Vision API', {
+            error: error.message,
+          });
+          // Fall through to Vision API
+        }
+      }
+
+      // Use Vision API if OmniParser not available or failed
+      if (!detectionResult) {
+        logger.info('Using Vision API for detection');
+        detectionResult = await uiDetectionService.detectElement(
+          screenshot,
+          action.element || action.description,
+          {
+            intentType: request.intentType,
+            stepDescription: request.stepData.description,
+            activeApp: request.context.activeApp,
+            activeUrl: request.context.activeUrl,
+          }
+        );
+
+        logger.info('Vision API detection successful', {
+          confidence: detectionResult.confidence,
+        });
+      }
+
+      // Apply window bounds offset if provided (fixes coordinate system bug)
+      const windowBounds = request.context.windowBounds;
+      const offsetX = windowBounds?.x || 0;
+      const offsetY = windowBounds?.y || 0;
+
+      if (windowBounds) {
+        logger.info('Applying window bounds offset', {
+          windowBounds,
+          rawCoordinates: detectionResult.coordinates,
+        });
+      }
+
+      // Handle clickAndDrag (needs two coordinates)
+      if (action.type === 'clickAndDrag') {
+        // For drag, we need to detect both source and target
+        // First detection is the source (fromElement)
+        const fromCoordinates = {
+          x: detectionResult.coordinates.x + offsetX,
+          y: detectionResult.coordinates.y + offsetY,
+        };
+
+        // Detect target element
+        const toElement = action.toElement || action.target;
+        if (!toElement) {
+          throw new Error('clickAndDrag requires toElement/target');
+        }
+
+        let toDetectionResult;
+        if (useOmniParser && omniParserService.isAvailable()) {
+          try {
+            toDetectionResult = await omniParserService.detectElement(
+              screenshot,
+              toElement,
+              {
+                intentType: request.intentType,
+                stepDescription: request.stepData.description,
+                activeApp: request.context.activeApp,
+                activeUrl: request.context.activeUrl,
+              }
+            );
+          } catch (error: any) {
+            logger.warn('OmniParser failed for target element, using Vision API');
+          }
+        }
+
+        if (!toDetectionResult) {
+          toDetectionResult = await uiDetectionService.detectElement(
+            screenshot,
+            toElement,
+            {
+              intentType: request.intentType,
+              stepDescription: request.stepData.description,
+              activeApp: request.context.activeApp,
+              activeUrl: request.context.activeUrl,
+            }
+          );
+        }
+
+        const toCoordinates = {
+          x: toDetectionResult.coordinates.x + offsetX,
+          y: toDetectionResult.coordinates.y + offsetY,
+        };
+
+        logger.info('Enriched clickAndDrag with offset coordinates', {
+          fromCoordinates,
+          toCoordinates,
+        });
+
+        // Return enriched action with both coordinates (offset applied)
+        return {
+          ...action,
+          fromCoordinates,
+          toCoordinates,
+          confidence: Math.min(detectionResult.confidence, toDetectionResult.confidence),
+          detectionMethod: detectionResult.method || 'vision_api',
+        };
+      }
+
+      // For findAndClick and waitForElement, return single coordinate (offset applied)
+      const coordinates = {
+        x: detectionResult.coordinates.x + offsetX,
+        y: detectionResult.coordinates.y + offsetY,
+      };
+
+      logger.info('Enriched action with offset coordinates', {
+        actionType: action.type,
+        rawCoordinates: detectionResult.coordinates,
+        offsetCoordinates: coordinates,
+        offset: { x: offsetX, y: offsetY },
+      });
+
+      return {
+        ...action,
+        coordinates,
+        confidence: detectionResult.confidence,
+        detectionMethod: detectionResult.method || 'vision_api',
+      };
+
+    } catch (error: any) {
+      logger.error('Failed to enrich action with coordinates', {
+        actionType: action.type,
+        error: error.message,
+      });
+
+      // Return action without coordinates (frontend will handle error)
+      return {
+        ...action,
+        error: `Failed to detect element: ${error.message}`,
+        confidence: 0,
+      };
+    }
+  }
+
+  /**
+   * Enrich action with OCR data (Phase 2)
+   * Actions that need OCR: ocr, extract, capture
+   */
+  private async enrichActionWithOCR(
+    action: any,
+    screenshot: { base64: string; mimeType: string },
+    request: IntentExecutionRequest
+  ): Promise<any> {
+    const actionsNeedingOCR = ['ocr', 'extract', 'capture'];
+    
+    if (!actionsNeedingOCR.includes(action.type)) {
+      return action;
+    }
+
+    try {
+      logger.info('Enriching action with OCR data', {
+        actionType: action.type,
+      });
+
+      // Try OmniParser for OCR first (better caching)
+      let ocrResult;
+      if (omniParserService.isAvailable()) {
+        try {
+          logger.info('Attempting OmniParser OCR');
+          // OmniParser can extract all text elements
+          const detectionResult = await omniParserService.detectElement(
+            screenshot,
+            'all text elements',
+            {
+              intentType: request.intentType,
+              mode: 'fetch_all_elements',
+            }
+          );
+
+          if (detectionResult.allElements) {
+            // Extract text from all elements
+            ocrResult = {
+              text: detectionResult.allElements
+                .filter(el => el.content)
+                .map(el => el.content)
+                .join('\n'),
+              elements: detectionResult.allElements,
+              method: 'omniparser',
+            };
+          }
+        } catch (error: any) {
+          logger.warn('OmniParser OCR failed, falling back to Vision API', {
+            error: error.message,
+          });
+        }
+      }
+
+      // Fall back to Vision API OCR
+      if (!ocrResult) {
+        logger.info('Using Vision API for OCR');
+        // Vision API can extract text from screenshot
+        // This would call uiDetectionService with OCR mode
+        // For now, we'll just pass through and let frontend handle
+        ocrResult = {
+          text: '',
+          method: 'vision_api',
+          note: 'OCR will be performed by Vision API',
+        };
+      }
+
+      return {
+        ...action,
+        ocrData: ocrResult,
+      };
+
+    } catch (error: any) {
+      logger.error('Failed to enrich action with OCR', {
+        actionType: action.type,
+        error: error.message,
+      });
+
+      return action;
+    }
   }
 
   /**

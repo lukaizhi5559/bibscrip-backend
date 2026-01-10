@@ -43,11 +43,26 @@ export type IntentType =
   | 'compare'           // Compare multiple sources
   | 'check'             // Check if condition is met
   
-  // File Operations
+  // File Operations (Basic)
   | 'upload'            // Upload file
   | 'download'          // Download file
   | 'open_file'         // Open file in app
   | 'save_file'         // Save file
+  
+  // File Operations (Extended - Phase 4)
+  | 'read_file'         // Read file contents
+  | 'write_file'        // Write to file
+  | 'copy_file'         // Copy file to new location
+  | 'move_file'         // Move/rename file
+  | 'delete_file'       // Delete file
+  | 'list_files'        // List files in directory
+  | 'search_files'      // Search for files by pattern
+  | 'create_folder'     // Create directory
+  | 'delete_folder'     // Delete directory
+  | 'file_info'         // Get file metadata
+  | 'modify_permissions' // Change file permissions
+  | 'compress'          // Compress files/folders
+  | 'decompress'        // Extract archives
   
   // Advanced Interactions
   | 'zoom'              // Zoom in/out (maps, images)
@@ -86,6 +101,27 @@ export type ActionType =
   // Data Operations
   | 'store'
   | 'retrieve'
+  
+  // File Operations (Phase 4)
+  | 'readFile'
+  | 'writeFile'
+  | 'appendFile'
+  | 'deleteFile'
+  | 'copyFile'
+  | 'moveFile'
+  | 'renameFile'
+  | 'listDirectory'
+  | 'createDirectory'
+  | 'deleteDirectory'
+  | 'fileExists'
+  | 'getFileStats'
+  | 'fileSearch'
+  | 'readFileLines'
+  | 'replaceInFile'
+  | 'getFilePermissions'
+  | 'setFilePermissions'
+  | 'compressFile'
+  | 'decompressFile'
   
   // Control Flow
   | 'waitForElement'
@@ -129,11 +165,26 @@ export const INTENT_AVAILABLE_ACTIONS: Record<IntentType, ActionType[]> = {
   compare: ['screenshot', 'ocr', 'store', 'retrieve', 'end'],
   check: ['screenshot', 'ocr', 'waitForElement', 'end'],
   
-  // File Operations
+  // File Operations (Basic)
   upload: ['findAndClick', 'typeText', 'pressKey', 'waitForElement', 'screenshot', 'end'],
   download: ['findAndClick', 'waitForElement', 'pause', 'screenshot', 'end'],
   open_file: ['focusApp', 'pressKey', 'typeText', 'waitForElement', 'screenshot', 'end'],
   save_file: ['pressKey', 'typeText', 'waitForElement', 'screenshot', 'end'],
+  
+  // File Operations (Extended - Phase 4)
+  read_file: ['readFile', 'fileExists', 'screenshot', 'store', 'end'],
+  write_file: ['writeFile', 'fileExists', 'createDirectory', 'screenshot', 'end'],
+  copy_file: ['copyFile', 'fileExists', 'screenshot', 'end'],
+  move_file: ['moveFile', 'fileExists', 'screenshot', 'end'],
+  delete_file: ['deleteFile', 'fileExists', 'screenshot', 'end'],
+  list_files: ['listDirectory', 'fileExists', 'screenshot', 'store', 'end'],
+  search_files: ['fileSearch', 'listDirectory', 'screenshot', 'store', 'end'],
+  create_folder: ['createDirectory', 'fileExists', 'screenshot', 'end'],
+  delete_folder: ['deleteDirectory', 'fileExists', 'screenshot', 'end'],
+  file_info: ['getFileStats', 'fileExists', 'screenshot', 'store', 'end'],
+  modify_permissions: ['setFilePermissions', 'getFilePermissions', 'fileExists', 'screenshot', 'end'],
+  compress: ['compressFile', 'fileExists', 'screenshot', 'end'],
+  decompress: ['decompressFile', 'fileExists', 'screenshot', 'end'],
   
   // Advanced Interactions
   zoom: ['zoom', 'pause', 'screenshot', 'end'],
@@ -184,6 +235,14 @@ export interface IntentExecutionRequest {
     
     /** OS */
     os?: 'darwin' | 'win32' | 'linux';
+    
+    /** Window bounds for coordinate offset (fixes viewport coordinate bug) */
+    windowBounds?: {
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+    };
     
     /** Stored data from previous steps */
     storedData?: Record<string, any>;
@@ -549,6 +608,137 @@ export const INTENT_METADATA: Record<IntentType, IntentMetadata> = {
     optionalFields: ['target'],
     typicalDuration: '1-3s',
     examples: ['Save document', 'Save as', 'Export file'],
+  },
+  
+  // File Operations (Extended - Phase 4)
+  read_file: {
+    name: 'Read File',
+    description: 'Read file contents from disk',
+    category: 'file',
+    requiredFields: ['target'],
+    optionalFields: [],
+    typicalDuration: '1-2s',
+    examples: ['Read config.json', 'Read API key from file', 'Load template'],
+  },
+  
+  write_file: {
+    name: 'Write File',
+    description: 'Write content to file',
+    category: 'file',
+    requiredFields: ['target', 'query'],
+    optionalFields: [],
+    typicalDuration: '1-3s',
+    examples: ['Write data to CSV', 'Save results to file', 'Create output file'],
+  },
+  
+  copy_file: {
+    name: 'Copy File',
+    description: 'Copy file to new location',
+    category: 'file',
+    requiredFields: ['target'],
+    optionalFields: [],
+    typicalDuration: '1-5s',
+    examples: ['Copy file to backup', 'Duplicate document', 'Copy to Desktop'],
+  },
+  
+  move_file: {
+    name: 'Move File',
+    description: 'Move or rename file',
+    category: 'file',
+    requiredFields: ['target'],
+    optionalFields: [],
+    typicalDuration: '1-3s',
+    examples: ['Move file to folder', 'Rename document', 'Relocate file'],
+  },
+  
+  delete_file: {
+    name: 'Delete File',
+    description: 'Delete file from disk',
+    category: 'file',
+    requiredFields: ['target'],
+    optionalFields: [],
+    typicalDuration: '1-2s',
+    examples: ['Delete temp file', 'Remove old backup', 'Delete document'],
+  },
+  
+  list_files: {
+    name: 'List Files',
+    description: 'List files in directory',
+    category: 'file',
+    requiredFields: ['target'],
+    optionalFields: [],
+    typicalDuration: '1-3s',
+    examples: ['List files in Downloads', 'Show directory contents', 'List PDFs'],
+  },
+  
+  search_files: {
+    name: 'Search Files',
+    description: 'Search for files by pattern',
+    category: 'file',
+    requiredFields: ['query'],
+    optionalFields: ['target'],
+    typicalDuration: '2-10s',
+    examples: ['Find all .txt files', 'Search for documents', 'Locate file by name'],
+  },
+  
+  create_folder: {
+    name: 'Create Folder',
+    description: 'Create new directory',
+    category: 'file',
+    requiredFields: ['target'],
+    optionalFields: [],
+    typicalDuration: '1-2s',
+    examples: ['Create project folder', 'Make new directory', 'Create backup folder'],
+  },
+  
+  delete_folder: {
+    name: 'Delete Folder',
+    description: 'Delete directory',
+    category: 'file',
+    requiredFields: ['target'],
+    optionalFields: [],
+    typicalDuration: '1-5s',
+    examples: ['Delete temp folder', 'Remove old directory', 'Delete empty folder'],
+  },
+  
+  file_info: {
+    name: 'File Info',
+    description: 'Get file metadata and stats',
+    category: 'file',
+    requiredFields: ['target'],
+    optionalFields: [],
+    typicalDuration: '1-2s',
+    examples: ['Get file size', 'Check file modified date', 'View file properties'],
+  },
+  
+  modify_permissions: {
+    name: 'Modify Permissions',
+    description: 'Change file permissions',
+    category: 'file',
+    requiredFields: ['target'],
+    optionalFields: [],
+    typicalDuration: '1-2s',
+    examples: ['Make file executable', 'Change permissions', 'Set read-only'],
+  },
+  
+  compress: {
+    name: 'Compress',
+    description: 'Compress files or folders',
+    category: 'file',
+    requiredFields: ['target'],
+    optionalFields: [],
+    typicalDuration: '2-30s',
+    examples: ['Zip folder', 'Compress files', 'Create archive'],
+  },
+  
+  decompress: {
+    name: 'Decompress',
+    description: 'Extract compressed archives',
+    category: 'file',
+    requiredFields: ['target'],
+    optionalFields: [],
+    typicalDuration: '2-30s',
+    examples: ['Unzip file', 'Extract archive', 'Decompress folder'],
   },
   
   zoom: {

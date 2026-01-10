@@ -79,10 +79,24 @@ router.post('/execute', executeHandler);
  */
 
 const intentEndpoints: IntentType[] = [
-  'navigate', 'switch_app', 'close_app', 'click_element', 'type_text', 'search',
-  'select', 'drag', 'scroll', 'capture', 'extract', 'copy', 'paste', 'store',
-  'retrieve', 'wait', 'verify', 'compare', 'check', 'upload', 'download',
-  'open_file', 'save_file', 'zoom', 'authenticate', 'form_fill', 'multi_select', 'custom'
+  // Navigation & App Control
+  'navigate', 'switch_app', 'close_app',
+  // UI Interaction
+  'click_element', 'type_text', 'search', 'select', 'drag', 'scroll',
+  // Data Operations
+  'capture', 'extract', 'copy', 'paste', 'store', 'retrieve',
+  // Verification & Control Flow
+  'wait', 'verify', 'compare', 'check',
+  // File Operations (Basic)
+  'upload', 'download', 'open_file', 'save_file',
+  // File Operations (Extended - Phase 4)
+  'read_file', 'write_file', 'copy_file', 'move_file', 'delete_file',
+  'list_files', 'search_files', 'create_folder', 'delete_folder',
+  'file_info', 'modify_permissions', 'compress', 'decompress',
+  // Advanced Interactions
+  'zoom', 'authenticate', 'form_fill', 'multi_select',
+  // Custom
+  'custom'
 ];
 
 for (const intentType of intentEndpoints) {
@@ -175,7 +189,12 @@ router.get('/list', (req: Request, res: Response) => {
       interaction: ['click_element', 'type_text', 'search', 'select', 'drag', 'scroll'],
       data: ['capture', 'extract', 'copy', 'paste', 'store', 'retrieve'],
       verification: ['wait', 'verify', 'compare', 'check'],
-      file: ['upload', 'download', 'open_file', 'save_file'],
+      file_basic: ['upload', 'download', 'open_file', 'save_file'],
+      file_extended: [
+        'read_file', 'write_file', 'copy_file', 'move_file', 'delete_file',
+        'list_files', 'search_files', 'create_folder', 'delete_folder',
+        'file_info', 'modify_permissions', 'compress', 'decompress'
+      ],
       advanced: ['zoom', 'authenticate', 'form_fill', 'multi_select'],
       custom: ['custom']
     }
