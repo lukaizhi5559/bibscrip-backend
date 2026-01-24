@@ -201,7 +201,9 @@ export class IntentWebSocketServer {
         intentType: request.intentType,
         stepId: request.stepData.id,
         requestId,
-        sessionId
+        sessionId,
+        stepData: request.stepData,
+        contextKeys: Object.keys(request.context || {})
       });
 
       // Validate request
@@ -429,6 +431,16 @@ export class IntentWebSocketServer {
   ) {
     const { sessionId, stepId, actionResult, screenshot } = message;
 
+    // Log the full message for debugging
+    logger.info('Received action_complete message', {
+      sessionId,
+      stepId,
+      hasActionResult: !!actionResult,
+      actionResultKeys: actionResult ? Object.keys(actionResult) : [],
+      hasScreenshot: !!screenshot,
+      messageKeys: Object.keys(message)
+    });
+
     if (!sessionId) {
       this.sendMessage(ws, {
         type: 'error',
@@ -472,6 +484,18 @@ export class IntentWebSocketServer {
       session.currentExecution.actionHistory.push({
         ...actionResult,
         timestamp: Date.now()
+      });
+      
+      logger.info('Action added to history', {
+        sessionId,
+        actionHistoryLength: session.currentExecution.actionHistory.length,
+        latestAction: actionResult.actionType
+      });
+    } else {
+      logger.warn('⚠️ No actionResult provided in action_complete message', {
+        sessionId,
+        stepId,
+        messageKeys: Object.keys(message)
       });
     }
 
@@ -518,7 +542,8 @@ export class IntentWebSocketServer {
       'navigate', 'switch_app', 'close_app', 'click_element', 'type_text', 'search',
       'select', 'drag', 'scroll', 'capture', 'extract', 'copy', 'paste', 'store',
       'retrieve', 'wait', 'verify', 'compare', 'check', 'upload', 'download',
-      'open_file', 'save_file', 'zoom', 'authenticate', 'form_fill', 'multi_select', 'custom'
+      'open_file', 'save_file', 'zoom', 'authenticate', 'form_fill', 'multi_select', 'custom',
+      'spotlight_search'
     ];
 
     if (!validIntents.includes(request.intentType)) {

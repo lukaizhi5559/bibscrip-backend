@@ -5,6 +5,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { omniParserService } from '../services/omniParserService';
+import { initializeVisionVerification, verifyElementWithVision } from '../services/visionVerificationService';
 
 const router = Router();
 
@@ -27,6 +28,14 @@ const grokClient = process.env.GROK_API_KEY
       baseURL: 'https://api.x.ai/v1'
     })
   : null;
+
+// Initialize shared vision verification service
+initializeVisionVerification({
+  gemini: geminiClient || undefined,
+  claude: claudeClient || undefined,
+  openai: openaiClient || undefined,
+  grok: grokClient || undefined,
+});
 
 /**
  * POST /api/vision/locate
@@ -351,119 +360,15 @@ router.post('/verify', authenticate, async (req: Request, res: Response): Promis
       userId: (req as any).user?.id,
     });
 
-    const startTime = Date.now();
+    // Use shared vision verification service with automatic fallback
+    const result = await verifyElementWithVision(screenshot, description);
 
-    // Try Gemini first (Priority 1 - best overall)
-    if (geminiClient) {
-      try {
-        const result = await verifyWithGemini(screenshot, description);
-        const latencyMs = Date.now() - startTime;
-
-        logger.info('Vision verify successful with Gemini', {
-          description,
-          exists: result.exists,
-          confidence: result.confidence,
-          latencyMs,
-        });
-
-        res.status(200).json({
-          success: true,
-          ...result,
-          provider: 'gemini',
-          latencyMs,
-        });
-        return;
-      } catch (error: any) {
-        logger.warn('Gemini vision verify failed, falling back to OpenAI', {
-          error: error.message,
-        });
-      }
-    }
-
-    // Fallback to OpenAI (Priority 2)
-    if (openaiClient) {
-      try {
-        const result = await verifyWithOpenAI(screenshot, description);
-        const latencyMs = Date.now() - startTime;
-
-        logger.info('Vision verify successful with OpenAI', {
-          description,
-          exists: result.exists,
-          confidence: result.confidence,
-          latencyMs,
-        });
-
-        res.status(200).json({
-          success: true,
-          ...result,
-          provider: 'openai',
-          latencyMs,
-        });
-        return;
-      } catch (error: any) {
-        logger.warn('OpenAI vision verify failed, falling back to Claude', {
-          error: error.message,
-        });
-      }
-    }
-
-    // Fallback to Claude (Priority 3)
-    if (claudeClient) {
-      try {
-        const result = await verifyWithClaude(screenshot, description);
-        const latencyMs = Date.now() - startTime;
-
-        logger.info('Vision verify successful with Claude', {
-          description,
-          exists: result.exists,
-          confidence: result.confidence,
-          latencyMs,
-        });
-
-        res.status(200).json({
-          success: true,
-          ...result,
-          provider: 'claude',
-          latencyMs,
-        });
-        return;
-      } catch (error: any) {
-        logger.warn('Claude vision verify failed, falling back to Grok', {
-          error: error.message,
-        });
-      }
-    }
-
-    // Fallback to Grok (Priority 4 - last resort)
-    if (grokClient) {
-      try {
-        const result = await verifyWithGrok(screenshot, description);
-        const latencyMs = Date.now() - startTime;
-
-        logger.info('Vision verify successful with Grok', {
-          description,
-          exists: result.exists,
-          confidence: result.confidence,
-          latencyMs,
-        });
-
-        res.status(200).json({
-          success: true,
-          ...result,
-          provider: 'grok',
-          latencyMs,
-        });
-        return;
-      } catch (error: any) {
-        logger.error('Grok vision verify failed', { error: error.message });
-      }
-    }
-
-    // All providers failed
-    res.status(500).json({
-      success: false,
-      error: 'All vision providers failed',
-      message: 'No vision API keys configured or all providers failed',
+    res.status(200).json({
+      success: true,
+      exists: result.exists,
+      confidence: result.confidence,
+      provider: result.provider,
+      latencyMs: result.latencyMs,
     });
   } catch (error: any) {
     logger.error('Vision verify failed', {

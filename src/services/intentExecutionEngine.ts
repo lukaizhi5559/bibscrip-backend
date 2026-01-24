@@ -18,11 +18,14 @@ import {
   IntentExecutionResult,
   ActionType,
   INTENT_AVAILABLE_ACTIONS,
-  ClarificationQuestion
+  ClarificationQuestion,
+  ElementSelector
 } from '../types/intentTypes';
 import { intentPromptBuilder } from './intentPromptBuilder';
 import { omniParserService } from './omniParserService';
 import { uiDetectionService } from './uiDetectionService';
+import { compressScreenshot, shouldCompress } from '../utils/screenshotCompression';
+import { ActionHistoryAnalyzer, ActionHistoryItem } from './actionHistoryAnalyzer';
 
 interface ActionExecutionResult {
   type: ActionType;
@@ -80,6 +83,31 @@ export class IntentExecutionEngine {
       actionHistoryLength: actionHistory.length,
     });
 
+    // CRITICAL: Detect infinite loop - same action repeated multiple times
+    // For spotlight_search, allow more consecutive pressKey actions (up to 6) for navigation
+    const loopThreshold = intentType === 'spotlight_search' ? 6 : 3;
+    
+    if (actionHistory.length >= loopThreshold) {
+      const lastActions = actionHistory.slice(-loopThreshold);
+      const allSameType = lastActions.every(
+        (action: any) => action.actionType === lastActions[0].actionType
+      );
+      
+      if (allSameType) {
+        logger.error(`🔄 Infinite loop detected - same action repeated ${loopThreshold} times`, {
+          intentType,
+          stepId: stepData.id,
+          repeatedAction: lastActions[0].actionType,
+          actionHistory: actionHistory.map((a: any) => a.actionType)
+        });
+        
+        return {
+          status: 'step_failed',
+          error: `Infinite loop detected: ${lastActions[0].actionType} repeated ${loopThreshold} times. LLM is not progressing.`,
+        };
+      }
+    }
+
     // Validate intent has available actions
     const availableActions = INTENT_AVAILABLE_ACTIONS[intentType];
     if (!availableActions || availableActions.length === 0) {
@@ -99,12 +127,44 @@ export class IntentExecutionEngine {
     }
 
     try {
+      // ============================================================================
+      // DETERMINISTIC CHECK: Analyze action history before LLM decision
+      // ============================================================================
+      const deterministicCheck = ActionHistoryAnalyzer.shouldSkipAction(
+        intentType,
+        actionHistory as ActionHistoryItem[],
+        context
+      );
+
+      // If deterministic check suggests skipping to a specific action, return it immediately
+      if (deterministicCheck.shouldSkipAction && deterministicCheck.suggestedAction) {
+        logger.info('🎯 [DETERMINISTIC] Skipping LLM call, using deterministic action', {
+          intentType,
+          skipReason: deterministicCheck.skipReason,
+          suggestedAction: deterministicCheck.suggestedAction,
+        });
+
+        return {
+          status: 'action_ready',
+          action: {
+            type: deterministicCheck.suggestedAction,
+            reasoning: `[DETERMINISTIC] ${deterministicCheck.suggestedReason}`,
+            metadata: {
+              deterministic: true,
+              ...deterministicCheck.contextData,
+            },
+          },
+        };
+      }
+
       // Build prompt with action history context
       let prompt = intentPromptBuilder.buildPrompt({
         ...request,
         context: {
           ...context,
           storedData: context.storedData || {},
+          // Add deterministic context data to inform LLM
+          ...deterministicCheck.contextData,
         },
       });
 
@@ -124,6 +184,17 @@ export class IntentExecutionEngine {
           prompt += '\n';
         });
         prompt += 'IMPORTANT: Learn from these previous attempts. If an action failed, try a different approach.\n';
+      }
+
+      // Add deterministic suggestions to prompt if available
+      if (deterministicCheck.suggestedAction) {
+        prompt += `\n## Deterministic Analysis:\n`;
+        prompt += `Based on action history, the recommended next action is: ${deterministicCheck.suggestedAction}\n`;
+        prompt += `Reason: ${deterministicCheck.suggestedReason}\n`;
+        if (deterministicCheck.contextData) {
+          prompt += `Context: ${JSON.stringify(deterministicCheck.contextData)}\n`;
+        }
+        prompt += '\n';
       }
 
       // Append clarification answers if provided
@@ -150,6 +221,25 @@ export class IntentExecutionEngine {
 
       // Check if step is complete
       if (action.type === 'end') {
+        // Check if the end action indicates success or failure
+        const isSuccess = action.success !== false; // Default to true if not specified
+        
+        if (!isSuccess) {
+          // LLM indicated failure - treat as error
+          logger.error('Intent step ended with failure', {
+            intentType: request.intentType,
+            stepId: request.stepData.id,
+            reasoning: action.reasoning,
+          });
+          
+          return {
+            status: 'error',
+            error: action.reasoning || 'Step completed with failure',
+            outputScreenshot: context.screenshot,
+            data: context.storedData || {},
+          };
+        }
+        
         return {
           status: 'step_complete',
           outputScreenshot: context.screenshot,
@@ -158,8 +248,19 @@ export class IntentExecutionEngine {
       }
 
       // Enrich action with coordinates if needed (Phase 2: OmniParser Integration)
+      // NOTE: waitForElement does NOT use coordinates - it uses verification instead
       let enrichedAction = await this.enrichActionWithCoordinates(
         action,
+        {
+          base64: context.screenshot.base64,
+          mimeType: context.screenshot.mimeType || 'image/png'
+        },
+        request
+      );
+
+      // Enrich waitForElement with verification (LLM vision check, no coordinates)
+      enrichedAction = await this.enrichActionWithVerification(
+        enrichedAction,
         {
           base64: context.screenshot.base64,
           mimeType: context.screenshot.mimeType || 'image/png'
@@ -420,31 +521,80 @@ export class IntentExecutionEngine {
 
   /**
    * Get next action from LLM based on current state
+   * Priority: Gemini Flash (fastest) → OpenAI → Claude
    */
   private async getNextAction(
     prompt: string,
     screenshot: { base64: string; mimeType?: string },
     availableActions: ActionType[]
   ): Promise<any> {
+    const startTime = Date.now();
+    
     try {
-      // Try OpenAI first (fastest for vision)
+      // Compress screenshot if needed (reduces upload time and LLM processing)
+      let processedScreenshot = screenshot;
+      if (shouldCompress(screenshot.base64)) {
+        const compressed = await compressScreenshot(screenshot.base64, {
+          maxWidth: 1280,
+          maxHeight: 720,
+          quality: 85,
+          format: 'jpeg',
+        });
+        processedScreenshot = {
+          base64: compressed.base64,
+          mimeType: compressed.mimeType,
+        };
+      }
+
+      // Try Gemini first (fastest - 2.0 Flash)
+      if (this.geminiClient) {
+        const action = await this.getActionFromGemini(prompt, processedScreenshot);
+        const latencyMs = Date.now() - startTime;
+        logger.info('⚡ LLM action decision', {
+          provider: 'gemini',
+          latencyMs,
+          actionType: action.type,
+          reasoning: action.reasoning || 'No reasoning provided',
+          actionData: action,
+        });
+        return action;
+      }
+
+      // Fallback to OpenAI
       if (this.openaiClient) {
-        return await this.getActionFromOpenAI(prompt, screenshot);
+        const action = await this.getActionFromOpenAI(prompt, processedScreenshot);
+        const latencyMs = Date.now() - startTime;
+        logger.info('⚡ LLM action decision', {
+          provider: 'openai',
+          latencyMs,
+          actionType: action.type,
+          reasoning: action.reasoning || 'No reasoning provided',
+          actionData: action,
+        });
+        return action;
       }
 
       // Fallback to Claude
       if (this.claudeClient) {
-        return await this.getActionFromClaude(prompt, screenshot);
-      }
-
-      // Fallback to Gemini
-      if (this.geminiClient) {
-        return await this.getActionFromGemini(prompt, screenshot);
+        const action = await this.getActionFromClaude(prompt, processedScreenshot);
+        const latencyMs = Date.now() - startTime;
+        logger.info('⚡ LLM action decision', {
+          provider: 'claude',
+          latencyMs,
+          actionType: action.type,
+          reasoning: action.reasoning || 'No reasoning provided',
+          actionData: action,
+        });
+        return action;
       }
 
       throw new Error('No LLM clients available');
     } catch (error: any) {
-      logger.error('Failed to get next action from LLM', { error: error.message });
+      const latencyMs = Date.now() - startTime;
+      logger.error('Failed to get next action from LLM', { 
+        error: error.message,
+        latencyMs,
+      });
       throw error;
     }
   }
@@ -527,14 +677,19 @@ export class IntentExecutionEngine {
   }
 
   /**
-   * Get action from Gemini
+   * Get action from Gemini with prompt caching for faster responses
    */
   private async getActionFromGemini(
     prompt: string,
     screenshot: { base64: string; mimeType?: string }
   ): Promise<any> {
     const model = this.geminiClient!.getGenerativeModel({ 
-      model: 'gemini-2.0-flash-exp'
+      model: 'gemini-2.0-flash-exp',
+      // Enable prompt caching for faster subsequent calls
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: 1000,
+      },
     });
 
     const result = await model.generateContent({
@@ -594,20 +749,65 @@ export class IntentExecutionEngine {
   }
 
   /**
-   * Enrich action with coordinates using OmniParser/Vision API (Phase 2)
-   * Actions that need coordinates: findAndClick, clickAndDrag, waitForElement
+   * Enrich action with coordinates or selectors (Multi-Driver Support)
+   * 
+   * Multi-driver mode (USE_MULTI_DRIVER=true):
+   * - If action has selector field → Pass through to frontend (Playwright/AX/UIA)
+   * - If action has locator field → Use vision-based detection (legacy fallback)
+   * 
+   * Legacy mode (USE_MULTI_DRIVER=false):
+   * - Always use vision-based coordinate detection
+   * 
+   * Actions that need enrichment: findAndClick, clickAndDrag, typeText (with selector)
+   * NOTE: waitForElement does NOT need coordinates - it uses verifyElement instead
    */
   private async enrichActionWithCoordinates(
     action: any,
     screenshot: { base64: string; mimeType: string },
     request: IntentExecutionRequest
   ): Promise<any> {
-    const actionsNeedingCoordinates = ['findAndClick', 'clickAndDrag', 'waitForElement'];
+    const actionsNeedingEnrichment = ['findAndClick', 'clickAndDrag', 'typeText'];
     
-    if (!actionsNeedingCoordinates.includes(action.type)) {
-      // Action doesn't need coordinates (e.g., typeText, pressKey, scroll, pause, end)
+    if (!actionsNeedingEnrichment.includes(action.type)) {
+      // Action doesn't need enrichment (e.g., pressKey, scroll, pause, end)
       return action;
     }
+
+    // Check if multi-driver mode is enabled
+    const useMultiDriver = process.env.USE_MULTI_DRIVER === 'true';
+
+    // Multi-driver mode: Check if action has selector field
+    if (useMultiDriver && action.selector) {
+      logger.info('🌐 [MULTI-DRIVER] Action has selector, passing through to frontend', {
+        actionType: action.type,
+        selector: action.selector,
+        intentType: request.intentType,
+      });
+
+      // Pass selector through to frontend for Playwright/AX/UIA execution
+      // Frontend will handle element detection and interaction
+      return {
+        ...action,
+        // Keep selector field for frontend
+        selector: action.selector,
+        // Mark as multi-driver mode
+        multiDriver: true,
+      };
+    }
+
+    // Legacy mode or fallback: Use vision-based coordinate detection
+    const actionsNeedingCoordinates = ['findAndClick', 'clickAndDrag'];
+    
+    if (!actionsNeedingCoordinates.includes(action.type)) {
+      // typeText without selector doesn't need coordinates
+      return action;
+    }
+
+    logger.info('🎯 [LEGACY] Using vision-based coordinate detection', {
+      actionType: action.type,
+      hasLocator: !!action.locator,
+      useMultiDriver,
+    });
 
     try {
       logger.info('Enriching action with coordinates', {
@@ -622,9 +822,12 @@ export class IntentExecutionEngine {
       if (useOmniParser) {
         try {
           logger.info('Attempting OmniParser detection');
+          // Extract element description from various possible locations
+          const elementDescription = action.elementDescription || action.locator?.description || action.element || action.description;
+          
           detectionResult = await omniParserService.detectElement(
             screenshot,
-            action.element || action.description,
+            elementDescription,
             {
               intentType: request.intentType,
               stepDescription: request.stepData.description,
@@ -649,14 +852,16 @@ export class IntentExecutionEngine {
       // Use Vision API if OmniParser not available or failed
       if (!detectionResult) {
         logger.info('Using Vision API for detection');
+        // Extract element description from various possible locations
+        const elementDescription = action.elementDescription || action.locator?.description || action.element || action.description;
+        
         detectionResult = await uiDetectionService.detectElement(
           screenshot,
-          action.element || action.description,
+          elementDescription,
           {
+            ...request.context, // Pass full context including screenshotWidth/screenshotHeight
             intentType: request.intentType,
             stepDescription: request.stepData.description,
-            activeApp: request.context.activeApp,
-            activeUrl: request.context.activeUrl,
           }
         );
 
@@ -715,10 +920,9 @@ export class IntentExecutionEngine {
             screenshot,
             toElement,
             {
+              ...request.context, // Pass full context including screenshotWidth/screenshotHeight
               intentType: request.intentType,
               stepDescription: request.stepData.description,
-              activeApp: request.context.activeApp,
-              activeUrl: request.context.activeUrl,
             }
           );
         }
@@ -743,7 +947,7 @@ export class IntentExecutionEngine {
         };
       }
 
-      // For findAndClick and waitForElement, return single coordinate (offset applied)
+      // For findAndClick, return single coordinate (offset applied)
       const coordinates = {
         x: detectionResult.coordinates.x + offsetX,
         y: detectionResult.coordinates.y + offsetY,
@@ -766,6 +970,7 @@ export class IntentExecutionEngine {
     } catch (error: any) {
       logger.error('Failed to enrich action with coordinates', {
         actionType: action.type,
+        element: action.element || action.description,
         error: error.message,
       });
 
@@ -773,7 +978,69 @@ export class IntentExecutionEngine {
       return {
         ...action,
         error: `Failed to detect element: ${error.message}`,
+      };
+    }
+  }
+
+  /**
+   * Enrich waitForElement action with verification result
+   * Uses shared visionVerificationService with automatic LLM fallback
+   */
+  private async enrichActionWithVerification(
+    action: any,
+    screenshot: { base64: string; mimeType: string },
+    request: IntentExecutionRequest
+  ): Promise<any> {
+    if (action.type !== 'waitForElement') {
+      return action;
+    }
+
+    try {
+      logger.info('Verifying element presence via LLM vision', {
+        element: action.element || action.description,
+      });
+
+      // Use LLM vision to verify element is present
+      const elementDescription = action.element || action.description || action.locator?.description;
+      if (!elementDescription) {
+        throw new Error('waitForElement requires element description');
+      }
+
+      // Use shared vision verification service with automatic fallback
+      const { verifyElementWithVision } = await import('./visionVerificationService');
+      const result = await verifyElementWithVision(screenshot, elementDescription, {
+        includeReasoning: true,
+      });
+
+      logger.info('Element verification complete', {
+        element: elementDescription,
+        exists: result.exists,
+        confidence: result.confidence,
+        provider: result.provider,
+      });
+
+      // Return enriched action with verification result
+      return {
+        ...action,
+        verified: result.exists,
+        confidence: result.confidence,
+        verificationReasoning: result.reasoning,
+        verificationMethod: result.provider,
+        verificationLatencyMs: result.latencyMs,
+      };
+
+    } catch (error: any) {
+      logger.error('Failed to verify element', {
+        element: action.element || action.description,
+        error: error.message,
+      });
+
+      // Return action with verification failure
+      return {
+        ...action,
+        verified: false,
         confidence: 0,
+        error: `Failed to verify element: ${error.message}`,
       };
     }
   }
@@ -877,7 +1144,24 @@ export class IntentExecutionEngine {
         throw new Error('No JSON found in response');
       }
 
-      const action = JSON.parse(jsonMatch[0]);
+      // Sanitize JSON string to handle control characters
+      // Replace literal newlines in string values with escaped newlines
+      let jsonString = jsonMatch[0];
+      
+      // Fix common issues:
+      // 1. Replace literal newlines within string values with \n
+      // 2. Replace tabs with \t
+      // 3. Remove other control characters
+      jsonString = jsonString.replace(/("(?:[^"\\]|\\.)*")/g, (match) => {
+        // Only process string values (inside quotes)
+        return match
+          .replace(/\n/g, '\\n')
+          .replace(/\r/g, '\\r')
+          .replace(/\t/g, '\\t')
+          .replace(/[\x00-\x1F\x7F]/g, ''); // Remove other control chars
+      });
+
+      const action = JSON.parse(jsonString);
 
       // Check for clarification markers in response text
       const lowerResponse = response.toLowerCase();

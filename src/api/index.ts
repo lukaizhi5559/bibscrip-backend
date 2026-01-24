@@ -24,6 +24,7 @@ import { createOrchestrationWorkflowRoutes } from './orchestrationWorkflows';
 import dropRegistryRouter from './dropRegistry';
 import nutjsRouter from './nutjs';
 import visionRouter from './vision';
+import omniparserRouter from './omniparser';
 import pool from '../config/postgres';
 // Import other route modules directly instead of using dynamic imports
 
@@ -325,6 +326,15 @@ router.get('/', (req, res) => {
           'POST /api/vision/verify - Verify element exists in screenshot',
           'POST /api/vision/analyze - Analyze screenshot for OCR/text extraction'
         ]
+      },
+      omniparser: {
+        path: '/api/omniparser',
+        description: 'OmniParser - UI element detection and parsing with caching',
+        endpoints: [
+          'POST /api/omniparser/parse - Parse screenshot to detect all UI elements',
+          'POST /api/omniparser/detect - Detect specific element in screenshot',
+          'GET /api/omniparser/health - Health check for OmniParser service'
+        ]
       }
     },
     documentation: {
@@ -360,6 +370,8 @@ router.use('/drops', dropRegistryRouter);
 router.use('/nutjs', nutjsRouter);
 // Vision AI - UI element location and verification for MCP execution
 router.use('/vision', visionRouter);
+// OmniParser - UI element detection and parsing with caching
+router.use('/omniparser', omniparserRouter);
 
 // All routers are explicitly imported and mounted above
 // No need for dynamic mounting as it can cause route conflicts

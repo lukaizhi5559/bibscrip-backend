@@ -49,6 +49,12 @@ import { buildFileInfoPrompt } from '../prompts/intent_prompts/file_info.prompt'
 import { buildModifyPermissionsPrompt } from '../prompts/intent_prompts/modify_permissions.prompt';
 import { buildCompressPrompt } from '../prompts/intent_prompts/compress.prompt';
 import { buildDecompressPrompt } from '../prompts/intent_prompts/decompress.prompt';
+// Content Generation (Phase 5)
+import { buildGenerateAndTypePrompt } from '../prompts/intent_prompts/generate_and_type.prompt';
+import { buildComposePrompt } from '../prompts/intent_prompts/compose.prompt';
+import { buildGenerateFormPrompt } from '../prompts/intent_prompts/generate_form.prompt';
+// System Search
+import { buildSpotlightSearchPrompt } from '../prompts/intent_prompts/spotlight_search.prompt';
 
 export class IntentPromptBuilder {
   /**
@@ -184,6 +190,20 @@ export class IntentPromptBuilder {
       
       case 'decompress':
         return buildDecompressPrompt(request, actionHistory);
+      
+      // Content Generation (Phase 5)
+      case 'generate_and_type':
+        return buildGenerateAndTypePrompt(request, actionHistory);
+      
+      case 'compose':
+        return buildComposePrompt(request, actionHistory);
+      
+      case 'generate_form':
+        return buildGenerateFormPrompt(request, actionHistory);
+      
+      // System Search
+      case 'spotlight_search':
+        return buildSpotlightSearchPrompt(request, actionHistory);
       
       default:
         throw new Error(`Unknown intent type: ${intentType}`);

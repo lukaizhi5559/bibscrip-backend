@@ -5,9 +5,19 @@
  */
 
 import { IntentExecutionRequest } from '../../types/intentTypes';
+import { getCompleteSelectorDocs } from './_shared_selector_docs';
 
 export function buildClickElementPrompt(request: IntentExecutionRequest, actionHistory?: any[]): string {
   const { stepData, context } = request;
+  const useMultiDriver = process.env.USE_MULTI_DRIVER === 'true';
+  
+  // Get appropriate selector documentation based on target type
+  const selectorDocs = getCompleteSelectorDocs({
+    activeApp: context.activeApp,
+    activeUrl: context.activeUrl,
+    os: context.os || 'darwin',
+    useMultiDriver
+  });
   
   return `You are executing a CLICK_ELEMENT intent. Your goal: ${stepData.description}
 
@@ -23,21 +33,31 @@ ${stepData.element || stepData.target || 'Element to click (determine from descr
 === SUCCESS CRITERIA ===
 ${stepData.successCriteria || 'Element clicked and expected UI change occurred'}
 
+${selectorDocs}
+
 === AVAILABLE ACTIONS ===
 You can ONLY use these actions for this intent:
 
-1. findAndClick: { "type": "findAndClick", "locator": { "strategy": "vision", "description": "element description" }, "timeoutMs": 5000 }
-   - Click on element using vision-based locator
-   - Use natural language description
-   - Examples: "blue Submit button", "search icon in top right", "menu hamburger icon"
+1. findAndClick: Click on element using selector
+   ${useMultiDriver ? `
+   **Multi-driver format (preferred):**
+   { "type": "findAndClick", "selector": { "css": "button.submit", "text": "Submit" }, "timeoutMs": 5000 }
+   
+   **Legacy format (still supported):**
+   { "type": "findAndClick", "locator": { "strategy": "vision", "description": "blue button" }, "timeoutMs": 5000 }
+   ` : `
+   { "type": "findAndClick", "locator": { "strategy": "vision", "description": "element description" }, "timeoutMs": 5000 }
+   `}
 
-2. waitForElement: { "type": "waitForElement", "locator": { "strategy": "vision", "description": "element description" }, "timeoutMs": 5000 }
-   - Wait for element to appear before clicking
-   - Use if element is loading or animating
+2. waitForElement: Wait for element to appear
+   ${useMultiDriver ? `
+   { "type": "waitForElement", "selector": { "css": "...", "text": "..." }, "timeoutMs": 5000 }
+   ` : `
+   { "type": "waitForElement", "locator": { "strategy": "vision", "description": "..." }, "timeoutMs": 5000 }
+   `}
 
 3. pause: { "type": "pause", "ms": 1500 }
    - Wait for UI to settle after click
-   - Use after clicks that trigger animations/transitions
 
 4. screenshot: { "type": "screenshot" }
    - Verify click result
@@ -61,10 +81,17 @@ IF click is simple (no UI change):
 
 === CRITICAL RULES ===
 
-1. **Element Description**
+1. **Selector Strategy**
+   ${useMultiDriver ? `
+   - For WEB: Use CSS + text or role + text combinations
+   - For DESKTOP: Use axRole/axTitle (macOS) or uiaType/uiaName (Windows)
+   - For UNKNOWN: Fall back to vision description with visual details
+   - Combine selectors for maximum reliability
+   ` : `
    - Be specific: "blue Submit button in bottom right"
    - Include visual details: color, position, text
    - Include context: "near the search field", "in the sidebar"
+   `}
 
 2. **UI State Changes**
    - After clicks that open modals/dropdowns → Add pause (1000-1500ms)

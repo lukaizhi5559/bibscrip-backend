@@ -70,8 +70,54 @@ export type IntentType =
   | 'form_fill'         // Fill out form with multiple fields
   | 'multi_select'      // Select multiple items
   
+  // Content Generation (NEW - Phase 5)
+  | 'generate_and_type' // Generate content via LLM, then type it
+  | 'compose'           // Multi-step content creation (draft → review → type)
+  | 'generate_form'     // Generate form data and fill fields
+  
+  // System Search (macOS/Windows)
+  | 'spotlight_search'  // Use Spotlight (macOS) or Windows Search to find and open files/apps
+  
   // Custom & Fallback
   | 'custom';           // Complex multi-action intent
+
+// ============================================================================
+// SELECTOR TYPES (Multi-Driver Support)
+// ============================================================================
+
+/**
+ * Selector for multi-driver automation
+ * Supports web (Playwright/CDP), desktop (AX/UIA), and vision fallback
+ */
+export interface ElementSelector {
+  // Web selectors (Playwright/CDP)
+  css?: string;           // CSS selector (preferred for web)
+  xpath?: string;         // XPath expression
+  text?: string;          // Text content match
+  role?: string;          // ARIA role (button, searchbox, textbox, etc.)
+  testId?: string;        // data-testid attribute
+  
+  // Desktop selectors (macOS Accessibility API)
+  axRole?: string;        // AXButton, AXTextField, AXStaticText, etc.
+  axTitle?: string;       // Element label/title
+  
+  // Desktop selectors (Windows UIAutomation API)
+  uiaType?: string;       // Button, Edit, Text, MenuItem, etc.
+  uiaName?: string;       // Element name/label
+  
+  // Vision fallback (when structured selectors not available)
+  description?: string;   // Natural language description for vision API
+}
+
+/**
+ * Legacy locator for backward compatibility
+ */
+export interface ElementLocator {
+  strategy: 'vision' | 'textMatch' | 'contains' | 'bbox';
+  description?: string;
+  text?: string;
+  bbox?: { x1: number; y1: number; x2: number; y2: number };
+}
 
 // ============================================================================
 // ACTION TYPES (Low-Level Execution Primitives)
@@ -192,6 +238,14 @@ export const INTENT_AVAILABLE_ACTIONS: Record<IntentType, ActionType[]> = {
   form_fill: ['findAndClick', 'typeText', 'pressKey', 'waitForElement', 'screenshot', 'end'],
   multi_select: ['findAndClick', 'pressKey', 'waitForElement', 'screenshot', 'end'],
   
+  // Content Generation (NEW - Phase 5)
+  generate_and_type: ['findAndClick', 'typeText', 'pressKey', 'waitForElement', 'screenshot', 'store', 'end'],
+  compose: ['findAndClick', 'typeText', 'pressKey', 'waitForElement', 'screenshot', 'store', 'retrieve', 'end'],
+  generate_form: ['findAndClick', 'typeText', 'pressKey', 'waitForElement', 'screenshot', 'store', 'end'],
+  
+  // System Search
+  spotlight_search: ['pressKey', 'typeText', 'waitForElement', 'screenshot', 'end'],
+  
   // Custom & Fallback
   custom: ['focusApp', 'openUrl', 'findAndClick', 'typeText', 'pressKey', 'clickAndDrag', 'scroll', 'zoom', 'screenshot', 'ocr', 'store', 'retrieve', 'waitForElement', 'pause', 'log', 'end'],
 };
@@ -217,6 +271,16 @@ export interface IntentExecutionRequest {
     successCriteria?: string;
     maxAttempts?: number;
     notes?: string;
+    
+    // Content generation fields (Phase 5)
+    generationPrompt?: string;
+    format?: string;
+    maxLength?: number;
+    reviewSteps?: string;
+    formContext?: string;
+    formType?: string;
+    fields?: any[];
+    submitAfter?: boolean;
   };
   
   /** Current context */
@@ -249,6 +313,12 @@ export interface IntentExecutionRequest {
     
     /** Previous step results */
     previousStepResults?: any[];
+    
+    // Deterministic context fields (from action history analysis)
+    fieldAlreadyFocused?: boolean;
+    previousTarget?: string;
+    filledFields?: string[];
+    [key: string]: any; // Allow additional dynamic fields
   };
   
   /** User ID for tracking */
@@ -779,6 +849,46 @@ export const INTENT_METADATA: Record<IntentType, IntentMetadata> = {
     optionalFields: [],
     typicalDuration: '3-10s',
     examples: ['Select multiple files', 'Choose multiple options', 'Bulk select items'],
+  },
+  
+  generate_and_type: {
+    name: 'Generate and Type',
+    description: 'Generate content via LLM, then type it into field',
+    category: 'advanced',
+    requiredFields: ['generationPrompt'],
+    optionalFields: ['field', 'maxLength', 'submit'],
+    typicalDuration: '5-15s',
+    examples: ['Type up a resume', 'Write an email response', 'Generate and enter product description'],
+  },
+  
+  compose: {
+    name: 'Compose',
+    description: 'Multi-step content creation with review',
+    category: 'advanced',
+    requiredFields: ['generationPrompt'],
+    optionalFields: ['reviewSteps', 'format'],
+    typicalDuration: '10-30s',
+    examples: ['Draft and review email', 'Create document with edits', 'Compose multi-paragraph text'],
+  },
+  
+  generate_form: {
+    name: 'Generate Form',
+    description: 'Generate form data and fill multiple fields',
+    category: 'advanced',
+    requiredFields: ['formContext'],
+    optionalFields: ['fields', 'submit'],
+    typicalDuration: '15-45s',
+    examples: ['Fill job application', 'Complete registration with generated data', 'Auto-fill contact form'],
+  },
+  
+  spotlight_search: {
+    name: 'Spotlight Search',
+    description: 'Use Spotlight (macOS) or Windows Search to find and open files/apps',
+    category: 'navigation',
+    requiredFields: ['query'],
+    optionalFields: ['target'],
+    typicalDuration: '2-5s',
+    examples: ['Open file.txt on desktop', 'Search for and open Calculator', 'Find document.pdf'],
   },
   
   custom: {

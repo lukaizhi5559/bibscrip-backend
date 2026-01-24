@@ -1,19 +1,63 @@
 import { IntentExecutionRequest } from '../../types/intentTypes';
+import { getCompleteSelectorDocs } from './_shared_selector_docs';
 
 export function buildFormFillPrompt(request: IntentExecutionRequest, actionHistory?: any[]): string {
   const { stepData, context } = request;
+  const useMultiDriver = process.env.USE_MULTI_DRIVER === 'true';
+  
+  // Get appropriate selector documentation based on target type
+  const selectorDocs = getCompleteSelectorDocs({
+    activeApp: context.activeApp,
+    activeUrl: context.activeUrl,
+    os: context.os || 'darwin',
+    useMultiDriver
+  });
   
   return `You are executing a FORM_FILL intent. Your goal: ${stepData.description}
 
 SUCCESS CRITERIA: ${stepData.successCriteria || 'Form filled and submitted'}
 
+${selectorDocs}
+
 === AVAILABLE ACTIONS ===
-1. findAndClick - Click form fields
-2. typeText - Enter text into fields
-3. pressKey - Tab between fields, Enter to submit
-4. waitForElement - Wait for form elements
-5. screenshot - Capture state
-6. end - Signal completion
+
+1. findAndClick: Click form fields
+   ${useMultiDriver ? `
+   **Multi-driver format (preferred):**
+   { "type": "findAndClick", "selector": { "css": "input[name='email']", "role": "textbox" }, "timeoutMs": 5000 }
+   
+   **Legacy format (still supported):**
+   { "type": "findAndClick", "locator": { "strategy": "vision", "description": "email field" }, "timeoutMs": 5000 }
+   ` : `
+   { "type": "findAndClick", "locator": { "strategy": "vision", "description": "form field" }, "timeoutMs": 5000 }
+   `}
+
+2. typeText: Enter text into fields
+   ${useMultiDriver ? `
+   **With selector (targets specific field):**
+   { "type": "typeText", "selector": { "css": "input[name='email']", "role": "textbox" }, "text": "value" }
+   
+   **Without selector (types into focused field):**
+   { "type": "typeText", "text": "value" }
+   ` : `
+   { "type": "typeText", "text": "value" }
+   `}
+
+3. pressKey: Tab between fields, Enter to submit
+   { "type": "pressKey", "key": "Tab" }
+
+4. waitForElement: Wait for form elements
+   ${useMultiDriver ? `
+   { "type": "waitForElement", "selector": { "css": "...", "text": "..." }, "timeoutMs": 5000 }
+   ` : `
+   { "type": "waitForElement", "locator": { "strategy": "vision", "description": "..." }, "timeoutMs": 5000 }
+   `}
+
+5. screenshot: Capture state
+   { "type": "screenshot" }
+
+6. end: Signal completion
+   { "type": "end", "reason": "Form filled: [summary]" }
 
 === STORED DATA ===
 ${context.storedData ? JSON.stringify(context.storedData, null, 2) : 'No form data stored'}

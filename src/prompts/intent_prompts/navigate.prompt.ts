@@ -48,16 +48,20 @@ You can ONLY use these actions for this intent:
 === DECISION TREE ===
 
 IF already at target destination:
-  → screenshot → end
+  → end (with success message)
 
-IF target is URL AND current app is browser:
-  → openUrl → waitForElement → screenshot → end
+IF target is URL (any URL like https://chatgpt.com):
+  → openUrl → end
+  NOTE: openUrl automatically opens default browser and waits for load - NO focusApp needed!
 
-IF target is URL AND current app is NOT browser:
-  → focusApp (browser) → openUrl → waitForElement → screenshot → end
+IF target is desktop app (like "Slack", "Warp", "Safari"):
+  → focusApp → end
 
-IF target is desktop app:
-  → focusApp → waitForElement → screenshot → end
+**CRITICAL: DO NOT USE focusApp FOR URLs**
+- URLs (https://...) → Use openUrl ONLY (it handles browser opening)
+- Desktop apps → Use focusApp ONLY
+- After successful openUrl or focusApp, immediately call end
+- NEVER send the same action twice in a row unless it failed
 
 === CONTEXT ===
 - OS: ${os}

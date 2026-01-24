@@ -21,6 +21,7 @@ import {
   GuideRequest // legacy, deprecated
 } from '../types/automationGuide';
 import { randomUUID } from 'crypto';
+import { planCachingService } from './planCachingService';
 
 export interface NutjsCodeResponse {
   code: string;
@@ -1451,7 +1452,7 @@ SCHEMA:
   "steps": [
     {
       "id": "string - step_1, step_2, etc.",
-      "intent": "enum - navigate|switch_app|close_app|click_element|type_text|search|select|drag|scroll|capture|extract|copy|paste|store|retrieve|wait|verify|compare|check|upload|download|open_file|save_file|zoom|authenticate|form_fill|multi_select|custom",
+      "intent": "enum - navigate|switch_app|close_app|click_element|type_text|search|select|drag|scroll|capture|extract|copy|paste|store|retrieve|wait|verify|compare|check|upload|download|open_file|save_file|zoom|authenticate|form_fill|multi_select|generate_and_type|compose|generate_form|spotlight_search|custom",
       "description": "string - human-readable WHAT to accomplish",
       "target": "string - optional, for navigate: URL, for click_element: element description",
       "query": "string - optional, for search/type_text: text to enter",
@@ -1463,7 +1464,7 @@ SCHEMA:
   ]
 }
 
-=== INTENT TYPES (27 Total) ===
+=== INTENT TYPES (31 Total) ===
 
 **Navigation & App Control**
 1. **navigate** - Go to URL or focus app (target: URL/app name)
@@ -1472,7 +1473,7 @@ SCHEMA:
 
 **UI Interaction**
 4. **click_element** - Click on UI element (element: description)
-5. **type_text** - Type text into field (query: text)
+5. **type_text** - Type literal text into field (query: text to type)
 6. **search** - Find and search (query: search text)
 7. **select** - Select from dropdown/menu (element: dropdown, query: option)
 8. **drag** - Drag and drop (element: source, target: destination)
@@ -1504,20 +1505,45 @@ SCHEMA:
 26. **form_fill** - Fill form with multiple fields
 27. **multi_select** - Select multiple items (element: items)
 
+**Content Generation (NEW)**
+28. **generate_and_type** - Generate content via LLM and type it (generationPrompt: what to generate)
+29. **compose** - Multi-step content creation with review (generationPrompt: what to compose)
+30. **generate_form** - Generate form data and fill fields (formContext: form purpose)
+
+**System Search (NEW)**
+31. **spotlight_search** - Use Spotlight (macOS) or Windows Search to find and open files/apps (query: search term)
+
 **Fallback**
-28. **custom** - Complex multi-action intent
+32. **custom** - Complex multi-action intent
 
 === INTENT SELECTION GUIDE ===
 
+**CRITICAL: Content Generation vs Literal Text**
+- **type_text**: Use ONLY when user provides LITERAL text to type (e.g., "Type hello", "Enter my email address")
+- **generate_and_type**: Use when user wants LLM to GENERATE content (e.g., "Type up a resume", "Write an email")
+- **compose**: Use for multi-step content creation with review (e.g., "Draft and review email")
+- **generate_form**: Use for filling forms with generated data (e.g., "Fill out registration form", "Complete job application")
+
+**Standard Intents:**
 - **navigate**: Opening URLs, focusing apps (Jira, Chrome, Windsurf, Warp)
 - **capture**: Taking screenshots with OCR for data extraction
-- **type_text**: Entering text into chat windows, forms, search fields
-- **click_element**: Clicking buttons, links, icons, menu items
+- **click_element**: Clicking buttons, links, icons, menu items, **FILES in Finder/Explorer**
 - **search**: Searching for tickets, files, or web queries
 - **extract**: Getting specific data from screen (ticket IDs, error messages)
 - **wait**: Waiting for pages to load, elements to appear
 - **verify**: Checking if action succeeded
 - **store/retrieve**: Passing data between steps
+- **authenticate**: Login flows with username/password
+- **form_fill**: Filling forms with known data (not generated)
+
+**CRITICAL: File Operations**
+- **spotlight_search**: PREFERRED for opening files on macOS (Cmd+Space → type filename → Enter)
+  - Example: "Open file.txt on desktop" → spotlight_search with query "file.txt"
+  - FASTEST method - single step instead of navigate → search → click
+  - Use this for ANY file opening request on macOS!
+- **open_file**: Use ONLY when you need to open a file dialog (Cmd+O) and type a full file path
+- **click_element**: Use when file is ALREADY VISIBLE (e.g., after search, in folder view)
+  - DO NOT use open_file if file is visible in Finder/Explorer!
 
 === SUCCESS CRITERIA EXAMPLES ===
 
@@ -1529,8 +1555,9 @@ SCHEMA:
 - "File opened in editor"
 - "Code copied to clipboard"
 
-=== EXAMPLE PLAN ===
+=== EXAMPLE PLANS ===
 
+**Example 1: Standard Search (type_text)**
 Task: "Search for 'best runners' on Perplexity"
 
 {
@@ -1561,6 +1588,83 @@ Task: "Search for 'best runners' on Perplexity"
       "description": "Capture search results",
       "successCriteria": "Screenshot taken with results visible",
       "maxAttempts": 1,
+      "status": "pending"
+    }
+  ]
+}
+
+**Example 2: Content Generation (generate_and_type)**
+Task: "Type up an example resume for me"
+
+{
+  "goal": "Generate and type a professional resume",
+  "version": 1,
+  "steps": [
+    {
+      "id": "step_1",
+      "intent": "generate_and_type",
+      "description": "Generate professional resume and type into active field",
+      "generationPrompt": "Generate a professional resume with sections: Summary, Experience, Education, Skills",
+      "format": "structured",
+      "maxLength": 1500,
+      "successCriteria": "Resume content generated and typed into field",
+      "maxAttempts": 5,
+      "status": "pending"
+    },
+    {
+      "id": "step_2",
+      "intent": "capture",
+      "description": "Capture the typed resume",
+      "successCriteria": "Screenshot taken with resume visible",
+      "maxAttempts": 1,
+      "status": "pending"
+    }
+  ]
+}
+
+**Example 3: Form Filling (generate_form)**
+Task: "Fill out this registration form"
+
+{
+  "goal": "Complete registration form with generated data",
+  "version": 1,
+  "steps": [
+    {
+      "id": "step_1",
+      "intent": "generate_form",
+      "description": "Fill all registration form fields with appropriate data",
+      "formContext": "User registration form",
+      "formType": "registration",
+      "submitAfter": true,
+      "successCriteria": "All required fields filled and form submitted",
+      "maxAttempts": 10,
+      "status": "pending"
+    },
+    {
+      "id": "step_2",
+      "intent": "capture",
+      "description": "Capture confirmation page",
+      "successCriteria": "Screenshot taken showing successful registration",
+      "maxAttempts": 1,
+      "status": "pending"
+    }
+  ]
+}
+
+**Example 4: Spotlight Search (spotlight_search) - PREFERRED for macOS file operations**
+Task: "Open the file text.txt.rft on my desktop"
+
+{
+  "goal": "Open text.txt.rft file using Spotlight",
+  "version": 1,
+  "steps": [
+    {
+      "id": "step_1",
+      "intent": "spotlight_search",
+      "description": "Use Spotlight to search for and open text.txt.rft",
+      "query": "text.txt.rft",
+      "successCriteria": "File opened in default application",
+      "maxAttempts": 5,
       "status": "pending"
     }
   ]
@@ -2085,11 +2189,63 @@ Analyze now:`;
       }
     }
 
-    // STAGE 2: Generate the actual plan
+    // STAGE 2: Check plan cache (skip for replans)
+    if (!isReplanRequest) {
+      try {
+        const cacheResult = await planCachingService.getPlan(planRequest.command, planRequest.context);
+        
+        if (cacheResult.cached && cacheResult.plan) {
+          logger.info('✅ Returning cached plan', {
+            command: planRequest.command,
+            planId: cacheResult.plan.planId,
+            similarity: cacheResult.similarity,
+            stepCount: cacheResult.plan.steps.length,
+          });
+
+          // Convert cached plan to AutomationPlanResponse format
+          return {
+            success: true,
+            plan: {
+              planId: cacheResult.plan.planId,
+              version: cacheResult.plan.version,
+              intent: cacheResult.plan.intent as any,
+              goal: cacheResult.plan.goal,
+              createdAt: cacheResult.plan.metadata.createdAt,
+              steps: cacheResult.plan.steps,
+            },
+            provider: 'cache',
+            latencyMs: 50, // Cache hit is super fast
+          };
+        }
+      } catch (error: any) {
+        logger.warn('Plan cache lookup failed, proceeding with generation', {
+          error: error.message,
+        });
+        // Continue to plan generation if cache fails
+      }
+    }
+
+    // STAGE 3: Generate the actual plan
     // Try OpenAI first (Priority 1 - most reliable for JSON)
     if (this.openaiClient) {
       try {
-        return await this.generatePlanWithOpenAI(planRequest);
+        const result = await this.generatePlanWithOpenAI(planRequest);
+        
+        // Cache the generated plan for future use (fire and forget)
+        if (result.success && result.plan && !isReplanRequest) {
+          planCachingService.storePlan(
+            planRequest.command,
+            result.plan,
+            {
+              provider: result.provider,
+              latencyMs: result.latencyMs,
+            }
+          ).catch(err => {
+            logger.warn('Failed to cache plan', { error: err.message });
+          });
+        }
+        
+        return result;
       } catch (error: any) {
         errors.push(`OpenAI: ${error.message}`);
         logger.warn('OpenAI failed for plan generation, falling back to Claude', { error: error.message });

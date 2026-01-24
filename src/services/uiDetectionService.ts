@@ -617,8 +617,9 @@ Return ONLY valid JSON:
       throw new Error('OpenAI client not initialized');
     }
 
-    const screenWidth = context?.screenWidth || 0;
-    const screenHeight = context?.screenHeight || 0;
+    // Use screenshotWidth/screenshotHeight (sent by frontend) with fallback to screenWidth/screenHeight
+    const screenWidth = context?.screenshotWidth || context?.screenWidth || 0;
+    const screenHeight = context?.screenshotHeight || context?.screenHeight || 0;
     const screenInfo = screenWidth && screenHeight
       ? `Screen: ${screenWidth}x${screenHeight}`
       : '';

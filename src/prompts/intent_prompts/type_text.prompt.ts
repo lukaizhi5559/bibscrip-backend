@@ -5,11 +5,21 @@
  */
 
 import { IntentExecutionRequest } from '../../types/intentTypes';
+import { getCompleteSelectorDocs } from './_shared_selector_docs';
 
 export function buildTypeTextPrompt(request: IntentExecutionRequest, actionHistory?: any[]): string {
   const { stepData, context } = request;
   const os = context.os || 'darwin';
   const cmdKey = os === 'darwin' ? 'Cmd' : 'Ctrl';
+  const useMultiDriver = process.env.USE_MULTI_DRIVER === 'true';
+  
+  // Get appropriate selector documentation based on target type
+  const selectorDocs = getCompleteSelectorDocs({
+    activeApp: context.activeApp,
+    activeUrl: context.activeUrl,
+    os: context.os || 'darwin',
+    useMultiDriver
+  });
   
   return `You are executing a TYPE_TEXT intent. Your goal: ${stepData.description}
 
@@ -28,25 +38,48 @@ ${stepData.element || 'Input field (determine from context)'}
 === SUCCESS CRITERIA ===
 ${stepData.successCriteria || 'Text entered successfully in field'}
 
+${selectorDocs}
+
 === AVAILABLE ACTIONS ===
 You can ONLY use these actions for this intent:
 
-1. findAndClick: { "type": "findAndClick", "locator": { "strategy": "vision", "description": "input field description" }, "timeoutMs": 5000 }
-   - Click to focus input field
-   - Use natural language description
+1. findAndClick: Click text field to focus it
+   ${useMultiDriver ? `
+   **Multi-driver format (preferred):**
+   { "type": "findAndClick", "selector": { "css": "input[name='email']", "role": "textbox" }, "timeoutMs": 5000 }
+   
+   **Legacy format (still supported):**
+   { "type": "findAndClick", "locator": { "strategy": "vision", "description": "text field" }, "timeoutMs": 5000 }
+   ` : `
+   { "type": "findAndClick", "locator": { "strategy": "vision", "description": "text field" }, "timeoutMs": 5000 }
+   `}
 
-2. typeText: { "type": "typeText", "text": "text to type", "submit": false }
-   - Type literal text into focused field
+2. typeText: Type text into field
+   ${useMultiDriver ? `
+   **With selector (targets specific field - RECOMMENDED):**
+   { "type": "typeText", "selector": { "css": "input[name='email']", "role": "textbox" }, "text": "value", "submit": false }
+   
+   **Without selector (types into focused field):**
+   { "type": "typeText", "text": "value", "submit": false }
+   
+   **Note:** Using selector is more reliable than relying on focus state
+   ` : `
+   { "type": "typeText", "text": "text to type", "submit": false }
+   `}
    - Set submit: true to press Enter after typing
-   - ONLY for literal text, NOT for shortcuts
+   - Set submit: false to just type without submitting
 
 3. pressKey: { "type": "pressKey", "key": "Enter", "modifiers": ["${cmdKey}"] }
    - Press keyboard shortcuts or special keys
    - Examples: Enter, Tab, Escape
    - Modifiers: "${cmdKey}", "Shift", "Alt"
 
-4. waitForElement: { "type": "waitForElement", "locator": { "strategy": "vision", "description": "element description" }, "timeoutMs": 5000 }
-   - Wait for field to appear or become ready
+4. waitForElement: Wait for text field to appear
+   ${useMultiDriver ? `
+   { "type": "waitForElement", "selector": { "css": "...", "text": "..." }, "timeoutMs": 5000 }
+   ` : `
+   { "type": "waitForElement", "locator": { "strategy": "vision", "description": "..." }, "timeoutMs": 5000 }
+   `}
 
 5. screenshot: { "type": "screenshot" }
    - Verify text was entered
@@ -56,13 +89,15 @@ You can ONLY use these actions for this intent:
 
 === DECISION TREE ===
 
-IF field NOT visible:
-  → waitForElement → findAndClick → typeText → screenshot → end
+**DEFAULT ASSUMPTION: Input field is already focused and ready for typing**
 
-IF field visible but NOT focused:
+IF field NOT visible:
+  → waitForElement → typeText → screenshot → end
+
+IF field visible AND clearly NOT focused (e.g., another element is active):
   → findAndClick → typeText → screenshot → end
 
-IF field already focused:
+IF field visible (default case):
   → typeText → screenshot → end
 
 IF need to submit after typing:
@@ -78,32 +113,37 @@ IF need to submit after typing:
    - WRONG: { "type": "typeText", "text": "${cmdKey}+A" } → Types "C-m-d-+-A"
    - CORRECT: { "type": "pressKey", "key": "A", "modifiers": ["${cmdKey}"] } → Selects all
 
-2. **Field Focus**
-   - Always click field first unless already focused
-   - Look for cursor blinking in field
+2. **Field Focus - IMPORTANT**
+   - **ASSUME field is already focused** unless you see clear evidence otherwise
+   - Only use findAndClick if you see another element is active or field is clearly unfocused
+   - DO NOT click "just to be safe" - this wastes actions and time
+   - Evidence of unfocused field: cursor in different location, another input highlighted
 
 3. **Verification**
    - Take screenshot after typing to verify success
 
 === TYPICAL FLOWS ===
 
-**Flow 1: Simple text entry**
-1. findAndClick (focus field)
+**Flow 1: Simple text entry (MOST COMMON)**
+1. typeText (enter text)
+2. screenshot (verify)
+3. end
+
+**Flow 2: Text entry with submit**
+1. typeText (text, submit: true)
+2. screenshot (verify)
+3. end
+
+**Flow 3: Field needs focus first (RARE)**
+1. findAndClick (only if clearly unfocused)
 2. typeText (enter text)
 3. screenshot (verify)
 4. end
 
-**Flow 2: Text entry with submit**
-1. findAndClick (focus field)
-2. typeText (text, submit: true)
-3. screenshot (verify)
-4. end
-
-**Flow 3: Paste from stored data**
-1. findAndClick (focus field)
-2. pressKey (${cmdKey}+V to paste)
-3. screenshot (verify)
-4. end
+**Flow 4: Paste from stored data**
+1. pressKey (${cmdKey}+V to paste)
+2. screenshot (verify)
+3. end
 
 === CONTEXT ===
 - OS: ${os}

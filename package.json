@@ -49,11 +49,12 @@
     "redis": "^4.6.7",
     "replicate": "^1.4.0",
     "screenshot-desktop": "^1.15.0",
-    "sharp": "^0.33.2",
+    "sharp": "^0.34.5",
     "similarity": "^1.2.1",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1",
     "tesseract.js": "^5.0.5",
+    "uuid": "^13.0.0",
     "winston": "^3.10.0",
     "ws": "^8.18.3",
     "zod": "^3.25.55"

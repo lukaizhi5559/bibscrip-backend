@@ -5,11 +5,21 @@
  */
 
 import { IntentExecutionRequest } from '../../types/intentTypes';
+import { getCompleteSelectorDocs } from './_shared_selector_docs';
 
 export function buildSearchPrompt(request: IntentExecutionRequest, actionHistory?: any[]): string {
   const { stepData, context } = request;
   const os = context.os || 'darwin';
   const cmdKey = os === 'darwin' ? 'Cmd' : 'Ctrl';
+  const useMultiDriver = process.env.USE_MULTI_DRIVER === 'true';
+  
+  // Get appropriate selector documentation based on target type
+  const selectorDocs = getCompleteSelectorDocs({
+    activeApp: context.activeApp,
+    activeUrl: context.activeUrl,
+    os: context.os || 'darwin',
+    useMultiDriver
+  });
   
   return `You are executing a SEARCH intent. Your goal: ${stepData.description}
 
@@ -25,23 +35,42 @@ ${stepData.query || 'Not specified - check description'}
 === SUCCESS CRITERIA ===
 ${stepData.successCriteria || 'Search query submitted and results loading/displayed'}
 
+${selectorDocs}
+
 === AVAILABLE ACTIONS ===
 You can ONLY use these actions for this intent:
 
-1. findAndClick: { "type": "findAndClick", "locator": { "strategy": "vision", "description": "search field/icon description" }, "timeoutMs": 5000 }
-   - Click search field or search icon
-   - Examples: "search input field", "magnifying glass icon", "search bar at top"
+1. findAndClick: Click search field or search icon
+   ${useMultiDriver ? `
+   **Multi-driver format (preferred):**
+   { "type": "findAndClick", "selector": { "css": "input[name='search']", "role": "searchbox" }, "timeoutMs": 5000 }
+   
+   **Legacy format (still supported):**
+   { "type": "findAndClick", "locator": { "strategy": "vision", "description": "search field" }, "timeoutMs": 5000 }
+   ` : `
+   { "type": "findAndClick", "locator": { "strategy": "vision", "description": "search field/icon" }, "timeoutMs": 5000 }
+   `}
 
-2. typeText: { "type": "typeText", "text": "search query", "submit": true }
-   - Type search query
-   - Set submit: true to press Enter after typing
+2. typeText: Type search query
+   ${useMultiDriver ? `
+   **With selector (targets specific field):**
+   { "type": "typeText", "selector": { "css": "input[name='search']", "role": "searchbox" }, "text": "query", "submit": true }
+   
+   **Without selector (types into focused field):**
+   { "type": "typeText", "text": "query", "submit": true }
+   ` : `
+   { "type": "typeText", "text": "search query", "submit": true }
+   `}
 
 3. pressKey: { "type": "pressKey", "key": "Enter", "modifiers": [] }
    - Submit search (if not using submit: true in typeText)
-   - Press Enter to execute search
 
-4. waitForElement: { "type": "waitForElement", "locator": { "strategy": "vision", "description": "element description" }, "timeoutMs": 5000 }
-   - Wait for search field or results to appear
+4. waitForElement: Wait for search field or results
+   ${useMultiDriver ? `
+   { "type": "waitForElement", "selector": { "css": "...", "text": "..." }, "timeoutMs": 5000 }
+   ` : `
+   { "type": "waitForElement", "locator": { "strategy": "vision", "description": "..." }, "timeoutMs": 5000 }
+   `}
 
 5. screenshot: { "type": "screenshot" }
    - Verify search was submitted

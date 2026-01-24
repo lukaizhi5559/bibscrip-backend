@@ -5,6 +5,7 @@ import Redis from 'ioredis';
 import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
+import { LLMElementMatcher } from './llmElementMatcher';
 
 // Initialize Replicate client (fallback)
 const replicateClient = process.env.REPLICATE_API_TOKEN
@@ -82,6 +83,11 @@ export interface OmniParserDetectionResult {
 export class OmniParserService {
   private readonly CACHE_TTL_SECONDS = 3 * 24 * 60 * 60; // 3 days for static sites
   private readonly CACHE_PREFIX = 'omniparser';
+  private llmMatcher: LLMElementMatcher;
+
+  constructor() {
+    this.llmMatcher = new LLMElementMatcher();
+  }
 
   /**
    * Main detection method - uses cache or calls OmniParser API
@@ -338,7 +344,7 @@ export class OmniParserService {
     const imageDataUri = `data:${screenshot.mimeType};base64,${screenshot.base64}`;
 
     try {
-      const TIMEOUT_MS = 60000; // 60 seconds max - allows for cold boots
+      const TIMEOUT_MS = 180000; // 180 seconds (3 minutes) - handles cold boots which can take 2-4 minutes
       
       const timeoutPromise = new Promise<never>((_, reject) => {
         setTimeout(() => {
@@ -408,6 +414,29 @@ export class OmniParserService {
         },
       });
 
+      // Save parsed elements to separate file for examination
+      try {
+        const debugDir = path.join(process.cwd(), 'omniparser-debug');
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const elementsFilename = `omniparser-elements-${timestamp}.json`;
+        const elementsFilepath = path.join(debugDir, elementsFilename);
+        fs.writeFileSync(elementsFilepath, JSON.stringify({
+          timestamp: new Date().toISOString(),
+          url: context?.url || context?.activeUrl || 'unknown',
+          screenshotWidth: context?.screenshotWidth || context?.screenWidth || 1440,
+          screenshotHeight: context?.screenshotHeight || context?.screenHeight || 900,
+          windowBounds: context?.windowBounds,
+          totalElements: elements.length,
+          interactiveElements: elements.filter((e) => e.interactivity).length,
+          elements: elements,
+        }, null, 2));
+        logger.info('💾 [OMNIPARSER] Parsed elements saved to file', { filepath: elementsFilepath });
+      } catch (saveError: any) {
+        logger.warn('⚠️ [OMNIPARSER] Failed to save parsed elements to file', {
+          error: saveError.message,
+        });
+      }
+
       return elements;
     } catch (error: any) {
       logger.error('❌ [OMNIPARSER] API call failed', {
@@ -437,35 +466,35 @@ export class OmniParserService {
 
       const id = parseInt(match[1]);
       
-      // Convert Python dict to JSON - robust handling of nested quotes
+      // Convert Python dict to JSON using a more robust approach
       let jsonStr = match[2];
       
-      // Strategy: Extract content value separately, escape it, then reconstruct
-      const contentMatch = jsonStr.match(/'content':\s*'([^']*(?:\\'[^']*)*)'/);
-      let escapedContent = '';
+      // Step 1: Replace Python booleans (do this first before quote conversion)
+      jsonStr = jsonStr.replace(/\bFalse\b/g, 'false').replace(/\bTrue\b/g, 'true');
+      
+      // Step 2: Handle the content field specially to preserve apostrophes and special chars
+      // Match 'content': '...' where ... can contain ANY characters including apostrophes
+      // Use greedy match to find the LAST single quote before the closing brace
+      const contentRegex = /'content':\s*'(.+?)'}$/;
+      const contentMatch = jsonStr.match(contentRegex);
       
       if (contentMatch) {
-        // Extract raw content and escape special chars
         const rawContent = contentMatch[1];
-        escapedContent = rawContent
-          .replace(/\\/g, '\\\\')  // Escape backslashes first
-          .replace(/"/g, '\\"')     // Escape double quotes
-          .replace(/\n/g, '\\n')    // Escape newlines
-          .replace(/\r/g, '\\r')    // Escape carriage returns
-          .replace(/\t/g, '\\t');   // Escape tabs
+        // Escape for JSON: backslashes, double quotes, and control chars
+        const escapedContent = rawContent
+          .replace(/\\/g, '\\\\')   // Escape backslashes
+          .replace(/"/g, '\\"')      // Escape double quotes
+          .replace(/\n/g, '\\n')     // Escape newlines
+          .replace(/\r/g, '\\r')     // Escape carriage returns
+          .replace(/\t/g, '\\t');    // Escape tabs
         
-        // Replace content field with properly escaped version
-        jsonStr = jsonStr.replace(
-          /'content':\s*'[^']*(?:\\'[^']*)*'/,
-          `"content": "${escapedContent}"`
-        );
+        // Replace the entire content field with JSON-safe version
+        jsonStr = jsonStr.replace(contentRegex, `"content": "${escapedContent}"}`);
       }
       
-      // Replace remaining single quotes with double quotes
+      // Step 3: Convert all remaining single quotes to double quotes
+      // This handles 'type', 'bbox', 'interactivity' fields
       jsonStr = jsonStr.replace(/'/g, '"');
-      
-      // Replace Python booleans
-      jsonStr = jsonStr.replace(/False/g, 'false').replace(/True/g, 'true');
 
       try {
         const data = JSON.parse(jsonStr) as OmniParserElement;
@@ -515,6 +544,74 @@ export class OmniParserService {
     description: string,
     context: any
   ): Promise<{ coordinates: { x: number; y: number }; confidence: number; selectedElement?: string } | null> {
+    // Defensive check: description must be provided
+    if (!description || typeof description !== 'string') {
+      logger.warn('⚠️ [OMNIPARSER] Invalid description provided', {
+        description,
+        descriptionType: typeof description,
+      });
+      return null;
+    }
+
+    // Use LLM-based matching for intelligent element selection with automatic retry
+    logger.info('🤖 [OMNIPARSER] Using LLM-based element matching', {
+      description,
+      elementCount: cached.elements.length,
+    });
+
+    const matchResult = await this.llmMatcher.matchElementWithRetry(
+      description,
+      cached.elements,
+      {
+        intentType: context.intentType,
+        activeApp: context.activeApp,
+        activeUrl: context.activeUrl,
+        screenshotWidth: cached.screenshotWidth,
+        screenshotHeight: cached.screenshotHeight,
+        maxRetries: 3, // Try up to 3 times with different LLM responses
+      }
+    );
+
+    if (!matchResult.element) {
+      logger.warn('⚠️ [OMNIPARSER] LLM matcher found no suitable element', {
+        description,
+        reasoning: matchResult.reasoning,
+      });
+      return null;
+    }
+
+    // Calculate center point of bounding box
+    const center = {
+      x: Math.round((matchResult.element.bbox.x1 + matchResult.element.bbox.x2) / 2),
+      y: Math.round((matchResult.element.bbox.y1 + matchResult.element.bbox.y2) / 2),
+    };
+
+    logger.info('✅ [OMNIPARSER] LLM matched element', {
+      description,
+      matched: matchResult.element.content,
+      coordinates: center,
+      confidence: matchResult.confidence,
+      reasoning: matchResult.reasoning,
+      attemptNumber: matchResult.attemptNumber,
+      excludedCount: matchResult.excludedCount,
+    });
+
+    return {
+      coordinates: center,
+      confidence: matchResult.confidence,
+      selectedElement: matchResult.element.content,
+    };
+  }
+
+  /**
+   * DEPRECATED: Old regex-based matching (kept as fallback)
+   * This method is no longer used by default but kept for emergency fallback
+   */
+  private async findElementInCacheRegex(
+    cached: CachedElements,
+    description: string,
+    context: any
+  ): Promise<{ coordinates: { x: number; y: number }; confidence: number; selectedElement?: string } | null> {
     const descLower = description.toLowerCase().trim();
     let matches: ParsedElement[] = [];
 
@@ -531,6 +628,29 @@ export class OmniParserService {
       totalElements: cached.elements.length,
       interactiveElements: cached.elements.filter(e => e.interactivity).length,
     });
+
+    // Strategy 0: Extract and match exact filename (highest priority)
+    // For descriptions like "test.txt.rtf file in Documents section", extract "test.txt.rtf"
+    const filenameMatch = description.match(/([\w\-\.]+\.[a-zA-Z]{2,4})/);
+    if (filenameMatch) {
+      const filename = filenameMatch[1].toLowerCase();
+      const filenameMatches = searchPool.filter((elem) => {
+        if (!elem.content) return false;
+        const contentLower = elem.content.toLowerCase().trim();
+        // Match if content contains the exact filename (with or without extension)
+        return contentLower.includes(filename) || contentLower.replace(/\s+/g, '').includes(filename.replace(/\s+/g, ''));
+      });
+      
+      if (filenameMatches.length > 0) {
+        matches = filenameMatches;
+        logger.info('✅ [OMNIPARSER] Exact filename match', {
+          description,
+          filename,
+          matchCount: matches.length,
+          matched: filenameMatches.map(m => m.content),
+        });
+      }
+    }
 
     // Strategy 1: Semantic pattern matching for common UI elements
     const semanticPatterns: { [key: string]: RegExp[] } = {
@@ -555,6 +675,9 @@ export class OmniParserService {
     for (const [pattern, regexes] of Object.entries(semanticPatterns)) {
       if (descLower.includes(pattern)) {
         const semanticMatches = searchPool.filter((elem) => {
+          // Skip elements without content
+          if (!elem.content) return false;
+          
           const contentLower = elem.content.toLowerCase().trim();
           
           // Exclude debugging/log elements
@@ -579,6 +702,7 @@ export class OmniParserService {
     // Strategy 2: Exact content match
     if (!matches || matches.length === 0) {
       matches = searchPool.filter((elem) => {
+        if (!elem.content) return false;
         const contentLower = elem.content.toLowerCase().trim();
         return contentLower === descLower || contentLower.includes(descLower) || descLower.includes(contentLower);
       });
@@ -587,18 +711,23 @@ export class OmniParserService {
     // Strategy 3: Fuzzy match with Levenshtein distance
     if (matches.length === 0) {
       matches = searchPool.filter((elem) => {
+        if (!elem.content) return false;
         const contentLower = elem.content.toLowerCase().trim();
         const similarity = this.calculateSimilarity(descLower, contentLower);
         return similarity > 0.6; // 60% similarity threshold
       });
     }
 
-    // Strategy 4: Partial word match
+    // Strategy 4: Partial word match (exclude generic words like "file", "document", "section")
     if (matches.length === 0) {
       const descWords = descLower.split(/\s+/);
+      const genericWords = ['file', 'document', 'section', 'button', 'item', 'result', 'showing', 'with'];
+      const meaningfulWords = descWords.filter(word => word.length > 3 && !genericWords.includes(word));
+      
       matches = searchPool.filter((elem) => {
+        if (!elem.content) return false;
         const contentLower = elem.content.toLowerCase().trim();
-        return descWords.some((word) => word.length > 3 && contentLower.includes(word));
+        return meaningfulWords.some((word) => contentLower.includes(word));
       });
     }
 
