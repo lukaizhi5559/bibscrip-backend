@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Socket.IO Connection Test</title>
+    <script src="https://cdn.socket.io/4.8.3/socket.io.min.js"></script>
+    <style>
+        body {
+            font-family: 'Courier New', monospace;
+            background: #1a1a1a;
+            color: #00ff00;
+            padding: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #00ff00;
+            border-bottom: 2px solid #00ff00;
+            padding-bottom: 10px;
+        }
+        .info {
+            background: #2a2a2a;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        button {
+            background: #00ff00;
+            color: #1a1a1a;
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            border-radius: 5px;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+        button:hover {
+            background: #00cc00;
+        }
+        button:disabled {
+            background: #666;
+            cursor: not-allowed;
+        }
+        #logs {
+            background: #0a0a0a;
+            padding: 20px;
+            border-radius: 5px;
+            min-height: 400px;
+            max-height: 600px;
+            overflow-y: auto;
+            border: 2px solid #00ff00;
+        }
+        .log-entry {
+            margin: 5px 0;
+            padding: 5px;
+            border-left: 3px solid #00ff00;
+            padding-left: 10px;
+        }
+        .log-entry.error {
+            border-left-color: #ff0000;
+            color: #ff6666;
+        }
+        .log-entry.success {
+            border-left-color: #00ff00;
+            color: #00ff00;
+        }
+        .log-entry.info {
+            border-left-color: #00aaff;
+            color: #66ccff;
+        }
+        .timestamp {
+            color: #888;
+            font-size: 0.9em;
+        }
+        pre {
+            background: #0a0a0a;
+            padding: 10px;
+            border-radius: 3px;
+            overflow-x: auto;
+            margin: 5px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>Socket.IO Connection Test</h1>
+    
+    <div class="info">
+        <strong>Testing connection to:</strong> http://localhost:4000 (Socket.IO endpoint: /socket.io)
+    </div>
+
+    <div>
+        <button id="connectBtn" onclick="testConnection()">Test Connection</button>
+        <button id="sendBtn" onclick="sendTestMessage()" disabled>Send Test Message</button>
+        <button onclick="clearLogs()">Clear Logs</button>
+    </div>
+
+    <div id="logs"></div>
+
+    <script>
+        let socket = null;
+        let messageCount = 0;
+
+        function log(message, type = 'info') {
+            const logs = document.getElementById('logs');
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            
+            const timestamp = new Date().toLocaleTimeString();
+            entry.innerHTML = `<span class="timestamp">[${timestamp}]</span> ${message}`;
+            
+            logs.appendChild(entry);
+            logs.scrollTop = logs.scrollHeight;
+        }
+
+        function clearLogs() {
+            document.getElementById('logs').innerHTML = '';
+            log('Logs cleared');
+        }
+
+        function testConnection() {
+            log('🔌 Attempting to connect to Socket.IO server...', 'info');
+            
+            // Disconnect existing connection if any
+            if (socket) {
+                socket.disconnect();
+            }
+
+            // Create Socket.IO connection - FORCE POLLING ONLY to bypass WebSocket issues
+            socket = io('http://localhost:4000', {
+                path: '/socket.io',
+                transports: ['polling'], // Only use polling, no WebSocket
+                reconnection: true,
+                reconnectionDelay: 1000,
+                reconnectionAttempts: 5
+            });
+            
+            log('⚠️ Using HTTP long-polling transport (WebSocket disabled)', 'info');
+
+            // Connection successful
+            socket.on('connect', () => {
+                log('✅ Socket.IO connected successfully!', 'success');
+                log(`Socket ID: ${socket.id}`, 'info');
+                log(`Transport: ${socket.io.engine.transport.name}`, 'info');
+                document.getElementById('sendBtn').disabled = false;
+                document.getElementById('connectBtn').textContent = 'Reconnect';
+            });
+
+            // Connection status message
+            socket.on('connection_status', (data) => {
+                messageCount++;
+                log(`📨 Connection status received (#${messageCount})`, 'success');
+                log(`<pre>${JSON.stringify(data, null, 2)}</pre>`, 'info');
+            });
+
+            // Heartbeat
+            socket.on('heartbeat', (data) => {
+                log(`💓 Heartbeat received`, 'info');
+            });
+
+            // Generic message handler
+            socket.on('message', (data) => {
+                messageCount++;
+                log(`📨 Message received (#${messageCount})`, 'success');
+                log(`Message type: ${data.type}`, 'info');
+                log(`<pre>${JSON.stringify(data, null, 2)}</pre>`, 'info');
+            });
+
+            // Error handler
+            socket.on('error', (error) => {
+                log(`❌ Socket.IO error occurred`, 'error');
+                log(`Error: ${JSON.stringify(error)}`, 'error');
+            });
+
+            // Disconnect handler
+            socket.on('disconnect', (reason) => {
+                log(`🔌 Socket.IO disconnected (reason: ${reason})`, 'error');
+                document.getElementById('sendBtn').disabled = true;
+                document.getElementById('connectBtn').textContent = 'Test Connection';
+            });
+
+            // Connection error
+            socket.on('connect_error', (error) => {
+                log(`❌ Connection error: ${error.message}`, 'error');
+            });
+
+            // Reconnection attempt
+            socket.io.on('reconnect_attempt', (attempt) => {
+                log(`🔄 Reconnection attempt ${attempt}...`, 'info');
+            });
+
+            // Reconnection success
+            socket.io.on('reconnect', (attempt) => {
+                log(`✅ Reconnected after ${attempt} attempts`, 'success');
+            });
+        }
+
+        function sendTestMessage() {
+            if (!socket || !socket.connected) {
+                log('❌ Socket.IO is not connected. Click "Test Connection" first.', 'error');
+                return;
+            }
+
+            const testMessage = {
+                id: `test_${Date.now()}`,
+                type: 'llm_request',
+                payload: {
+                    prompt: 'Hello from Socket.IO test!',
+                    provider: 'claude',
+                    stream: true
+                },
+                timestamp: Date.now(),
+                metadata: {
+                    source: 'test_client'
+                }
+            };
+
+            log('📤 Sending test message...', 'info');
+            socket.emit('message', testMessage);
+            log(`<pre>${JSON.stringify(testMessage, null, 2)}</pre>`, 'info');
+        }
+
+        // Auto-start on page load
+        log('Page loaded. Click "Test Connection" to start.');
+    </script>
+</body>
+</html>

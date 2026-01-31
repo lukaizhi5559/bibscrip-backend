@@ -1178,7 +1178,7 @@ Now generate the code for: ${command}`;
           },
         ],
         temperature: 0.2, // Very low for fastest generation
-        max_tokens: hasScreenshot ? 1000 : 800, // Aggressive reduction for speed
+        max_tokens: hasScreenshot ? 4096 : 3072, // Sufficient for complete code generation
         stream: false,
         top_p: 0.9, // Slightly reduce sampling space for faster generation
         // Add unique user identifier to prevent caching
@@ -1259,7 +1259,7 @@ Now generate the code for: ${command}`;
 
       const response = await this.claudeClient.messages.create({
         model: 'claude-sonnet-4-20250514', // Latest Claude Sonnet 4
-        max_tokens: hasScreenshot ? 1000 : 800, // Optimized for speed
+        max_tokens: hasScreenshot ? 4096 : 3072, // Sufficient for complete code generation
         temperature: 0.2, // Lower for faster generation
         messages: [
           {
@@ -1348,7 +1348,7 @@ Now generate the code for: ${command}`;
           },
         ],
         temperature: 0.2,
-        max_tokens: hasScreenshot ? 1000 : 800,
+        max_tokens: hasScreenshot ? 4096 : 3072, // Sufficient for complete code generation
         // Add unique user identifier to prevent caching
         user: `nutjs_${Date.now()}`,
       });

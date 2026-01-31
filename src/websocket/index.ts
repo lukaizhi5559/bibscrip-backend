@@ -7,12 +7,13 @@ import WebSocket from 'ws';
 import http from 'http';
 import { URL } from 'url';
 import { StreamingHandler } from './streamingHandler';
+import { CommunicationAgentExtension } from '../services/communicationAgentExtension';
 import { StreamingMessage } from '../types/streaming';
 import { authenticate } from '../middleware/auth';
 import { logger } from '../utils/logger';
 
 interface WebSocketSession {
-  handler: StreamingHandler;
+  handler: CommunicationAgentExtension;
   lastHeartbeat: number;
   authenticated: boolean;
 }
@@ -22,9 +23,15 @@ export class StreamingWebSocketServer {
   private sessions: Map<WebSocket, WebSocketSession> = new Map();
   private heartbeatInterval: NodeJS.Timeout | null = null;
 
+  // Expose wss for direct upgrade handling
+  public getWebSocketServer(): WebSocket.Server {
+    return this.wss;
+  }
+
   constructor(server: http.Server) {
     this.wss = new WebSocket.Server({
-      noServer: true
+      noServer: true,
+      perMessageDeflate: false // Disable compression to fix upgrade callback issue
     });
 
     this.setupEventHandlers();
@@ -32,39 +39,49 @@ export class StreamingWebSocketServer {
   }
 
   /**
-   * Handle upgrade request manually
+   * Handle WebSocket upgrade - called from index.ts
    */
   public handleUpgrade(request: http.IncomingMessage, socket: any, head: Buffer): void {
-    // Verify client before upgrading
-    const url = new URL(request.url || '', `http://${request.headers.host}`);
-    const apiKey = url.searchParams.get('apiKey');
-    
-    if (!apiKey) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-
-    this.wss.handleUpgrade(request, socket, head, (ws) => {
-      this.wss.emit('connection', ws, request);
+    logger.info('🔧 [WEBSOCKET] handleUpgrade called', {
+      url: request.url,
+      headers: request.headers
     });
-  }
-
-  /**
-   * Verify client connection
-   */
-  private verifyClient(info: { origin: string; secure: boolean; req: http.IncomingMessage }): boolean {
-    try {
-      const url = new URL(info.req.url || '', `http://${info.req.headers.host}`);
+    
+    // In development, allow all localhost connections
+    const isDevelopment = process.env.NODE_ENV !== 'production';
+    const isLocalhost = request.headers.host?.includes('localhost') || 
+                       request.headers.host?.includes('127.0.0.1');
+    
+    if (!isDevelopment || !isLocalhost) {
+      // In production, check for API key
+      const url = new URL(request.url || '', `http://${request.headers.host}`);
       const apiKey = url.searchParams.get('apiKey');
       
-      // Basic validation - more thorough auth happens in connection handler
-      return !!apiKey;
+      if (!apiKey) {
+        logger.warn('🚫 [WEBSOCKET] Rejecting upgrade - no API key');
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+    }
+    
+    logger.info('✅ [WEBSOCKET] Upgrade authorized, performing handshake');
+    
+    try {
+      this.wss.handleUpgrade(request, socket, head, (ws) => {
+        logger.info('🎉 [WEBSOCKET] Upgrade complete, emitting connection');
+        this.wss.emit('connection', ws, request);
+      });
+      logger.info('⏳ [WEBSOCKET] handleUpgrade called, waiting for callback...');
     } catch (error) {
-      logger.error('WebSocket client verification failed:', error as any);
-      return false;
+      logger.error('💥 [WEBSOCKET] Exception in handleUpgrade:', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      socket.destroy();
     }
   }
+
 
   /**
    * Setup WebSocket event handlers
@@ -100,22 +117,32 @@ export class StreamingWebSocketServer {
       const userId = url.searchParams.get('userId') ?? undefined;
       const clientId = url.searchParams.get('clientId') || connectionId;
 
-      if (!apiKey) {
+      // In development, allow connections without API key from localhost
+      const isDevelopment = process.env.NODE_ENV !== 'production';
+      const isLocalhost = req.headers.host?.includes('localhost') || req.headers.host?.includes('127.0.0.1');
+      
+      let isAuthenticated = false;
+      
+      if (apiKey) {
+        // Authenticate the connection if API key is provided
+        isAuthenticated = await this.authenticateConnection(apiKey, userId ?? undefined);
+        if (!isAuthenticated) {
+          ws.close(1008, 'Authentication failed');
+          return;
+        }
+      } else if (isDevelopment && isLocalhost) {
+        // Allow unauthenticated connections in development from localhost
+        logger.info(`🔓 [WEBSOCKET] Allowing unauthenticated local development connection: ${connectionId}`);
+        isAuthenticated = true;
+      } else {
         ws.close(1008, 'API key required');
         return;
       }
 
-      // Authenticate the connection
-      const isAuthenticated = await this.authenticateConnection(apiKey, userId ?? undefined);
-      if (!isAuthenticated) {
-        ws.close(1008, 'Authentication failed');
-        return;
-      }
-
-      // Create session handler
-      const handler = new StreamingHandler(ws, connectionId, userId, clientId);
+      // TEMPORARY: Test without CommunicationAgentExtension to isolate the issue
+      // const handler = new CommunicationAgentExtension(ws, connectionId, userId, clientId);
       const session: WebSocketSession = {
-        handler,
+        handler: null as any, // Temporary null
         lastHeartbeat: Date.now(),
         authenticated: true
       };
@@ -141,7 +168,9 @@ export class StreamingWebSocketServer {
             metadata: message.metadata
           });
           
-          await session.handler.handleMessage(message);
+          // TEMPORARY: Skip handler call for testing
+          // await session.handler.handleMessageWithRouting(message);
+          logger.info(`📨 [TEST] Message received but not processed (handler disabled for testing)`);
           session.lastHeartbeat = Date.now();
         } catch (error) {
           logger.error('Error processing WebSocket message:', {
@@ -155,38 +184,54 @@ export class StreamingWebSocketServer {
 
       // Handle connection close
       ws.on('close', (code: number, reason: string) => {
-        logger.info(`WebSocket connection closed: ${connectionId} (${code}: ${reason})`);
+        logger.info(`🔌 [WEBSOCKET] Connection closed: ${connectionId}`, {
+          code,
+          reason: reason || 'none',
+          readyState: ws.readyState
+        });
         this.cleanupSession(ws);
       });
 
       // Handle connection error
       ws.on('error', (error: Error) => {
-        logger.error(`WebSocket connection error: ${connectionId}`, error as any);
+        logger.error(`❌ [WEBSOCKET] Connection error: ${connectionId}`, {
+          error: error.message,
+          stack: error.stack,
+          readyState: ws.readyState
+        });
         this.cleanupSession(ws);
       });
 
-      // Send welcome message
-      this.sendMessage(ws, {
-        id: `welcome_${Date.now()}`,
-        type: 'connection_status' as any,
-        payload: {
-          connected: true,
-          sessionId: connectionId,
-          userId,
-          clientId,
-          capabilities: {
-            streaming: true,
-            voice: true,
-            interruption: true,
-            providers: ['claude', 'openai', 'grok', 'gemini', 'mistral', 'deepseek', 'lambda']
-          }
-        },
-        timestamp: Date.now(),
-        metadata: {
-          source: 'local_llm',
-          sessionId: connectionId,
-          userId,
-          clientId
+      // Send welcome message after a small delay to ensure connection is fully established
+      setImmediate(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          logger.info(`📤 [WEBSOCKET] Sending welcome message to ${connectionId}`);
+          this.sendMessage(ws, {
+            id: `welcome_${Date.now()}`,
+            type: 'connection_status' as any,
+            payload: {
+              connected: true,
+              sessionId: connectionId,
+              userId,
+              clientId,
+              capabilities: {
+                streaming: true,
+                voice: true,
+                interruption: true,
+                providers: ['claude', 'openai', 'grok', 'gemini', 'mistral', 'deepseek', 'lambda']
+              }
+            },
+            timestamp: Date.now(),
+            metadata: {
+              source: 'local_llm',
+              sessionId: connectionId,
+              userId,
+              clientId
+            }
+          });
+          logger.info(`✅ [WEBSOCKET] Welcome message sent to ${connectionId}, readyState: ${ws.readyState}`);
+        } else {
+          logger.warn(`⚠️ [WEBSOCKET] Connection not open when trying to send welcome message: ${connectionId}, readyState: ${ws.readyState}`);
         }
       });
 
@@ -256,7 +301,8 @@ export class StreamingWebSocketServer {
   private cleanupSession(ws: WebSocket): void {
     const session = this.sessions.get(ws);
     if (session) {
-      session.handler.cleanup();
+      // TEMPORARY: Skip cleanup call for testing
+      // session.handler.cleanup();
       this.sessions.delete(ws);
     }
   }

@@ -50,6 +50,7 @@ export enum StreamingMessageType {
   // System messages
   HEARTBEAT = 'heartbeat',
   ERROR = 'error',
+  STATUS = 'status',
   CONNECTION_STATUS = 'connection_status',
   
   // Control messages

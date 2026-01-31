@@ -253,7 +253,7 @@ export class LLMStreamingRouter extends LLMRouter {
     let tokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
     const stream = await anthropic.messages.create({
-      model: 'claude-3-opus-20240229',
+      model: 'claude-sonnet-4-20250514',
       max_tokens: 4096,
       messages: [{ role: 'user', content: prompt }],
       stream: true
@@ -312,7 +312,7 @@ export class LLMStreamingRouter extends LLMRouter {
     let tokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
     const stream = await openai.chat.completions.create({
-      model: 'gpt-4-turbo',
+      model: 'gpt-4o',
       messages: [{ role: 'user', content: prompt }],
       stream: true,
       temperature: 0.7,
@@ -342,6 +342,11 @@ export class LLMStreamingRouter extends LLMRouter {
         };
       }
     }
+
+    logger.info('✅ OpenAI streaming completed successfully', {
+      textLength: fullText.length,
+      tokenUsage
+    });
 
     return {
       fullText,

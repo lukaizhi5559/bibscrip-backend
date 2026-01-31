@@ -14,7 +14,7 @@ import intentRouter from './api/intentRoutes';
 import { logger } from './utils/logger';
 import { vectorDbService } from './services/vectorDbService';
 import { fetchBibleIds } from './utils/bible';
-import { setupStreamingWebSocket } from './websocket';
+import { SocketIOStreamingServer } from './websocket/socketioServer';
 import { handleComputerUseWebSocket } from './api/computerUseWebSocket';
 import { intentWebSocketServer } from './api/intentWebSocket';
 import { omniParserWarmup } from './services/omniParserWarmup';
@@ -170,8 +170,8 @@ initializeServices().then(() => {
   // Create HTTP server
   const server = http.createServer(app);
   
-  // Setup WebSocket streaming server (non-disruptive to REST APIs)
-  const wsServer = setupStreamingWebSocket(server);
+  // Setup Socket.IO Streaming server (replaces problematic WebSocket)
+  const socketioServer = new SocketIOStreamingServer(server);
   
   // Setup Computer Use WebSocket server with noServer option (DEPRECATED - use /intent-use)
   const computerUseWss = new WebSocket.Server({ 
@@ -190,29 +190,19 @@ initializeServices().then(() => {
   // Setup Intent WebSocket server (NEW - intent-driven automation)
   intentWebSocketServer.initialize(server);
   
-  // Handle upgrade requests - route to appropriate WebSocket server
+  // Handle upgrade requests - only for legacy WebSocket servers
+  // Socket.IO handles /ws/stream automatically
   server.on('upgrade', (request, socket, head) => {
     const pathname = new URL(request.url || '', `http://${request.headers.host}`).pathname;
     
-    logger.info(`🔄 [WEBSOCKET] Upgrade request for path: ${pathname}`);
-    
-    if (pathname === '/intent-use') {
-      logger.info('🎯 [INTENT] Routing to Intent WebSocket (NEW)');
-      // Intent WebSocket handles its own upgrade via ws library
-      return;
-    } else if (pathname === '/computer-use') {
+    if (pathname === '/computer-use') {
       logger.info('🌐 [COMPUTER-USE] Routing to Computer Use WebSocket (DEPRECATED)');
       computerUseWss.handleUpgrade(request, socket, head, (ws) => {
         computerUseWss.emit('connection', ws, request);
       });
-    } else if (pathname === '/ws/stream') {
-      logger.info('📡 [STREAMING] Routing to Streaming WebSocket');
-      // Let the streaming server handle it - it's already set up with noServer
-      wsServer.handleUpgrade(request, socket, head);
-    } else {
-      logger.warn(`⚠️ [WEBSOCKET] Unknown WebSocket path: ${pathname}`);
-      socket.destroy();
     }
+    // /ws/stream is handled by Socket.IO
+    // /intent-use is handled automatically by its WebSocket server
   });
   
   // Start server
@@ -227,7 +217,7 @@ initializeServices().then(() => {
   process.on('SIGTERM', () => {
     logger.info('Received SIGTERM, shutting down gracefully...');
     omniParserWarmup.stop();
-    wsServer.shutdown();
+    socketioServer.shutdown();
     computerUseWss.close(() => {
       logger.info('Computer Use WebSocket server closed');
     });
@@ -240,7 +230,7 @@ initializeServices().then(() => {
   process.on('SIGINT', () => {
     logger.info('Received SIGINT, shutting down gracefully...');
     omniParserWarmup.stop();
-    wsServer.shutdown();
+    socketioServer.shutdown();
     computerUseWss.close(() => {
       logger.info('Computer Use WebSocket server closed');
     });
