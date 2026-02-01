@@ -1664,7 +1664,7 @@ Task: "Open the file text.txt.rft on my desktop"
       "description": "Use Spotlight to search for and open text.txt.rft",
       "query": "text.txt.rft",
       "successCriteria": "File opened in default application",
-      "maxAttempts": 5,
+      "maxAttempts": 8,
       "status": "pending"
     }
   ]

@@ -8,6 +8,7 @@ import { nutjsCodeGenerator, ScreenshotData } from '../services/nutjsCodeGenerat
 import { logger } from '../utils/logger';
 import { authenticate } from '../middleware/auth';
 import { InteractiveGuideRequest } from '../types/automationGuide';
+import { omniParserWarmup } from '../services/omniParserWarmup';
 
 const router = express.Router();
 
@@ -255,6 +256,17 @@ router.post('/plan', authenticate, async (req: Request, res: Response): Promise<
       userId: (req as any).user?.id,
     });
 
+    // Check OmniParser warmup status before generating plan
+    // This prevents 3-minute delays during automation execution
+    const warmupStatus = await omniParserWarmup.ensureWarm();
+    
+    if (!warmupStatus.wasWarm) {
+      logger.info('🔥 OmniParser was cold - triggered warmup', {
+        warmupLatencyMs: warmupStatus.latencyMs,
+        warmupLatencySeconds: warmupStatus.latencyMs ? (warmupStatus.latencyMs / 1000).toFixed(2) : 'N/A',
+      });
+    }
+
     // Generate structured automation plan with context
     const result = await nutjsCodeGenerator.generatePlan({
       command,
@@ -283,7 +295,7 @@ router.post('/plan', authenticate, async (req: Request, res: Response): Promise<
       }))
     });
 
-    // Return full result including clarification fields
+    // Return full result including clarification fields and warmup status
     const response = {
       ...result, // Spread all fields from result (plan, needsClarification, clarificationQuestions, etc.)
       clarificationQuestions: result.clarificationQuestions?.map((q: any) => ({
@@ -291,6 +303,11 @@ router.post('/plan', authenticate, async (req: Request, res: Response): Promise<
         question: q.text,
       })),
       success: true, // Ensure success is always true for 200 responses
+      omniParserWarmup: {
+        wasWarm: warmupStatus.wasWarm,
+        warmupLatencyMs: warmupStatus.latencyMs,
+        isReady: true, // Always true after ensureWarm() completes
+      },
     };
 
     // Log the actual response being sent to frontend for debugging

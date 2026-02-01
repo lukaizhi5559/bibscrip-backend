@@ -295,17 +295,16 @@ export class SocketIOStreamingServer {
     totalConnections: number;
     authenticatedConnections: number;
   } {
-    let authenticatedCount = 0;
-
-    for (const [, session] of this.sessions) {
-      if (session.authenticated) {
-        authenticatedCount++;
-      }
-    }
-
     return {
       totalConnections: this.sessions.size,
-      authenticatedConnections: authenticatedCount
+      authenticatedConnections: Array.from(this.sessions.values()).filter(s => s.authenticated).length
     };
+  }
+
+  /**
+   * Get Socket.IO server instance for external integrations
+   */
+  getIO(): SocketIOServer {
+    return this.io;
   }
 }

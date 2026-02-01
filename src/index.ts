@@ -173,6 +173,9 @@ initializeServices().then(() => {
   // Setup Socket.IO Streaming server (replaces problematic WebSocket)
   const socketioServer = new SocketIOStreamingServer(server);
   
+  // Connect OmniParser warmup service to Socket.IO for status broadcasting
+  omniParserWarmup.setSocketIO(socketioServer.getIO());
+  
   // Setup Computer Use WebSocket server with noServer option (DEPRECATED - use /intent-use)
   const computerUseWss = new WebSocket.Server({ 
     noServer: true

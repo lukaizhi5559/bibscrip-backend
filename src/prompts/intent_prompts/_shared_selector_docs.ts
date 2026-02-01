@@ -56,215 +56,163 @@ function detectTargetType(activeApp: string, activeUrl: string): 'web' | 'deskto
 }
 
 /**
- * Web selector documentation (Playwright/CDP)
+ * Web selector documentation (OmniParser Vision Detection)
  */
 function getWebSelectorDocs(): string {
   return `
-=== WEB SELECTORS (Playwright/CDP) ===
+=== WEB ELEMENT DETECTION (OmniParser) ===
 
 **Target detected: WEB PAGE in browser**
 
-Use semantic selectors for reliable web automation:
+Use OmniParser vision-based detection for reliable web automation.
+OmniParser analyzes screenshots and returns precise coordinates for clicking.
 
-**Available selector strategies:**
-
-1. **CSS Selector** (preferred)
-   - Fast, reliable, widely supported
-   - Examples: "button.submit", "input[name='email']", "#login-btn"
-   
-2. **Text Content**
-   - Match by visible text
-   - Examples: "Submit", "Sign In", "Search"
-   
-3. **ARIA Role**
-   - Semantic HTML roles
-   - Examples: "button", "searchbox", "textbox", "link"
-   
-4. **XPath** (when CSS insufficient)
-   - More powerful but slower
-   - Examples: "//button[contains(text(), 'Submit')]"
-   
-5. **Test ID**
-   - data-testid attributes (most stable)
-   - Examples: "submit-btn", "email-input"
+**IMPORTANT: Always use "description" field for findAndClick actions**
 
 **Selector format:**
 {
   "type": "findAndClick",
-  "selector": {
-    "css": "button.submit",
-    "text": "Submit",
-    "role": "button"
-  }
+  "description": "search input field in top navigation bar",
+  "multiDriver": true
 }
 
-**Best practices:**
-- Combine selectors for reliability: css + text or role + text
-- Prefer CSS for elements with classes/IDs
-- Use text for buttons with unique labels
-- Use role for semantic elements
+**How it works:**
+1. You provide a natural language description of the element
+2. OmniParser analyzes the screenshot and detects UI elements
+3. Backend returns coordinates: { x: 500, y: 100 }
+4. Frontend clicks at those coordinates
+
+**Best practices for descriptions:**
+- Be specific: Include element type, text, and position
+- Include visual details: color, shape, icons
+- Add context: "in top bar", "below title", "next to logo"
+- Mention text content: "search field with placeholder 'Search'"
 
 **Examples:**
+
+// Click search input field
+{
+  "type": "findAndClick",
+  "description": "search input field in top navigation bar",
+  "multiDriver": true
+}
 
 // Click submit button
 {
   "type": "findAndClick",
-  "selector": {
-    "css": "button[type='submit']",
-    "text": "Submit"
-  }
-}
-
-// Type into search field
-{
-  "type": "typeText",
-  "selector": {
-    "css": "input[name='search']",
-    "role": "searchbox"
-  },
-  "text": "query"
+  "description": "blue Submit button at bottom of form",
+  "multiDriver": true
 }
 
 // Click link by text
 {
   "type": "findAndClick",
-  "selector": {
-    "role": "link",
-    "text": "Learn More"
-  }
+  "description": "Learn More link in main content area",
+  "multiDriver": true
+}
+
+// Click icon button
+{
+  "type": "findAndClick",
+  "description": "shopping cart icon in top right corner",
+  "multiDriver": true
+}
+
+**For typing into fields:**
+1. First click the field using findAndClick with description
+2. Then use typeText to enter text
+
+Example sequence:
+{
+  "type": "findAndClick",
+  "description": "email input field",
+  "multiDriver": true
+}
+{
+  "type": "typeText",
+  "text": "user@example.com"
 }
 `;
 }
 
 /**
- * Desktop selector documentation (Accessibility APIs)
+ * Desktop selector documentation (OmniParser Vision Detection)
  */
 function getDesktopSelectorDocs(os: string): string {
-  const isMac = os === 'darwin';
-  
-  if (isMac) {
-    return `
-=== DESKTOP SELECTORS (macOS Accessibility API) ===
+  return `
+=== DESKTOP ELEMENT DETECTION (OmniParser) ===
 
-**Target detected: NATIVE DESKTOP APP (macOS)**
+**Target detected: NATIVE DESKTOP APP**
 
-Use Accessibility API selectors for reliable desktop automation:
+Use OmniParser vision-based detection for reliable desktop automation.
+OmniParser analyzes screenshots and returns precise coordinates for clicking.
 
-**Available selector strategies:**
-
-1. **AX Role + Title** (preferred)
-   - axRole: Element type (AXButton, AXTextField, etc.)
-   - axTitle: Element label/name
-   
-**Common AX Roles:**
-- AXButton - Buttons
-- AXTextField - Text input fields
-- AXStaticText - Labels, text content
-- AXMenuItem - Menu items
-- AXWindow - Windows
-- AXScrollArea - Scrollable areas
+**IMPORTANT: Always use "description" field for findAndClick actions**
 
 **Selector format:**
 {
   "type": "findAndClick",
-  "selector": {
-    "axRole": "AXButton",
-    "axTitle": "Send"
-  }
+  "description": "Send button at bottom right of message window",
+  "multiDriver": true
 }
+
+**How it works:**
+1. You provide a natural language description of the element
+2. OmniParser analyzes the screenshot and detects UI elements
+3. Backend returns coordinates: { x: 500, y: 100 }
+4. Frontend clicks at those coordinates
+
+**Best practices for descriptions:**
+- Be specific: Include element type, text, and position
+- Include visual details: color, shape, icons
+- Add context: "in sidebar", "at bottom", "next to username"
+- Mention text content: "Send button", "Message input field"
 
 **Examples:**
 
 // Click Send button
 {
   "type": "findAndClick",
-  "selector": {
-    "axRole": "AXButton",
-    "axTitle": "Send"
-  }
+  "description": "Send button at bottom right of message window",
+  "multiDriver": true
 }
 
-// Type into message field
+// Click into message field
 {
-  "type": "typeText",
-  "selector": {
-    "axRole": "AXTextField",
-    "axTitle": "Message"
-  },
-  "text": "Hello"
+  "type": "findAndClick",
+  "description": "message input field at bottom of chat window",
+  "multiDriver": true
 }
 
 // Click menu item
 {
   "type": "findAndClick",
-  "selector": {
-    "axRole": "AXMenuItem",
-    "axTitle": "New Message"
-  }
+  "description": "New Message menu item in File menu",
+  "multiDriver": true
 }
-`;
-  } else {
-    return `
-=== DESKTOP SELECTORS (Windows UIAutomation API) ===
 
-**Target detected: NATIVE DESKTOP APP (Windows)**
-
-Use UIAutomation API selectors for reliable desktop automation:
-
-**Available selector strategies:**
-
-1. **UIA Type + Name** (preferred)
-   - uiaType: Control type (Button, Edit, etc.)
-   - uiaName: Element name/label
-   
-**Common UIA Types:**
-- Button - Buttons
-- Edit - Text input fields
-- Text - Labels, text content
-- MenuItem - Menu items
-- Window - Windows
-- List - Lists, tables
-
-**Selector format:**
+// Click toolbar icon
 {
   "type": "findAndClick",
-  "selector": {
-    "uiaType": "Button",
-    "uiaName": "Send"
-  }
+  "description": "attachment icon in message toolbar",
+  "multiDriver": true
 }
 
-**Examples:**
+**For typing into fields:**
+1. First click the field using findAndClick with description
+2. Then use typeText to enter text
 
-// Click Send button
+Example sequence:
 {
   "type": "findAndClick",
-  "selector": {
-    "uiaType": "Button",
-    "uiaName": "Send"
-  }
+  "description": "message input field",
+  "multiDriver": true
 }
-
-// Type into message field
 {
   "type": "typeText",
-  "selector": {
-    "uiaType": "Edit",
-    "uiaName": "Message"
-  },
-  "text": "Hello"
-}
-
-// Click menu item
-{
-  "type": "findAndClick",
-  "selector": {
-    "uiaType": "MenuItem",
-    "uiaName": "New Message"
-  }
+  "text": "Hello, world!"
 }
 `;
-  }
 }
 
 /**
@@ -368,45 +316,68 @@ export function getCompleteSelectorDocs(context: SelectorContext): string {
 
 === SELECTOR DECISION TREE ===
 
-1. **Check target type:**
-   - Browser (Chrome, Safari, etc.) → Use WEB SELECTORS
-   - Desktop app (Slack, Outlook, etc.) → Use DESKTOP SELECTORS
-   - Unknown/Canvas → Use VISION FALLBACK
+**ALWAYS use OmniParser vision detection for findAndClick actions**
 
-2. **For WEB targets:**
-   - Prefer: CSS + text or role + text combinations
-   - Use CSS for elements with classes/IDs
-   - Use text for unique button labels
-   - Use role for semantic elements
+1. **For ALL targets (Web, Desktop, Unknown):**
+   - Use "description" field with natural language
+   - Set "multiDriver": true
+   - OmniParser will detect elements and return coordinates
 
-3. **For DESKTOP targets:**
-   - macOS: Use axRole + axTitle
-   - Windows: Use uiaType + uiaName
-   - Combine role/type with title/name for reliability
+2. **Action format:**
+{
+  "type": "findAndClick",
+  "description": "specific element description with position",
+  "multiDriver": true
+}
 
-4. **For UNKNOWN targets:**
-   - Use vision description with specific visual details
-   - Include color, position, context
+3. **Description best practices:**
+   - Include element type: "button", "input field", "link", "icon"
+   - Include text content: "Send button", "search field"
+   - Include position: "in top bar", "at bottom right", "next to logo"
+   - Include visual details: "blue button", "magnifying glass icon"
 
-5. **Fallback strategy:**
-   - If structured selector fails → Try alternative selector
-   - If all structured selectors fail → Fall back to vision
-   - If vision fails → End with clear error
+4. **Examples by target type:**
+
+**Web page (browser):**
+{
+  "type": "findAndClick",
+  "description": "search input field in top navigation bar",
+  "multiDriver": true
+}
+
+**Desktop app:**
+{
+  "type": "findAndClick",
+  "description": "Send button at bottom right of message window",
+  "multiDriver": true
+}
+
+**Unknown/Canvas:**
+{
+  "type": "findAndClick",
+  "description": "blue circular play button in center of canvas",
+  "multiDriver": true
+}
+
+5. **For typing into fields:**
+   - First click the field with findAndClick
+   - Then use typeText (no selector needed)
 
 === MIGRATION NOTES ===
 
-**Legacy format (still supported):**
+**OLD format (deprecated - DO NOT USE):**
 {
   "type": "findAndClick",
-  "locator": { "strategy": "vision", "description": "..." }
+  "selector": { "css": "#id", "role": "button" }
 }
 
-**New format (preferred when USE_MULTI_DRIVER=true):**
+**NEW format (required):**
 {
   "type": "findAndClick",
-  "selector": { "css": "...", "text": "..." }
+  "description": "element description",
+  "multiDriver": true
 }
 
-Both formats are supported for backward compatibility.
+**CRITICAL: Always use "description" field, never use "selector" field for findAndClick.**
 `;
 }

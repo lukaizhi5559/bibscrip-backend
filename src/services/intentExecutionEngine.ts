@@ -548,47 +548,65 @@ export class IntentExecutionEngine {
 
       // Try Gemini first (fastest - 2.0 Flash)
       if (this.geminiClient) {
-        const action = await this.getActionFromGemini(prompt, processedScreenshot);
-        const latencyMs = Date.now() - startTime;
-        logger.info('⚡ LLM action decision', {
-          provider: 'gemini',
-          latencyMs,
-          actionType: action.type,
-          reasoning: action.reasoning || 'No reasoning provided',
-          actionData: action,
-        });
-        return action;
+        try {
+          const action = await this.getActionFromGemini(prompt, processedScreenshot);
+          const latencyMs = Date.now() - startTime;
+          logger.info('⚡ LLM action decision', {
+            provider: 'gemini',
+            latencyMs,
+            actionType: action.type,
+            reasoning: action.reasoning || 'No reasoning provided',
+            actionData: action,
+          });
+          return action;
+        } catch (geminiError: any) {
+          logger.warn('⚠️ Gemini failed, falling back to OpenAI', {
+            error: geminiError.message
+          });
+        }
       }
 
       // Fallback to OpenAI
       if (this.openaiClient) {
-        const action = await this.getActionFromOpenAI(prompt, processedScreenshot);
-        const latencyMs = Date.now() - startTime;
-        logger.info('⚡ LLM action decision', {
-          provider: 'openai',
-          latencyMs,
-          actionType: action.type,
-          reasoning: action.reasoning || 'No reasoning provided',
-          actionData: action,
-        });
-        return action;
+        try {
+          const action = await this.getActionFromOpenAI(prompt, processedScreenshot);
+          const latencyMs = Date.now() - startTime;
+          logger.info('⚡ LLM action decision', {
+            provider: 'openai',
+            latencyMs,
+            actionType: action.type,
+            reasoning: action.reasoning || 'No reasoning provided',
+            actionData: action,
+          });
+          return action;
+        } catch (openaiError: any) {
+          logger.warn('⚠️ OpenAI failed, falling back to Claude', {
+            error: openaiError.message
+          });
+        }
       }
 
       // Fallback to Claude
       if (this.claudeClient) {
-        const action = await this.getActionFromClaude(prompt, processedScreenshot);
-        const latencyMs = Date.now() - startTime;
-        logger.info('⚡ LLM action decision', {
-          provider: 'claude',
-          latencyMs,
-          actionType: action.type,
-          reasoning: action.reasoning || 'No reasoning provided',
-          actionData: action,
-        });
-        return action;
+        try {
+          const action = await this.getActionFromClaude(prompt, processedScreenshot);
+          const latencyMs = Date.now() - startTime;
+          logger.info('⚡ LLM action decision', {
+            provider: 'claude',
+            latencyMs,
+            actionType: action.type,
+            reasoning: action.reasoning || 'No reasoning provided',
+            actionData: action,
+          });
+          return action;
+        } catch (claudeError: any) {
+          logger.error('❌ All LLM providers failed', {
+            claudeError: claudeError.message
+          });
+        }
       }
 
-      throw new Error('No LLM clients available');
+      throw new Error('No LLM clients available or all providers failed');
     } catch (error: any) {
       const latencyMs = Date.now() - startTime;
       logger.error('Failed to get next action from LLM', { 
@@ -630,8 +648,24 @@ export class IntentExecutionEngine {
     });
 
     const content = response.choices[0]?.message?.content;
+    const finishReason = response.choices[0]?.finish_reason;
+    
+    // Log detailed response info for debugging
+    logger.info('📝 OpenAI response details', {
+      hasContent: !!content,
+      contentLength: content?.length || 0,
+      finishReason,
+      contentPreview: content?.substring(0, 200),
+      refusal: (response.choices[0]?.message as any)?.refusal,
+    });
+    
     if (!content) {
-      throw new Error('OpenAI returned empty response');
+      throw new Error(`OpenAI returned empty response (finish_reason: ${finishReason})`);
+    }
+    
+    // Check for content policy rejection
+    if (content.toLowerCase().includes("i'm sorry") || content.toLowerCase().includes("i can't assist")) {
+      throw new Error(`OpenAI content policy rejection: ${content}`);
     }
 
     return this.parseActionFromResponse(content);
@@ -645,7 +679,7 @@ export class IntentExecutionEngine {
     screenshot: { base64: string; mimeType?: string }
   ): Promise<any> {
     const response = await this.claudeClient!.messages.create({
-      model: 'claude-3-5-sonnet-20241022',
+      model: 'claude-sonnet-4-20250514',
       max_tokens: 1000,
       messages: [
         {
@@ -684,7 +718,7 @@ export class IntentExecutionEngine {
     screenshot: { base64: string; mimeType?: string }
   ): Promise<any> {
     const model = this.geminiClient!.getGenerativeModel({ 
-      model: 'gemini-2.0-flash-exp',
+      model: 'gemini-1.5-flash-latest',
       // Enable prompt caching for faster subsequent calls
       generationConfig: {
         temperature: 0.1,

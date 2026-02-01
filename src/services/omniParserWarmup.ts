@@ -6,21 +6,25 @@
 
 import Replicate from 'replicate';
 import { logger }  from '../utils/logger';
+import type { Server as SocketIOServer } from 'socket.io';
 
 const REPLICATE_API_TOKEN = process.env.REPLICATE_API_TOKEN;
 const WARMUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes - Replicate goes cold in <10min
 const WARMUP_ENABLED = process.env.OMNIPARSER_WARMUP_ENABLED === 'true';
+const HEARTBEAT_INTERVAL_MS = 10 * 1000; // 10 seconds - broadcast status to frontend
 
 // Use Replicate's own playground screenshot - guaranteed to work with their API
 // This is a real website screenshot with many detectable UI elements
 const WARMUP_TEST_IMAGE = 'https://replicate.delivery/pbxt/MWb5PhmtW9qcXtvG1G9DQMo2TmBtsVK3DS1dETfEl78YNLZL/replicate-website.png';
 
 let warmupInterval: NodeJS.Timeout | null = null;
+let heartbeatInterval: NodeJS.Timeout | null = null;
 let lastWarmupTime: number = 0;
 let warmupCount: number = 0;
 
 export class OmniParserWarmupService {
   private replicateClient: Replicate | null = null;
+  private socketIO: SocketIOServer | null = null;
 
   constructor() {
     if (REPLICATE_API_TOKEN && WARMUP_ENABLED) {
@@ -29,6 +33,7 @@ export class OmniParserWarmupService {
       });
       logger.info('🔥 [WARMUP] OmniParser warmup service initialized', {
         intervalMinutes: WARMUP_INTERVAL_MS / 60000,
+        heartbeatIntervalSeconds: HEARTBEAT_INTERVAL_MS / 1000,
         enabled: true,
       });
     } else {
@@ -37,6 +42,14 @@ export class OmniParserWarmupService {
         reason: !REPLICATE_API_TOKEN ? 'no_api_token' : 'not_enabled',
       });
     }
+  }
+
+  /**
+   * Set Socket.IO server for broadcasting warmup status
+   */
+  setSocketIO(io: SocketIOServer): void {
+    this.socketIO = io;
+    logger.info('🔥 [WARMUP] Socket.IO server connected for status broadcasting');
   }
 
   /**
@@ -61,9 +74,16 @@ export class OmniParserWarmupService {
       });
     }, WARMUP_INTERVAL_MS);
 
+    // Schedule heartbeat broadcasts for frontend status indicator
+    heartbeatInterval = setInterval(() => {
+      this.broadcastStatus();
+    }, HEARTBEAT_INTERVAL_MS);
+
     logger.info('🔥 [WARMUP] Warmup service started', {
       intervalMs: WARMUP_INTERVAL_MS,
       intervalMinutes: WARMUP_INTERVAL_MS / 60000,
+      heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
+      heartbeatIntervalSeconds: HEARTBEAT_INTERVAL_MS / 1000,
     });
   }
 
@@ -74,10 +94,39 @@ export class OmniParserWarmupService {
     if (warmupInterval) {
       clearInterval(warmupInterval);
       warmupInterval = null;
-      logger.info('🔥 [WARMUP] Warmup service stopped', {
-        totalWarmups: warmupCount,
-      });
     }
+    if (heartbeatInterval) {
+      clearInterval(heartbeatInterval);
+      heartbeatInterval = null;
+    }
+    logger.info('🔥 [WARMUP] Warmup service stopped', {
+      totalWarmups: warmupCount,
+    });
+  }
+
+  /**
+   * Broadcast warmup status to all connected Socket.IO clients
+   * Frontend can use this to show green/red indicator
+   */
+  private broadcastStatus(): void {
+    if (!this.socketIO) {
+      return; // No Socket.IO server connected
+    }
+
+    const isWarm = this.isWarm();
+    const stats = this.getStats();
+
+    const status = {
+      isWarm,
+      enabled: WARMUP_ENABLED,
+      lastWarmupTime,
+      timeSinceLastWarmupSeconds: stats.timeSinceLastWarmup,
+      warmupCount,
+      nextWarmupInSeconds: isWarm ? 300 - (stats.timeSinceLastWarmup || 0) : 0,
+    };
+
+    // Broadcast to all connected clients
+    this.socketIO.emit('omniparser_status', status);
   }
 
   /**
@@ -128,6 +177,9 @@ export class OmniParserWarmupService {
           recommendation: 'Consider reducing WARMUP_INTERVAL_MS',
         });
       }
+
+      // Broadcast status immediately after warmup completes
+      this.broadcastStatus();
     } catch (error: any) {
       logger.error('❌ [WARMUP] Warmup request failed - FULL ERROR', {
         warmupNumber: warmupCount,
@@ -149,6 +201,43 @@ export class OmniParserWarmupService {
       timeSinceLastWarmup: lastWarmupTime ? (Date.now() - lastWarmupTime) / 1000 : null,
       intervalMinutes: WARMUP_INTERVAL_MS / 60000,
     };
+  }
+
+  /**
+   * Check if OmniParser is warm and ready for use
+   * Returns true if warmup was recent (within 5 minutes)
+   * Replicate models go cold after ~10 minutes of inactivity
+   */
+  isWarm(): boolean {
+    if (!WARMUP_ENABLED || !this.replicateClient) {
+      return false; // If warmup disabled, assume cold
+    }
+
+    if (!lastWarmupTime) {
+      return false; // Never warmed up
+    }
+
+    const timeSinceWarmup = (Date.now() - lastWarmupTime) / 1000; // seconds
+    const isWarm = timeSinceWarmup < 300; // 5 minutes (tighter window for reliability)
+
+    return isWarm;
+  }
+
+  /**
+   * Trigger an immediate warmup if needed
+   * Returns promise that resolves when warmup completes
+   */
+  async ensureWarm(): Promise<{ wasWarm: boolean; latencyMs?: number }> {
+    if (this.isWarm()) {
+      return { wasWarm: true };
+    }
+
+    // Trigger warmup
+    const startTime = Date.now();
+    await this.warmup();
+    const latencyMs = Date.now() - startTime;
+
+    return { wasWarm: false, latencyMs };
   }
 }
 
