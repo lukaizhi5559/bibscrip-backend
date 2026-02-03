@@ -19,7 +19,7 @@ const PLAN_CACHE_NAMESPACE = 'automation_plans';
 // Similarity thresholds
 const SIMILARITY_THRESHOLDS = {
   EXACT_MATCH: 0.95,      // Return immediately
-  VERY_SIMILAR: 0.85,     // Return with confidence
+  VERY_SIMILAR: 0.92,     // Return with confidence (raised from 0.85 to prevent false positives)
   SIMILAR: 0.70,          // Show as suggestion, generate new
   DIFFERENT: 0.0,         // Generate new plan
 };
@@ -126,23 +126,55 @@ export class PlanCachingService {
           if (cachedPlanJson) {
             const plan = JSON.parse(cachedPlanJson) as CachedPlan;
 
-            // Update usage stats
-            await this.updateUsageStats(planId);
+            // Validate complexity match - prevent simple plans from matching complex tasks
+            const commandComplexity = this.estimateCommandComplexity(command);
+            const stepCountDiff = Math.abs(commandComplexity.expectedSteps - plan.steps.length);
+            
+            // Reject if step count mismatch is too large (e.g., 1-step plan for 4-step task)
+            if (stepCountDiff > 2) {
+              logger.info('❌ Plan cache MISS - complexity mismatch', {
+                command,
+                planId,
+                similarity,
+                commandExpectedSteps: commandComplexity.expectedSteps,
+                cachedStepCount: plan.steps.length,
+                stepCountDiff,
+                latencyMs: Date.now() - startTime,
+              });
+              
+              // Fall through to generate new plan
+            } else if (!this.validateQueryParameters(command, plan.goal)) {
+              // Reject if query parameters differ (e.g., "summer clothes" vs "winter clothes")
+              logger.info('❌ Plan cache MISS - query parameter mismatch', {
+                command,
+                cachedCommand: plan.goal,
+                planId,
+                similarity,
+                latencyMs: Date.now() - startTime,
+              });
+              
+              // Fall through to generate new plan
+            } else {
+              // Update usage stats
+              await this.updateUsageStats(planId);
 
-            logger.info('✅ Plan cache HIT', {
-              command,
-              planId,
-              similarity,
-              usageCount: plan.metadata.usageCount + 1,
-              latencyMs: Date.now() - startTime,
-            });
+              logger.info('✅ Plan cache HIT', {
+                command,
+                planId,
+                similarity,
+                usageCount: plan.metadata.usageCount + 1,
+                commandExpectedSteps: commandComplexity.expectedSteps,
+                cachedStepCount: plan.steps.length,
+                latencyMs: Date.now() - startTime,
+              });
 
-            return {
-              plan,
-              cached: true,
-              similarity,
-              source: 'cache',
-            };
+              return {
+                plan,
+                cached: true,
+                similarity,
+                source: 'cache',
+              };
+            }
           } else {
             logger.warn('Plan found in Pinecone but not in Redis', {
               planId,
@@ -294,6 +326,99 @@ export class PlanCachingService {
       });
       // Don't throw - stats update failure shouldn't break the flow
     }
+  }
+
+  /**
+   * Validate that query parameters match between commands
+   * Prevents "summer clothes" from matching "winter clothes"
+   */
+  private validateQueryParameters(newCommand: string, cachedCommand: string): boolean {
+    // Extract search queries from commands
+    const newQuery = this.extractSearchQuery(newCommand);
+    const cachedQuery = this.extractSearchQuery(cachedCommand);
+
+    // If both have queries, they must match
+    if (newQuery && cachedQuery) {
+      const match = newQuery.toLowerCase() === cachedQuery.toLowerCase();
+      
+      if (!match) {
+        logger.info('🔍 Query parameter mismatch detected', {
+          newQuery,
+          cachedQuery,
+          newCommand,
+          cachedCommand,
+        });
+      }
+      
+      return match;
+    }
+
+    // If neither has a query, they're compatible
+    return true;
+  }
+
+  /**
+   * Extract search query from command
+   * Examples:
+   * - "search for summer clothes" → "summer clothes"
+   * - "goto amazon and search for winter clothes" → "winter clothes"
+   * - "look for red shoes" → "red shoes"
+   */
+  private extractSearchQuery(command: string): string | null {
+    const lowerCommand = command.toLowerCase();
+    
+    // Common search patterns
+    const patterns = [
+      /search (?:for |)(.+?)(?:\s+on|\s+in|\s+and|$)/i,
+      /look (?:for |up |)(.+?)(?:\s+on|\s+in|\s+and|$)/i,
+      /find (?:me |)(.+?)(?:\s+on|\s+in|\s+and|$)/i,
+      /query (?:for |)(.+?)(?:\s+on|\s+in|\s+and|$)/i,
+    ];
+
+    for (const pattern of patterns) {
+      const match = command.match(pattern);
+      if (match && match[1]) {
+        return match[1].trim();
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Estimate command complexity to prevent simple plans from matching complex tasks
+   * Uses word count and sentence structure as heuristics
+   * 
+   * This is intentionally simple - we just want to prevent obvious mismatches
+   * (e.g., 1-step "hello world" matching 4-step "type resume template")
+   */
+  private estimateCommandComplexity(command: string): { expectedSteps: number; complexity: string } {
+    // Word count heuristic
+    const wordCount = command.split(/\s+/).length;
+    
+    // Sentence count (multiple sentences often indicate multiple steps)
+    const sentenceCount = command.split(/[.!?]+/).filter(s => s.trim().length > 0).length;
+    
+    // Estimate steps based on length and structure
+    let expectedSteps = 1;
+    
+    if (wordCount <= 5) {
+      // Very short commands: "type hello world", "click submit"
+      expectedSteps = 1;
+    } else if (wordCount <= 12 && sentenceCount <= 1) {
+      // Short single-sentence commands: "open chrome and go to google"
+      expectedSteps = 2;
+    } else if (wordCount <= 25 || sentenceCount <= 2) {
+      // Medium commands: "open textedit and type a quick note"
+      expectedSteps = 3;
+    } else {
+      // Long/complex commands: "In Textedit I need you to type up a template resume..."
+      expectedSteps = 4;
+    }
+    
+    const complexity = expectedSteps === 1 ? 'simple' : expectedSteps <= 2 ? 'medium' : 'complex';
+    
+    return { expectedSteps, complexity };
   }
 
   /**

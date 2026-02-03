@@ -30,6 +30,7 @@ interface MatchOptions {
   activeUrl?: string;
   screenshotWidth?: number;
   screenshotHeight?: number;
+  windowBounds?: { x: number; y: number; width: number; height: number };
   excludedElementIds?: number[]; // Elements to exclude from matching (failed attempts)
   maxRetries?: number;
 }
@@ -174,6 +175,28 @@ export class LLMElementMatcher {
         confidence: result.confidence,
         reasoning: result.reasoning,
       });
+
+      // Reject low-confidence matches (likely wrong due to missing windowBounds)
+      if (result.confidence < 0.5) {
+        const hasWindowBounds = !!options.windowBounds;
+        logger.warn('⚠️ [LLM_MATCHER] Low confidence match rejected', {
+          description,
+          matched: result.element?.content,
+          confidence: result.confidence,
+          hasWindowBounds,
+          reasoning: result.reasoning,
+        });
+
+        if (!hasWindowBounds) {
+          throw new Error(
+            `Element matching failed: Low confidence (${result.confidence}) - Frontend must send windowBounds in context for accurate detection. Matched: "${result.element?.content}"`
+          );
+        } else {
+          throw new Error(
+            `Element matching failed: Low confidence (${result.confidence}) - No good match found for "${description}". Matched: "${result.element?.content}"`
+          );
+        }
+      }
 
       return result;
     } catch (error: any) {
@@ -320,58 +343,83 @@ export class LLMElementMatcher {
       return exactMatches.slice(0, 10);
     }
 
-    // Strategy 3: Strong partial match (requires significant word overlap)
-    const descWords = descLower.split(/\s+/).filter(w => w.length > 3); // Only meaningful words
-    const strongMatches = cleanElements.filter((elem) => {
+                                                                                               // Strategy 3: Substring match (direct overlap)
+    const substringMatches = cleanElements.filter((elem) => {
       const contentLower = elem.content.toLowerCase().trim();
-      const contentWords = contentLower.split(/\s+/);
-      
-      // Require at least 50% word overlap for multi-word descriptions
-      if (descWords.length > 1) {
-        const overlap = descWords.filter(dw => 
-          contentWords.some(cw => cw === dw || cw.includes(dw) || dw.includes(cw))
-        );
-        return overlap.length >= Math.ceil(descWords.length * 0.5);
-      }
-      
-      // For single-word descriptions, require the word to be present
-      return contentWords.some(cw => cw === descWords[0] || cw.includes(descWords[0]));
+      // Direct substring match only - no fuzzy matching
+      return descLower.includes(contentLower) || contentLower.includes(descLower);
     });
 
-    if (strongMatches.length > 0) {
-      logger.info('🎯 [LLM_MATCHER] Pre-filter: Strong partial matches', {
+    if (substringMatches.length > 0) {
+      // If looking for interactive elements (input, button, field, box), prioritize interactive matches
+      const interactiveKeywords = ['input', 'button', 'field', 'box', 'click', 'select', 'dropdown'];
+      const needsInteractive = interactiveKeywords.some(kw => descLower.includes(kw));
+      
+      if (needsInteractive) {
+        const interactiveMatches = substringMatches.filter(e => e.interactivity);
+        const nonInteractiveMatches = substringMatches.filter(e => !e.interactivity);
+        
+        logger.info('🎯 [LLM_MATCHER] Pre-filter: Substring matches (prioritizing interactive)', {
+          description,
+          totalMatches: substringMatches.length,
+          interactiveMatches: interactiveMatches.length,
+          nonInteractiveMatches: nonInteractiveMatches.length,
+        });
+        
+        // Send interactive first, then non-interactive as fallback
+        return [
+          ...interactiveMatches.slice(0, 20),
+          ...nonInteractiveMatches.slice(0, 10)
+        ];
+      }
+      
+      logger.info('🎯 [LLM_MATCHER] Pre-filter: Substring matches', {
         description,
-        matchCount: strongMatches.length,
+        matchCount: substringMatches.length,
+      });
+      return substringMatches.slice(0, 30);
+    }
+
+    // Strategy 4: Keyword-based prioritization
+    // If description contains "input field", prioritize text placeholders over buttons
+    const inputFieldKeywords = ['input field', 'text field', 'search field', 'search box', 'input box'];
+    const buttonKeywords = ['button', 'icon', 'click'];
+    
+    const isInputFieldDescription = inputFieldKeywords.some(kw => descLower.includes(kw));
+    const isButtonDescription = buttonKeywords.some(kw => descLower.includes(kw));
+    
+    if (isInputFieldDescription && !isButtonDescription) {
+      // Looking for input field - prioritize non-interactive text elements (placeholders)
+      const interactive = cleanElements.filter(e => e.interactivity);
+      const nonInteractive = cleanElements.filter(e => !e.interactivity);
+      
+      logger.info('🎯 [LLM_MATCHER] Pre-filter: Input field detected, prioritizing placeholders', {
+        description,
+        nonInteractiveCount: nonInteractive.length,
+        interactiveCount: interactive.length,
       });
       
-      // Medium confidence - return more candidates to avoid missing target
-      // Prioritize interactive elements if we have many matches
-      if (strongMatches.length > 30) {
-        const interactive = strongMatches.filter(m => m.interactivity);
-        if (interactive.length > 0) {
-          return interactive.slice(0, 30);
-        }
-      }
-      
-      return strongMatches.slice(0, 30);
+      // Send non-interactive first (placeholders), then interactive
+      return [
+        ...nonInteractive.slice(0, 30),
+        ...interactive.slice(0, 20)
+      ];
     }
-
-    // Strategy 4: Fallback - return all clean elements (let LLM decide)
-    // This happens when description is very generic or no good pre-matches
-    logger.warn('⚠️ [LLM_MATCHER] Pre-filter: No strong matches, using all elements', {
+    
+    // Strategy 5: Default - generous filtering
+    logger.info('🎯 [LLM_MATCHER] Pre-filter: Sending interactive elements to LLM', {
       description,
-      elementCount: cleanElements.length,
+      interactiveCount: cleanElements.filter(e => e.interactivity).length,
+      totalCount: cleanElements.length,
     });
     
-    // Low confidence - return more candidates to maximize chance of finding target
-    // Prioritize interactive elements for generic queries
     const interactive = cleanElements.filter(e => e.interactivity);
-    if (interactive.length > 0) {
-      return interactive.slice(0, 40);
-    }
+    const nonInteractive = cleanElements.filter(e => !e.interactivity);
     
-    // If no interactive elements, return all clean elements
-    return cleanElements.slice(0, 40);
+    return [
+      ...interactive.slice(0, 40),
+      ...nonInteractive.slice(0, 10)
+    ];
   }
 
   /**
@@ -465,6 +513,16 @@ Return ONLY a JSON object with this exact structure:
         return `**File Explorer Rules:**
 - File/folder names in the main content area (center) are the target
 - Avoid sidebar or menu bar elements`;
+
+      case 'search':
+      case 'type_text':
+        return `**CRITICAL - Search Input Field Rules:**
+- **"search input field"** = text placeholder like "Search Amazon", "Ask anything", NOT a button/icon
+- **"search function"** or **"search button"** = clickable icon/button, NOT the input field
+- **Input fields** often have placeholder text and may be marked as non-interactive
+- **Search buttons/icons** are typically small icons next to the input field
+- **Prefer text elements** with search-related placeholder text over interactive icons
+- If description says "input field", prioritize text/placeholder elements over buttons`;
 
       default:
         return '';

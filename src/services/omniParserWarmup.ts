@@ -9,7 +9,7 @@ import { logger }  from '../utils/logger';
 import type { Server as SocketIOServer } from 'socket.io';
 
 const REPLICATE_API_TOKEN = process.env.REPLICATE_API_TOKEN;
-const WARMUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes - Replicate goes cold in <10min
+const WARMUP_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes - more aggressive to prevent cold boots
 const WARMUP_ENABLED = process.env.OMNIPARSER_WARMUP_ENABLED === 'true';
 const HEARTBEAT_INTERVAL_MS = 10 * 1000; // 10 seconds - broadcast status to frontend
 
@@ -218,7 +218,7 @@ export class OmniParserWarmupService {
     }
 
     const timeSinceWarmup = (Date.now() - lastWarmupTime) / 1000; // seconds
-    const isWarm = timeSinceWarmup < 300; // 5 minutes (tighter window for reliability)
+    const isWarm = timeSinceWarmup < 180; // 3 minutes (tighter window for reliability)
 
     return isWarm;
   }

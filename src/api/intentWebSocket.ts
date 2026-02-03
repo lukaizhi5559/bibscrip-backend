@@ -504,6 +504,36 @@ export class IntentWebSocketServer {
       session.currentExecution.request.context.screenshot = screenshot;
     }
 
+    // If action was 'end', complete the intent instead of executing next action
+    if (actionResult?.actionType === 'end') {
+      logger.info('Intent execution complete (end action)', {
+        sessionId,
+        stepId,
+        totalActions: session.currentExecution.actionHistory.length,
+        executionTimeMs: Date.now() - session.currentExecution.startTime
+      });
+
+      // Send completion message
+      this.sendMessage(ws, {
+        type: 'intent_complete',
+        requestId,
+        sessionId,
+        stepId: session.currentExecution.stepId,
+        result: {
+          status: 'step_complete',
+          intentType: session.currentExecution.intentType,
+          stepId: session.currentExecution.stepId,
+          actions: session.currentExecution.actionHistory,
+          outputScreenshot: screenshot,
+          executionTimeMs: Date.now() - session.currentExecution.startTime
+        }
+      });
+
+      // Clean up execution state
+      session.currentExecution = undefined;
+      return;
+    }
+
     // Execute next action
     await this.executeNextAction(ws, sessionId, session.currentExecution.request);
   }

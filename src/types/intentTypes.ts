@@ -134,6 +134,7 @@ export type ActionType =
   
   // Element Interaction
   | 'findAndClick'
+  | 'movePointer'
   | 'typeText'
   | 'pressKey'
   | 'clickAndDrag'
@@ -247,7 +248,7 @@ export const INTENT_AVAILABLE_ACTIONS: Record<IntentType, ActionType[]> = {
   spotlight_search: ['pressKey', 'typeText', 'waitForElement', 'screenshot', 'end'],
   
   // Custom & Fallback
-  custom: ['focusApp', 'openUrl', 'findAndClick', 'typeText', 'pressKey', 'clickAndDrag', 'scroll', 'zoom', 'screenshot', 'ocr', 'store', 'retrieve', 'waitForElement', 'pause', 'log', 'end'],
+  custom: ['focusApp', 'openUrl', 'findAndClick', 'movePointer', 'typeText', 'pressKey', 'clickAndDrag', 'scroll', 'zoom', 'screenshot', 'ocr', 'store', 'retrieve', 'waitForElement', 'pause', 'log', 'end'],
 };
 
 // ============================================================================

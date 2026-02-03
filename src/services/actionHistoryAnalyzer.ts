@@ -80,6 +80,9 @@ export class ActionHistoryAnalyzer {
       case 'drag':
         return this.analyzeDrag(lastAction, context);
       
+      case 'capture':
+        return this.analyzeCapture(lastAction, context);
+      
       default:
         return { shouldSkipAction: false };
     }
@@ -183,6 +186,28 @@ export class ActionHistoryAnalyzer {
         suggestedReason: 'Query typed, submit with Enter key',
         contextData: {
           readyToSubmit: true,
+        },
+      };
+    }
+
+    // If pressKey (Enter) succeeded after typing, end the search
+    if (
+      lastAction.actionType === 'pressKey' &&
+      lastAction.success === true &&
+      lastTwoActions.length >= 2 &&
+      lastTwoActions[lastTwoActions.length - 2].actionType === 'typeText'
+    ) {
+      logger.info('🎯 [DETERMINISTIC] search: Query submitted, ending search', {
+        lastAction: lastAction.actionType,
+      });
+
+      return {
+        shouldSkipAction: true,
+        skipReason: 'Search query submitted successfully',
+        suggestedAction: 'end',
+        suggestedReason: 'Search complete: Query typed and submitted',
+        contextData: {
+          searchSubmitted: true,
         },
       };
     }
@@ -526,6 +551,55 @@ export class ActionHistoryAnalyzer {
         },
       };
     }
+
+    return { shouldSkipAction: false };
+  }
+
+  /**
+   * capture: Auto-end after successful screenshot (only for simple capture steps)
+   */
+  private static analyzeCapture(
+    lastAction: ActionHistoryItem,
+    context: any
+  ): DeterministicCheckResult {
+    // Only auto-end for simple screenshot steps (maxAttempts: 1)
+    // Complex captures (OCR, store) need LLM verification
+    const maxAttempts = context.stepData?.maxAttempts || 10;
+    const isSimpleCapture = maxAttempts === 1;
+
+    logger.info('🔍 [DETERMINISTIC] capture: Analyzing', {
+      lastActionType: lastAction.actionType,
+      lastActionSuccess: lastAction.success,
+      maxAttempts,
+      isSimpleCapture,
+      contextStepData: context.stepData,
+    });
+
+    if (
+      lastAction.actionType === 'screenshot' &&
+      lastAction.success === true &&
+      isSimpleCapture
+    ) {
+      logger.info('🎯 [DETERMINISTIC] capture: Simple screenshot captured, ending step', {
+        lastAction: lastAction.actionType,
+        maxAttempts,
+      });
+
+      return {
+        shouldSkipAction: true,
+        skipReason: 'Screenshot captured successfully (simple capture)',
+        suggestedAction: 'end',
+        suggestedReason: 'Capture complete: Screenshot taken and verified',
+        contextData: {
+          screenshotCaptured: true,
+          simpleCapture: true,
+        },
+      };
+    }
+
+    logger.info('🔍 [DETERMINISTIC] capture: No auto-end triggered', {
+      reason: !isSimpleCapture ? 'not_simple_capture' : 'conditions_not_met',
+    });
 
     return { shouldSkipAction: false };
   }

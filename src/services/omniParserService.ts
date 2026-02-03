@@ -108,6 +108,17 @@ export class OmniParserService {
       fetchAllElements: description === 'fetch_all_elements',
     });
 
+    // Check if warmup is needed before expensive API call
+    const { omniParserWarmup } = await import('./omniParserWarmup');
+    if (!omniParserWarmup.isWarm()) {
+      logger.warn('⚠️ [OMNIPARSER] Model is cold, triggering warmup first');
+      const warmupResult = await omniParserWarmup.ensureWarm();
+      logger.info('✅ [OMNIPARSER] Warmup complete', {
+        wasWarm: warmupResult.wasWarm,
+        latencyMs: warmupResult.latencyMs,
+      });
+    }
+
     // Generate screenshot hash for cache key
     const screenshotHash = this.hashScreenshot(screenshot.base64);
     const url = context?.url || context?.activeUrl || 'unknown';

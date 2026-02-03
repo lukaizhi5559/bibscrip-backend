@@ -117,15 +117,6 @@ export class IntentExecutionEngine {
       };
     }
 
-    // Check if max attempts reached
-    const maxAttempts = stepData.maxAttempts || 10;
-    if (actionHistory.length >= maxAttempts) {
-      return {
-        status: 'step_failed',
-        error: `Max attempts (${maxAttempts}) reached`,
-      };
-    }
-
     try {
       // ============================================================================
       // DETERMINISTIC CHECK: Analyze action history before LLM decision
@@ -133,7 +124,7 @@ export class IntentExecutionEngine {
       const deterministicCheck = ActionHistoryAnalyzer.shouldSkipAction(
         intentType,
         actionHistory as ActionHistoryItem[],
-        context
+        { ...context, stepData }
       );
 
       // If deterministic check suggests skipping to a specific action, return it immediately
@@ -144,16 +135,36 @@ export class IntentExecutionEngine {
           suggestedAction: deterministicCheck.suggestedAction,
         });
 
+        // Build deterministic action with required fields
+        const action: any = {
+          type: deterministicCheck.suggestedAction,
+          reasoning: `[DETERMINISTIC] ${deterministicCheck.suggestedReason}`,
+          metadata: {
+            deterministic: true,
+            ...deterministicCheck.contextData,
+          },
+        };
+
+        // For typeText actions in search intent, add the query text
+        if (deterministicCheck.suggestedAction === 'typeText' && intentType === 'search') {
+          action.text = request.stepData?.query || '';
+          action.submit = true; // Auto-submit after typing
+        }
+
         return {
           status: 'action_ready',
-          action: {
-            type: deterministicCheck.suggestedAction,
-            reasoning: `[DETERMINISTIC] ${deterministicCheck.suggestedReason}`,
-            metadata: {
-              deterministic: true,
-              ...deterministicCheck.contextData,
-            },
-          },
+          action,
+        };
+      }
+
+      // Check if max attempts reached (only after deterministic check)
+      // Exclude 'end' actions from the count as they signal completion, not attempts
+      const maxAttempts = stepData.maxAttempts || 10;
+      const nonEndActions = actionHistory.filter((a: any) => a.actionType !== 'end');
+      if (nonEndActions.length >= maxAttempts) {
+        return {
+          status: 'step_failed',
+          error: `Max attempts (${maxAttempts}) reached`,
         };
       }
 
@@ -718,7 +729,7 @@ export class IntentExecutionEngine {
     screenshot: { base64: string; mimeType?: string }
   ): Promise<any> {
     const model = this.geminiClient!.getGenerativeModel({ 
-      model: 'gemini-1.5-flash-latest',
+      model: 'gemini-1.5-flash',
       // Enable prompt caching for faster subsequent calls
       generationConfig: {
         temperature: 0.1,
@@ -800,7 +811,7 @@ export class IntentExecutionEngine {
     screenshot: { base64: string; mimeType: string },
     request: IntentExecutionRequest
   ): Promise<any> {
-    const actionsNeedingEnrichment = ['findAndClick', 'clickAndDrag', 'typeText'];
+    const actionsNeedingEnrichment = ['findAndClick', 'movePointer', 'clickAndDrag', 'typeText'];
     
     if (!actionsNeedingEnrichment.includes(action.type)) {
       // Action doesn't need enrichment (e.g., pressKey, scroll, pause, end)
@@ -830,7 +841,7 @@ export class IntentExecutionEngine {
     }
 
     // Legacy mode or fallback: Use vision-based coordinate detection
-    const actionsNeedingCoordinates = ['findAndClick', 'clickAndDrag'];
+    const actionsNeedingCoordinates = ['findAndClick', 'movePointer', 'clickAndDrag'];
     
     if (!actionsNeedingCoordinates.includes(action.type)) {
       // typeText without selector doesn't need coordinates
