@@ -18,6 +18,7 @@ import { SocketIOStreamingServer } from './websocket/socketioServer';
 import { handleComputerUseWebSocket } from './api/computerUseWebSocket';
 import { intentWebSocketServer } from './api/intentWebSocket';
 import { omniParserWarmup } from './services/omniParserWarmup';
+import { StreamingHandler } from './websocket/streamingHandler';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -170,9 +171,42 @@ initializeServices().then(() => {
   // Create HTTP server
   const server = http.createServer(app);
   
-  // Setup Socket.IO Streaming server (replaces problematic WebSocket)
-  const socketioServer = new SocketIOStreamingServer(server);
+  // Setup Socket.IO Streaming server (standalone - not bound to HTTP server)
+  const socketioServer = new SocketIOStreamingServer();
+
+  // Setup native WebSocket server at /ws/stream for direct clients (e.g. Electron)
+  const streamingWss = new WebSocket.Server({ noServer: true });
+
+  streamingWss.on('connection', (ws, req) => {
+    const url = new URL(req.url || '', `http://${req.headers.host}`);
+    const sessionId = `ws_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const userId = url.searchParams.get('userId') || undefined;
+    const clientId = url.searchParams.get('clientId') || sessionId;
+    logger.info(`✅ [WS/STREAM] New connection: ${sessionId}`, { userId, clientId });
+    const handler = new StreamingHandler(ws, sessionId, userId, clientId);
+    ws.on('message', async (data) => {
+      try {
+        const message = JSON.parse(data.toString());
+        await handler.handleMessage(message);
+      } catch (error: any) {
+        logger.error('[WS/STREAM] Failed to process message:', error.message);
+        ws.send(JSON.stringify({ type: 'error', error: error.message }));
+      }
+    });
+    ws.on('close', () => {
+      logger.info(`🔌 [WS/STREAM] Connection closed: ${sessionId}`);
+      handler.cleanup();
+    });
+    ws.on('error', (error) => {
+      logger.error(`❌ [WS/STREAM] Error: ${sessionId}`, error);
+    });
+  });
   
+  // Forward /socket.io HTTP polling requests to the standalone Socket.IO engine
+  app.use('/socket.io', (req, res) => {
+    socketioServer.handleRequest(req, res);
+  });
+
   // Connect OmniParser warmup service to Socket.IO for status broadcasting
   omniParserWarmup.setSocketIO(socketioServer.getIO());
   
@@ -193,19 +227,26 @@ initializeServices().then(() => {
   // Setup Intent WebSocket server (NEW - intent-driven automation)
   intentWebSocketServer.initialize(server);
   
-  // Handle upgrade requests - only for legacy WebSocket servers
-  // Socket.IO handles /ws/stream automatically
+  // Handle upgrade requests
   server.on('upgrade', (request, socket, head) => {
     const pathname = new URL(request.url || '', `http://${request.headers.host}`).pathname;
-    
-    if (pathname === '/computer-use') {
+
+    if (pathname === '/ws/stream') {
+      logger.info('📡 [WS/STREAM] Routing to native streaming WebSocket');
+      streamingWss.handleUpgrade(request, socket, head, (ws) => {
+        streamingWss.emit('connection', ws, request);
+      });
+    } else if (pathname === '/socket.io') {
+      logger.info('🔌 [SOCKET.IO] Routing to Socket.IO WebSocket');
+      socketioServer.handleUpgrade(request, socket as any, head);
+    } else if (pathname === '/intent-use') {
+      intentWebSocketServer.handleUpgrade(request, socket, head);
+    } else if (pathname === '/computer-use') {
       logger.info('🌐 [COMPUTER-USE] Routing to Computer Use WebSocket (DEPRECATED)');
       computerUseWss.handleUpgrade(request, socket, head, (ws) => {
         computerUseWss.emit('connection', ws, request);
       });
     }
-    // /ws/stream is handled by Socket.IO
-    // /intent-use is handled automatically by its WebSocket server
   });
   
   // Start server
@@ -221,6 +262,7 @@ initializeServices().then(() => {
     logger.info('Received SIGTERM, shutting down gracefully...');
     omniParserWarmup.stop();
     socketioServer.shutdown();
+    streamingWss.close();
     computerUseWss.close(() => {
       logger.info('Computer Use WebSocket server closed');
     });
@@ -229,11 +271,12 @@ initializeServices().then(() => {
       process.exit(0);
     });
   });
-  
+
   process.on('SIGINT', () => {
     logger.info('Received SIGINT, shutting down gracefully...');
     omniParserWarmup.stop();
     socketioServer.shutdown();
+    streamingWss.close();
     computerUseWss.close(() => {
       logger.info('Computer Use WebSocket server closed');
     });

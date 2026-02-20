@@ -178,28 +178,7 @@ export class StreamingHandler {
         streamingMetadata
       );
 
-      // Ensure llm_stream_end is always sent (backup mechanism)
-      logger.info(`✅ LLM streaming completed for ${requestId}, sending explicit end signal`);
-      if (this.ws.readyState === WebSocket.OPEN) {
-        this.send({
-          id: `${requestId}_stream_end`,
-          type: StreamingMessageType.LLM_STREAM_END,
-          payload: {
-            fullText: result.fullText,
-            provider: result.provider,
-            processingTime: result.processingTime,
-            tokenUsage: result.tokenUsage,
-            completed: true
-          },
-          timestamp: Date.now(),
-          parentId: requestId,
-          metadata: {
-            ...streamingMetadata,
-            provider: result.provider,
-            source: 'backend_llm'
-          }
-        });
-      }
+      logger.info(`✅ LLM streaming completed for ${requestId}`);
 
       // Add assistant response to conversation history
       this.conversationContext.conversationHistory.push({

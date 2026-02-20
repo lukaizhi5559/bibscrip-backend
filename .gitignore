@@ -43,6 +43,6 @@ thinkdrop-vision-agent-798a1dc876a9.json
 
 # OmniParser
 services/omniparser/venv
-omniparser-debug/
+#omniparser-debug/
 
 __pycache__

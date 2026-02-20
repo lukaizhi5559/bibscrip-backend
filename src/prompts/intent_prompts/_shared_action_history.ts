@@ -35,18 +35,20 @@ ${actionHistory.map((action: any, idx: number) => `${idx + 1}. ${action.actionTy
 
 3. **Avoid Repeating Mistakes**
    - DO NOT repeat the same failed action with identical parameters
-   - DO NOT keep trying if you've failed 3+ times → End with clear explanation
    - DO NOT ignore error messages → Use them to adjust your strategy
+   - Try different element descriptions, selectors, or action types
 
 4. **Progressive Refinement**
    - Each attempt should be smarter than the last
    - Use information from previous screenshots
    - Adjust element descriptions based on what you learned
+   - Try alternative approaches if one method isn't working
 
-5. **When to Give Up**
-   - After 3 identical failures → Try completely different approach
-   - After 5 total failures → End with failure and clear explanation
-   - If element truly doesn't exist → End immediately with explanation
+5. **NEVER Give Up**
+   - ONLY use 'end' action when the task is successfully completed
+   - NEVER use 'end' action for failures
+   - Keep trying different approaches - the system will ask the user for help if max attempts is reached
+   - After repeated failures, try completely different strategies (different selectors, different action sequences, etc.)
 
 **Remember: You are in an iterative loop. Each action you return will be executed, and you'll see the result in the next iteration. Use this feedback to improve!**
 `;

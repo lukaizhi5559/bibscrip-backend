@@ -255,6 +255,7 @@ export class LLMStreamingRouter extends LLMRouter {
     const stream = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 4096,
+      system: 'You are Thinkdrop AI. Always respond using proper Markdown formatting: use **bold** for emphasis, ## headers for sections, bullet lists for enumerations, and `code` for technical terms. Never repeat words or phrases.',
       messages: [{ role: 'user', content: prompt }],
       stream: true
     });
@@ -313,7 +314,10 @@ export class LLMStreamingRouter extends LLMRouter {
 
     const stream = await openai.chat.completions.create({
       model: 'gpt-4o',
-      messages: [{ role: 'user', content: prompt }],
+      messages: [
+        { role: 'system', content: 'You are Thinkdrop AI. Always respond using proper Markdown formatting: use **bold** for emphasis, ## headers for sections, bullet lists for enumerations, and `code` for technical terms. Never repeat words or phrases.' },
+        { role: 'user', content: prompt }
+      ],
       stream: true,
       temperature: 0.7,
       max_tokens: 4096
@@ -470,7 +474,10 @@ export class LLMStreamingRouter extends LLMRouter {
     }
 
     const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+    const model = genAI.getGenerativeModel({
+      model: "gemini-pro",
+      systemInstruction: 'You are Thinkdrop AI. Always respond using proper Markdown formatting: use **bold** for emphasis, ## headers for sections, bullet lists for enumerations, and `code` for technical terms. Never repeat words or phrases.'
+    });
     
     let fullText = '';
     let tokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
@@ -525,7 +532,10 @@ export class LLMStreamingRouter extends LLMRouter {
 
     const stream = await (client as any).chatStream({
       model: "mistral-medium",
-      messages: [{ role: "user", content: prompt }]
+      messages: [
+        { role: "system", content: 'You are Thinkdrop AI. Always respond using proper Markdown formatting: use **bold** for emphasis, ## headers for sections, bullet lists for enumerations, and `code` for technical terms. Never repeat words or phrases.' },
+        { role: "user", content: prompt }
+      ]
     });
 
     for await (const chunk of stream) {

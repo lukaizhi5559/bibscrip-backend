@@ -80,17 +80,29 @@ You can ONLY use these actions for this intent:
 
 === DECISION TREE ===
 
-IF search field NOT visible:
-  → waitForElement (search field) → findAndClick → typeText (submit: true) → screenshot → end
+**STEP 0: MANDATORY CONTEXT VALIDATION (DO THIS FIRST)**
+Before ANY search action, verify you're on the correct page/application:
+- Check screenshot: Does the visible UI match the expected search context?
+- If previous step was "switch to ChatGPT" → Verify ChatGPT interface is frontmost, NOT Amazon/other sites
+- If you see the WRONG page (e.g., Amazon when you need ChatGPT) → STOP and take screenshot to show the issue
+- **NEVER search on the wrong page** - this is a critical failure
 
-IF search field visible but NOT focused:
-  → findAndClick (search field) → typeText (submit: true) → screenshot → end
+IF on WRONG page/app:
+  → screenshot → (system will handle via max attempts and clarification)
 
-IF search field already focused:
-  → typeText (submit: true) → screenshot → end
+IF on CORRECT page/app, proceed with search:
 
-IF search requires clicking search button:
-  → findAndClick (search field) → typeText → findAndClick (search button) → screenshot → end
+  IF search field NOT visible:
+    → waitForElement (search field) → findAndClick → typeText (submit: true) → screenshot → end
+
+  IF search field visible but NOT focused:
+    → findAndClick (search field) → typeText (submit: true) → screenshot → end
+
+  IF search field already focused:
+    → typeText (submit: true) → screenshot → end
+
+  IF search requires clicking search button:
+    → findAndClick (search field) → typeText → findAndClick (search button) → screenshot → end
 
 === TYPICAL FLOWS ===
 
@@ -119,6 +131,10 @@ IF search requires clicking search button:
 - Active App: ${context.activeApp || 'Unknown'}
 - Active URL: ${context.activeUrl || 'None'}
 - Max Attempts: ${stepData.maxAttempts || 10}
+- Stored Data: ${context.storedData ? JSON.stringify(context.storedData) : 'None'}
+- Previous Step Results: ${context.previousStepResults ? JSON.stringify(context.previousStepResults) : 'None'}
+
+**IMPORTANT**: If there was a previous "switch_app" or "navigate" step, verify the screenshot shows you're on that target before searching!
 
 
 
@@ -149,18 +165,23 @@ ${actionHistory.map((action: any, idx: number) => `${idx + 1}. ${action.actionTy
 
 3. **Avoid Repeating Mistakes**
    - DO NOT repeat the same failed action with identical parameters
-   - DO NOT keep trying if you've failed 3+ times → End with clear explanation
    - DO NOT ignore error messages → Use them to adjust
+   - Try different element descriptions, selectors, or approaches
 
 4. **Progressive Refinement**
    - Each attempt should be smarter than the last
    - Use information from previous screenshots
    - Adjust based on what you learned
 
-5. **When to Give Up**
-   - After 3 identical failures → Try different approach
-   - After 5 total failures → End with explanation
-   - If element truly doesn't exist → End immediately
+5. **Context Validation**
+   - FIRST verify you're on the correct site/app for this search
+   - If the previous step was to switch to a specific app/site, check if that succeeded
+   - If you're on the wrong site, DO NOT proceed with search - keep trying to find the right context
+
+6. **NEVER give up**
+   - ONLY use 'end' action when search is successfully submitted
+   - NEVER use 'end' for failures - the system will ask the user for help if max attempts is reached
+   - Keep trying different approaches until you succeed
 
 **Remember: You are in an iterative loop. Each action you return will be executed, and you'll see the result in the next iteration. Use this feedback to improve!**
 ` : ''}

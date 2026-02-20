@@ -4,7 +4,8 @@
  */
 
 import { Server as SocketIOServer, Socket } from 'socket.io';
-import { Server as HttpServer } from 'http';
+import { IncomingMessage } from 'http';
+import { Duplex } from 'stream';
 import { logger } from '../utils/logger';
 import { CommunicationAgentExtension } from '../services/communicationAgentExtension';
 import { StreamingMessage } from '../types/streaming';
@@ -25,14 +26,19 @@ export class SocketIOStreamingServer {
   private sessions: Map<string, SocketSession> = new Map();
   private heartbeatInterval: NodeJS.Timeout | null = null;
 
-  constructor(server: HttpServer) {
-    this.io = new SocketIOServer(server, {
+  constructor() {
+    this.io = new SocketIOServer({
       path: '/socket.io',
       cors: {
         origin: '*',
         methods: ['GET', 'POST']
       },
-      transports: ['websocket', 'polling']
+      transports: ['websocket', 'polling'],
+      // Increase timeouts to handle long-running operations (e.g., OmniParser 14+ seconds)
+      pingTimeout: 60000,  // 60 seconds (default: 20s)
+      pingInterval: 25000, // 25 seconds (default: 25s)
+      // Allow larger payloads for screenshots
+      maxHttpBufferSize: 10e6 // 10MB
     });
 
     this.setupEventHandlers();
@@ -306,5 +312,19 @@ export class SocketIOStreamingServer {
    */
   getIO(): SocketIOServer {
     return this.io;
+  }
+
+  /**
+   * Handle an HTTP upgrade request for Socket.IO paths
+   */
+  handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
+    (this.io.engine as any).handleUpgrade(request, socket, head);
+  }
+
+  /**
+   * Handle an HTTP request for Socket.IO polling
+   */
+  handleRequest(req: IncomingMessage, res: any): void {
+    (this.io.engine as any).handleRequest(req, res);
   }
 }

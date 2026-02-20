@@ -88,10 +88,7 @@ export class IntentWebSocketServer {
   private sessions: Map<string, IntentSession> = new Map();
 
   initialize(server: Server) {
-    this.wss = new WebSocketServer({ 
-      server, 
-      path: '/intent-use'
-    });
+    this.wss = new WebSocketServer({ noServer: true });
 
     this.wss.on('connection', (ws: WebSocket) => {
       this.handleConnection(ws);
@@ -104,6 +101,23 @@ export class IntentWebSocketServer {
     this.clients.add(ws);
     logger.info('Intent WebSocket client connected', { 
       totalClients: this.clients.size 
+    });
+
+    // Setup keepalive to prevent timeout during long operations (e.g., OmniParser 14+ seconds)
+    let isAlive = true;
+    const keepaliveInterval = setInterval(() => {
+      if (!isAlive) {
+        logger.warn('Intent WebSocket keepalive timeout - terminating connection');
+        clearInterval(keepaliveInterval);
+        ws.terminate();
+        return;
+      }
+      isAlive = false;
+      ws.ping();
+    }, 10000); // Ping every 10 seconds
+
+    ws.on('pong', () => {
+      isAlive = true;
     });
 
     // Send welcome message
@@ -128,6 +142,7 @@ export class IntentWebSocketServer {
     });
 
     ws.on('close', () => {
+      clearInterval(keepaliveInterval);
       this.clients.delete(ws);
       logger.info('Intent WebSocket client disconnected', { 
         totalClients: this.clients.size 
@@ -573,7 +588,13 @@ export class IntentWebSocketServer {
       'select', 'drag', 'scroll', 'capture', 'extract', 'copy', 'paste', 'store',
       'retrieve', 'wait', 'verify', 'compare', 'check', 'upload', 'download',
       'open_file', 'save_file', 'zoom', 'authenticate', 'form_fill', 'multi_select', 'custom',
-      'spotlight_search'
+      'spotlight_search',
+      // File Operations (Phase 4)
+      'read_file', 'write_file', 'copy_file', 'move_file', 'delete_file', 'list_files',
+      'search_files', 'create_folder', 'delete_folder', 'file_info', 'modify_permissions',
+      'compress', 'decompress',
+      // Content Generation (Phase 5)
+      'generate_and_type', 'compose', 'generate_form'
     ];
 
     if (!validIntents.includes(request.intentType)) {
@@ -805,6 +826,13 @@ export class IntentWebSocketServer {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(message));
     }
+  }
+
+  handleUpgrade(request: import('http').IncomingMessage, socket: import('stream').Duplex, head: Buffer): void {
+    if (!this.wss) return;
+    this.wss.handleUpgrade(request, socket, head, (ws) => {
+      this.wss!.emit('connection', ws, request);
+    });
   }
 
   close() {

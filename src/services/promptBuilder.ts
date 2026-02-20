@@ -314,8 +314,9 @@ User Question: "${userQuery}"
   }
 
   prompt += `\n\nInstructions:
-${lengthGuidance}- Use clear, accessible language
-- Be accurate and factual
+${lengthGuidance}- Use **Markdown formatting** for your response: use **bold** for emphasis, headers (##, ###) for sections when appropriate, bullet lists for enumerated items, and \`code\` for technical terms
+- Use clear, accessible language
+- Be accurate and factual — do NOT repeat words or phrases
 - If the question is unclear, ask for clarification
 - Provide actionable insights when appropriate
 - Consider multiple perspectives when relevant

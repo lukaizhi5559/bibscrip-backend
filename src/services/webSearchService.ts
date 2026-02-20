@@ -352,6 +352,7 @@ export class WebSearchService {
     }
 
     let formatted = `\n\nCURRENT WEB INFORMATION (${searchResponse.provider}, ${searchResponse.results.length} results):\n`;
+    formatted += `IMPORTANT: Synthesize the information below into your own words. Do NOT copy or echo these snippets verbatim.\n\n`;
     
     searchResponse.results.forEach((result, index) => {
       formatted += `${index + 1}. **${result.title}**\n`;

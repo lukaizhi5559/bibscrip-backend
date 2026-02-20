@@ -21,20 +21,28 @@ OS: ${context.os || 'darwin'}
 
 === DECISION TREE ===
 
-1. Is target app already active?
-   YES → screenshot → end
-   NO → Continue to step 2
+1. Is target app FRONTMOST and FOCUSED (not just visible)?
+   - Check screenshot: Is the target app's UI taking up most of the screen?
+   - Is the target app's window in the foreground with focus indicators?
+   - Can you see the target app's main interface ready for input?
+   
+   YES (app is frontmost) → screenshot → end
+   NO (app not frontmost or just visible in background) → Continue to step 2
 
 2. Focus the target application
    → focusApp with target app name
    → waitForElement (brief wait for app to focus)
-   → screenshot (verify app is focused)
+   → screenshot (verify app is NOW frontmost)
    → end
 
 === CRITICAL RULES ===
+- **FRONTMOST vs VISIBLE**: An app visible in a tab/window is NOT the same as being frontmost and focused
+- **Example**: If ChatGPT is visible in a Chrome tab but Amazon is the active page, ChatGPT is NOT frontmost
 - Use exact application names (e.g., "Google Chrome", "Warp", "Windsurf")
-- Always end with screenshot → end
-- If app doesn't exist, still call end (don't loop forever)
+- ONLY use 'end' action when the target app's UI is FRONTMOST and ready for input
+- NEVER use 'end' action for failures - the system will handle max attempts
+- Keep trying different approaches until you succeed or reach max attempts
+- If target is a website (like ChatGPT), verify the correct page is active, not just the browser
 
 
 ${actionHistory && actionHistory.length > 0 ? `
@@ -54,7 +62,8 @@ ${actionHistory.map((action: any, idx: number) => `${idx + 1}. ${action.actionTy
 2. **Adjust Your Approach** - Be more specific, add waits, try different actions
 3. **Avoid Repeating Mistakes** - DO NOT repeat failed actions with same parameters
 4. **Progressive Refinement** - Each attempt should be smarter than the last
-5. **When to Give Up** - After 3 identical failures → try different approach; After 5 total failures → end with explanation
+5. **Keep Trying** - Try different variations of the app name, check if it's a website vs desktop app
+6. **NEVER give up** - The system will ask the user for help if max attempts is reached
 
 **Remember: You are in an iterative loop. Use feedback from previous attempts to improve!**
 ` : ''}

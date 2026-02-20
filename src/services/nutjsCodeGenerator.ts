@@ -1972,6 +1972,7 @@ ${contextInfo}
 - **Missing critical target with NO reasonable default**: "open the file" (which file?), "check that project" (which project?)
 - **Ambiguous actions with NO obvious intent**: "save it" (where? what?), "update the numbers" (which numbers? to what?)
 - **Completely unclear request**: "do something", "fix it", "handle that"
+- **Ambiguous app/website reference**: "goto ChatGPT" (app or website?), "open Notion" (app or web?), "switch to Slack" (desktop or browser?) - UNLESS screenshot shows which one is available
 
 ✅ **DO NOT ask for clarification if:**
 - **Request is specific and executable**: "Generate Mickey Mouse in ChatGPT", "Create calendar event for dentist next Tuesday at 2pm"
@@ -1992,6 +1993,8 @@ AMBIGUOUS (needs clarification):
 - "Process the document" → Which document? What processing?
 - "Search for AI news and save top 3 articles" → Save WHERE? (important user preference)
 - "Send email to my team" → WHO specifically? (important - affects recipients)
+- "Goto ChatGPT and search for X" (NO screenshot OR screenshot shows neither app nor website) → Ask: "Do you mean the ChatGPT website (chat.openai.com) or the ChatGPT desktop application?"
+- "Switch to Slack" (NO screenshot OR screenshot shows neither) → Ask: "Do you mean the Slack desktop app or Slack in your browser?"
 
 CLEAR (no clarification needed):
 - "Generate Mickey Mouse in ChatGPT" → Clear task, app specified
@@ -1999,9 +2002,11 @@ CLEAR (no clarification needed):
 - "Create calendar event for dentist next Tuesday at 2pm" → Clear task and time
 - "Search Google for Python tutorials" → Clear task, obvious defaults (Google, browser)
 - "Goto perplexity and search for X" → Clear website and search query
-- "Go to chatgpt and ask about Y" → Clear website and query
+- "Go to chatgpt.com and ask about Y" → Clear website URL specified
 - "Navigate to google and lookup Z" → Clear website and search term
 - "Open perplexity and find information about A" → Clear website and topic
+- "Goto ChatGPT and search for X" (WITH screenshot showing ChatGPT website tab) → Can see it's the website, use navigate intent
+- "Switch to Slack" (WITH screenshot showing Slack app in dock) → Can see it's the app, use switch_app intent
 - "Goto my n8n account and setup a new space" (WITH screenshot) → Can see screen state, can access visible apps/accounts
 - "Access my Gmail and send an email" (WITH screenshot) → Can see browser/apps, can navigate to Gmail
 

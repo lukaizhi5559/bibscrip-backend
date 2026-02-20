@@ -12,6 +12,7 @@ import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { logger } from '../utils/logger';
+import { getBestLLMResponse } from '../utils/llmRouter';
 import { 
   IntentType, 
   IntentExecutionRequest, 
@@ -94,16 +95,46 @@ export class IntentExecutionEngine {
       );
       
       if (allSameType) {
-        logger.error(`🔄 Infinite loop detected - same action repeated ${loopThreshold} times`, {
+        logger.warn(`🔄 Infinite loop detected - same action repeated ${loopThreshold} times, requesting clarification`, {
           intentType,
           stepId: stepData.id,
           repeatedAction: lastActions[0].actionType,
           actionHistory: actionHistory.map((a: any) => a.actionType)
         });
         
+        // Build detailed failure context for LLM
+        const failureContext = lastActions
+          .map((a: any, idx: number) => {
+            const status = a.success ? '✓ Success' : '✗ Failed';
+            const error = a.error ? `\n   Error: ${a.error}` : '';
+            const reasoning = a.metadata?.reasoning ? `\n   Reasoning: ${a.metadata.reasoning}` : '';
+            return `${idx + 1}. ${status}: ${a.actionType}${error}${reasoning}`;
+          })
+          .join('\n\n');
+
+        // Ask LLM to generate contextual clarification questions
+        const clarificationQuestions = await this.generateClarificationQuestions(
+          intentType,
+          stepData,
+          failureContext,
+          context
+        );
+
+        // Ensure we always have a valid array
+        const validQuestions = Array.isArray(clarificationQuestions) ? clarificationQuestions : [];
+        
+        if (validQuestions.length === 0) {
+          logger.warn('No clarification questions generated for infinite loop, using fallback', {
+            intentType,
+            stepId: stepData.id,
+          });
+        }
+
         return {
-          status: 'step_failed',
-          error: `Infinite loop detected: ${lastActions[0].actionType} repeated ${loopThreshold} times. LLM is not progressing.`,
+          status: 'clarification_needed',
+          clarificationQuestions: validQuestions,
+          actions: actionHistory, // Include action history for WebSocket handler
+          executionTimeMs: 0,
         };
       }
     }
@@ -162,9 +193,47 @@ export class IntentExecutionEngine {
       const maxAttempts = stepData.maxAttempts || 10;
       const nonEndActions = actionHistory.filter((a: any) => a.actionType !== 'end');
       if (nonEndActions.length >= maxAttempts) {
+        // Instead of failing immediately, ask LLM to generate clarification questions
+        logger.warn('Max attempts reached, requesting LLM-generated clarification', {
+          intentType,
+          stepId: stepData.id,
+          maxAttempts,
+          actionCount: nonEndActions.length,
+        });
+
+        // Build detailed failure context for LLM
+        const failureContext = nonEndActions
+          .map((a: any, idx: number) => {
+            const status = a.success ? '✓ Success' : '✗ Failed';
+            const error = a.error ? `\n   Error: ${a.error}` : '';
+            const reasoning = a.metadata?.reasoning ? `\n   Reasoning: ${a.metadata.reasoning}` : '';
+            return `${idx + 1}. ${status}: ${a.actionType}${error}${reasoning}`;
+          })
+          .join('\n\n');
+
+        // Ask LLM to generate contextual clarification questions
+        const clarificationQuestions = await this.generateClarificationQuestions(
+          intentType,
+          stepData,
+          failureContext,
+          context
+        );
+
+        // Ensure we always have a valid array
+        const validQuestions = Array.isArray(clarificationQuestions) ? clarificationQuestions : [];
+        
+        if (validQuestions.length === 0) {
+          logger.warn('No clarification questions generated for max attempts, using fallback', {
+            intentType,
+            stepId: stepData.id,
+          });
+        }
+
         return {
-          status: 'step_failed',
-          error: `Max attempts (${maxAttempts}) reached`,
+          status: 'clarification_needed',
+          clarificationQuestions: validQuestions,
+          actions: actionHistory, // Include action history for WebSocket handler
+          executionTimeMs: 0,
         };
       }
 
@@ -1362,6 +1431,102 @@ export class IntentExecutionEngine {
     // Most actions are not critical - allow retries
     // Only 'end' is critical in the sense that it signals completion
     return false;
+  }
+
+  /**
+   * Generate contextual clarification questions based on failure patterns
+   */
+  private async generateClarificationQuestions(
+    intentType: string,
+    stepData: any,
+    failureContext: string,
+    context: any
+  ): Promise<ClarificationQuestion[]> {
+    const prompt = `You are analyzing an automation failure. Generate 1-3 specific, actionable clarification questions to help resolve the issue.
+
+**Task that failed:**
+Intent: ${intentType}
+Description: ${stepData.description}
+Target: ${stepData.target || 'N/A'}
+
+**Failure details:**
+${failureContext}
+
+**Context:**
+- Active app: ${context.activeApp || 'unknown'}
+- Active URL: ${context.activeUrl || 'unknown'}
+- OS: ${context.os || 'unknown'}
+
+**Your task:**
+Analyze the failure pattern and generate specific questions that would help resolve the issue. Consider:
+- Is the target ambiguous? (e.g., "ChatGPT" - app or website?)
+- Is the element not visible? (need to scroll, wait, or navigate first?)
+- Is the target name incorrect? (typo, different naming?)
+- Is there a prerequisite step missing? (need to login, open something first?)
+
+**Response format (JSON only):**
+{
+  "questions": [
+    {
+      "id": "q1",
+      "question": "Specific question text here?",
+      "type": "text"
+    }
+  ]
+}
+
+Generate 1-3 questions maximum. Be specific and actionable. Focus on the most likely cause of failure.`;
+
+    try {
+      const response = await getBestLLMResponse(prompt);
+
+      // Validate response exists
+      if (!response || typeof response !== 'string') {
+        throw new Error('Invalid LLM response: empty or not a string');
+      }
+
+      // Parse LLM response
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        throw new Error('No JSON found in LLM response');
+      }
+
+      const parsed = JSON.parse(jsonMatch[0]);
+      
+      // Validate parsed structure
+      if (!parsed || typeof parsed !== 'object') {
+        throw new Error('Parsed response is not an object');
+      }
+
+      // Ensure questions is an array
+      const questions = Array.isArray(parsed.questions) ? parsed.questions : [];
+      
+      // Validate each question has required fields
+      const validQuestions = questions.filter((q: any) => 
+        q && typeof q === 'object' && q.id && q.question && q.type
+      );
+
+      if (validQuestions.length === 0) {
+        throw new Error('No valid questions in LLM response');
+      }
+
+      return validQuestions;
+    } catch (error: any) {
+      logger.error('Failed to generate clarification questions', {
+        error: error.message,
+        intentType,
+        stepId: stepData.id,
+      });
+
+      // Fallback to generic question - always return a valid array
+      return [
+        {
+          id: 'generic_failure',
+          question: `I tried ${stepData.maxAttempts || 3} times to complete "${stepData.description}" but couldn't succeed. What should I do differently?`,
+          type: 'text',
+        },
+      ];
+    }
   }
 }
 
